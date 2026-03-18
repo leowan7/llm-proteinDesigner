@@ -1,0 +1,2 @@
+/* Re-export globals — entry point for Vite CSS pipeline */
+@import "./globals.css";
