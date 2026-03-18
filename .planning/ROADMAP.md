@@ -28,7 +28,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. User can log in and remain logged in across browser refresh without re-authenticating
   3. User can request a password reset and complete it via an email link
   4. PostgreSQL schema (users, jobs tables), Redis, and Cloudflare R2 with per-user key structure are running in the local dev environment via Docker Compose
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+- [ ] 01-01-PLAN.md — Dev environment scaffold (Supabase, Docker Compose, migrations, seed, config)
+- [ ] 01-02-PLAN.md — FastAPI backend auth (endpoints, JWT validation, CSRF, CORS, tests)
+- [ ] 01-03-PLAN.md — Frontend scaffold (Vite + React + shadcn, dark theme, AuthLayout, API client)
+- [ ] 01-04-PLAN.md — Auth screens and end-to-end verification (6 screens, routing, human verification)
 
 ### Phase 2: Agent and Structure Input
 **Goal**: A scientist can describe a protein design goal in natural language, provide a target structure by any supported method, and receive a validated JobSpec ready to dispatch — without touching a config file
@@ -73,7 +78,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/TBD | Not started | - |
+| 1. Foundation | 0/4 | Planning complete | - |
 | 2. Agent and Structure Input | 0/TBD | Not started | - |
 | 3. Job Execution, Frontend, and Billing | 0/TBD | Not started | - |
 | 4. Production Hardening | 0/TBD | Not started | - |
