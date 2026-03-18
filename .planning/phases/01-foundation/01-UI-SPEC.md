@@ -61,17 +61,17 @@ All type uses Inter. Font loaded via Fontsource (`@fontsource/inter`) in the Vit
 | Role | Size | Weight | Line Height | Usage |
 |------|------|--------|-------------|-------|
 | Body | 16px | 400 | 1.5 | Form helper text, descriptive copy, link text |
-| Label | 14px | 500 | 1.4 | Form field labels, secondary nav items, button text |
+| Label | 14px | 600 | 1.4 | Form field labels, secondary nav items, button text |
 | Heading | 20px | 600 | 1.2 | Auth card title ("Create your account", "Sign in", etc.) |
 | Display | 28px | 600 | 1.15 | Page-level heading if a landing wrapper is added in Phase 3 |
 
 **Rules:**
-- Body (16px/400) and Label (14px/500) are the only two weights in Phase 1 — no bold (700) in form UI.
+- Two weights only: 400 (Body) and 600 (Label, Heading, Display). No 500, no 700 in Phase 1 form UI.
 - Heading (20px/600) is used once per screen — the card title only.
 - Error and helper text uses Body size (16px) but rendered in the semantic destructive color.
 - Placeholder text uses Label size (14px) at 40% opacity of the muted foreground token.
 
-Source: Inter defaults + shadcn typography conventions; 2 weights declared per contract rule.
+Source: Inter defaults + shadcn typography conventions; 2 weights declared per contract rule (400 / 600).
 
 ---
 
@@ -240,7 +240,7 @@ No responsive breakpoints defined for Phase 1. Mobile: card fills viewport width
 | Unverified email (login attempt) | "Verify your email before signing in. Check your inbox or resend the link below." |
 | Email already registered (signup) | "An account with this email already exists. Sign in instead." |
 | Reset link expired | "This reset link has expired. Request a new one." |
-| Network / server error (generic) | "Something went wrong. Please try again." |
+| Network / server error (generic) | "Unable to connect. Check your connection and try again." |
 
 ### Empty States
 
