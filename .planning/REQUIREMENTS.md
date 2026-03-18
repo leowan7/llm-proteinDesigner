@@ -91,36 +91,36 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| AUTH-01 | — | Pending |
-| AUTH-02 | — | Pending |
-| AUTH-03 | — | Pending |
-| AUTH-04 | — | Pending |
-| INPUT-01 | — | Pending |
-| INPUT-02 | — | Pending |
-| INPUT-03 | — | Pending |
-| INPUT-04 | — | Pending |
-| INPUT-05 | — | Pending |
-| AGENT-01 | — | Pending |
-| AGENT-02 | — | Pending |
-| AGENT-03 | — | Pending |
-| AGENT-04 | — | Pending |
-| AGENT-05 | — | Pending |
-| JOB-01 | — | Pending |
-| JOB-02 | — | Pending |
-| JOB-03 | — | Pending |
-| RESULT-01 | — | Pending |
-| RESULT-02 | — | Pending |
-| RESULT-03 | — | Pending |
-| BILL-01 | — | Pending |
-| BILL-02 | — | Pending |
-| BILL-03 | — | Pending |
-| BILL-04 | — | Pending |
+| AUTH-01 | Phase 1 | Pending |
+| AUTH-02 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Pending |
+| AUTH-04 | Phase 1 | Pending |
+| INPUT-01 | Phase 2 | Pending |
+| INPUT-02 | Phase 2 | Pending |
+| INPUT-03 | Phase 2 | Pending |
+| INPUT-04 | Phase 2 | Pending |
+| INPUT-05 | Phase 2 | Pending |
+| AGENT-01 | Phase 2 | Pending |
+| AGENT-02 | Phase 2 | Pending |
+| AGENT-03 | Phase 2 | Pending |
+| AGENT-04 | Phase 2 | Pending |
+| AGENT-05 | Phase 2 | Pending |
+| JOB-01 | Phase 3 | Pending |
+| JOB-02 | Phase 3 | Pending |
+| JOB-03 | Phase 3 | Pending |
+| RESULT-01 | Phase 3 | Pending |
+| RESULT-02 | Phase 3 | Pending |
+| RESULT-03 | Phase 3 | Pending |
+| BILL-01 | Phase 3 | Pending |
+| BILL-02 | Phase 3 | Pending |
+| BILL-03 | Phase 3 | Pending |
+| BILL-04 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 24 total
-- Mapped to phases: 0
-- Unmapped: 24 ⚠️ (will be resolved during roadmap creation)
+- Mapped to phases: 24
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-03-18*
-*Last updated: 2026-03-18 after initial definition*
+*Last updated: 2026-03-18 after roadmap creation*
