@@ -9,7 +9,7 @@
 
 - [x] **AUTH-01**: User can create an account with email and password
 - [x] **AUTH-02**: User receives email verification link after signup and must verify before accessing the app
-- [ ] **AUTH-03**: User can reset password via email link
+- [x] **AUTH-03**: User can reset password via email link
 - [x] **AUTH-04**: User session persists across browser refresh
 
 ### Structure Input
@@ -93,7 +93,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | AUTH-01 | Phase 1 | Complete |
 | AUTH-02 | Phase 1 | Complete |
-| AUTH-03 | Phase 1 | Pending |
+| AUTH-03 | Phase 1 | Complete |
 | AUTH-04 | Phase 1 | Complete |
 | INPUT-01 | Phase 2 | Pending |
 | INPUT-02 | Phase 2 | Pending |
