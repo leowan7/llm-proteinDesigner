@@ -78,7 +78,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 2/4 | In Progress|  |
+| 1. Foundation | 3/4 | In Progress|  |
 | 2. Agent and Structure Input | 0/TBD | Not started | - |
 | 3. Job Execution, Frontend, and Billing | 0/TBD | Not started | - |
 | 4. Production Hardening | 0/TBD | Not started | - |
