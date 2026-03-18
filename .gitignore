@@ -1,0 +1,28 @@
+# Environment
+.env.local
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+minio_data/
+
+# Supabase
+supabase/.temp/
