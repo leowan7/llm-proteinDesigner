@@ -64,7 +64,7 @@ Declared values (must be multiples of 4). Source: 8-point scale default; confirm
 
 Exceptions:
 - Chat input touch target minimum: 44px height (accessibility — iOS touch target requirement)
-- Message bubbles: 12px top/bottom padding (non-scale value; preserves chat readability density)
+- Message bubbles: 8px (`sm` token) top/bottom padding (compact density; aligns with standard scale)
 
 ---
 
@@ -88,6 +88,8 @@ Monospace exception: PDB residue identifiers and accession IDs (e.g., `P08887`, 
 ## Color
 
 Source: detected from globals.css dark mode `.dark` block. App renders dark mode by default (confirmed in Phase 1 CONTEXT and shadcn setup). All color values are oklch; approximate hex provided for readability only — use CSS variables in code.
+
+**Color split: 60% dominant / 30% secondary / 10% accent**
 
 | Role | CSS Variable | Dark Mode oklch | Approx Hex | Usage |
 |------|-------------|-----------------|------------|-------|
@@ -129,7 +131,7 @@ Wraps shadcn/ui AI `chat/chat-input` component.
 - **Placeholder text:** `"Describe your design goal, paste a PDB ID, or drop a .pdb / .cif file"`
 - **Drag-drop zone:** Activated when a `.pdb` or `.cif` file is dragged over the input area. Visual cue: border color shifts to `--primary`, text becomes `"Drop PDB file to upload"`. Only one file at a time.
 - **File attachment preview:** After drop, show a pill badge below the input: filename + file size + X to remove. Pill uses `--secondary` background.
-- **Send button:** Icon-only (lucide `SendHorizontal`), `--primary` background, 36px width, right edge of input.
+- **Send button:** Icon-only (lucide `SendHorizontal`), `aria-label="Send message"`, `--primary` background, 36px width, right edge of input.
 - **Disabled state:** Send button disabled and input grayed while agent is processing (SSE stream active).
 
 ### MessageList
