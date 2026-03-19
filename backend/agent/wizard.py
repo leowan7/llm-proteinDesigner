@@ -90,6 +90,31 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
             max_value=95.0,
         ),
     ],
+    "rfantibody": [
+        WizardParam(
+            name="num_designs",
+            label="Number of designs",
+            param_type="int",
+            default=10,
+            description="10 designs balances diversity with GPU cost for CDR loop generation.",
+            min_value=1,
+            max_value=100,
+        ),
+        WizardParam(
+            name="antibody_type",
+            label="Antibody type",
+            param_type="str",
+            default="vhh",
+            description="vhh for single-domain nanobodies; vh_vl for conventional antibody variable domains.",
+        ),
+        WizardParam(
+            name="cdr_loops",
+            label="CDR loops to design",
+            param_type="str",
+            default="H1,H2,H3",
+            description="Comma-separated CDR loops to redesign. H3 is the primary binding determinant.",
+        ),
+    ],
     "boltzgen": [
         WizardParam(
             name="num_samples",

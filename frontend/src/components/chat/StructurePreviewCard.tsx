@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import type { StructureSummary } from "@/lib/agent";
 
 interface StructurePreviewCardProps {
-  data: StructureSummary;
+  data: Partial<StructureSummary> & Record<string, unknown>;
   onUseDifferent?: () => void;
 }
 
@@ -20,24 +20,23 @@ interface StructurePreviewCardProps {
  * Returns "N/A (NMR)" for null resolution (NMR structures report no single
  * resolution value), or "X.XX Å" for crystallographic/EM structures.
  */
-function formatResolution(resolution: number | null, method: string): string {
-  if (resolution === null) {
-    return method.toUpperCase().includes("NMR") ? "N/A (NMR)" : "N/A";
+function formatResolution(resolution: number | null | undefined, method: string | undefined): string {
+  if (resolution === null || resolution === undefined) {
+    return method?.toUpperCase().includes("NMR") ? "N/A (NMR)" : "N/A";
   }
   return `${resolution.toFixed(2)} Å`;
 }
 
 export function StructurePreviewCard({ data, onUseDifferent }: StructurePreviewCardProps) {
-  const {
-    pdb_id,
-    protein_name,
-    resolution,
-    method,
-    chain_count,
-    selected_chain,
-    residue_count,
-    normalization_changes,
-  } = data;
+  // Data may come from raw tool results with missing fields — default everything
+  const pdb_id = data.pdb_id ?? (data as Record<string, unknown>).pdb_id as string ?? "Unknown";
+  const protein_name = data.protein_name ?? "Unknown protein";
+  const resolution = data.resolution ?? null;
+  const method = data.method ?? "";
+  const chain_count = data.chain_count ?? 0;
+  const selected_chain = data.selected_chain ?? "—";
+  const residue_count = data.residue_count ?? 0;
+  const normalization_changes = data.normalization_changes ?? [];
 
   return (
     <Card className="my-2 border-border/50">

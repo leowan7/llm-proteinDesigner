@@ -10,7 +10,18 @@
  * need to POST a JSON body. EventSource only supports GET requests.
  */
 
+import { api } from "./api";
+
 const API_BASE = "http://localhost:8000";
+
+/**
+ * Reads the csrftoken cookie value from document.cookie.
+ * Returns empty string if no CSRF token cookie is present.
+ */
+function getCsrfToken(): string {
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]*)/);
+  return match ? decodeURIComponent(match[1]) : "";
+}
 
 /** SSE event types from the agent endpoint */
 export type AgentEvent =
@@ -88,13 +99,10 @@ export interface ActionButton {
  * @returns The session_id string for use in subsequent messages.
  */
 export async function createSession(): Promise<string> {
-  const response = await fetch(`${API_BASE}/agent/session`, {
+  const data = await api<{ session_id: string }>("/agent/session", {
     method: "POST",
-    credentials: "include",
   });
-  if (!response.ok) throw new Error("Failed to create session");
-  const data = await response.json();
-  return data.session_id as string;
+  return data.session_id;
 }
 
 /**
@@ -103,10 +111,7 @@ export async function createSession(): Promise<string> {
  * @param sessionId - The session to delete.
  */
 export async function deleteSession(sessionId: string): Promise<void> {
-  await fetch(`${API_BASE}/agent/session/${sessionId}`, {
-    method: "DELETE",
-    credentials: "include",
-  });
+  await api(`/agent/session/${sessionId}`, { method: "DELETE" });
 }
 
 /**
@@ -120,10 +125,14 @@ export async function uploadPdbFile(
 ): Promise<{ normalized_path: string; changes: string[] }> {
   const formData = new FormData();
   formData.append("file", file);
+  const csrf = getCsrfToken();
+  const headers: Record<string, string> = {};
+  if (csrf) headers["x-csrftoken"] = csrf;
   const response = await fetch(`${API_BASE}/pdb/upload`, {
     method: "POST",
     body: formData,
     credentials: "include",
+    headers,
   });
   if (!response.ok) {
     const err = await response.json().catch(() => ({ detail: "Upload failed" }));
@@ -147,9 +156,12 @@ export async function sendMessage(
   message: string,
   onEvent: (event: AgentEvent) => void,
 ): Promise<void> {
+  const csrf = getCsrfToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (csrf) headers["x-csrftoken"] = csrf;
   const response = await fetch(`${API_BASE}/agent/message`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ session_id: sessionId, message }),
     credentials: "include",
   });

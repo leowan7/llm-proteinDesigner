@@ -116,8 +116,9 @@ export function AgentMessage({
             {actions.slice(0, 4).map((action, i) => (
               <Button
                 key={i}
-                variant="outline"
+                variant="secondary"
                 size="sm"
+                className="border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
                 onClick={() => onAction?.(action.value)}
               >
                 {action.label}

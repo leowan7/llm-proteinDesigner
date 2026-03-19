@@ -162,7 +162,7 @@ export function ChatPage() {
     if (toolName === "resolve_structure") {
       // Save for ReviewData assembly later (pdb_id used as target_pdb_id)
       structureResultRef.current = result;
-      return { type: "structure_preview", data: result as ChatCard["data"] & object } as ChatCard;
+      return { type: "structure_preview", data: result } as ChatCard;
     }
 
     if (toolName === "classify_intent") {

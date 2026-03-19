@@ -38,23 +38,29 @@ TOOL_DEFINITIONS = [
     {
         "name": "classify_intent",
         "description": (
-            "Classify the user's protein design intent into one of three categories: "
-            "binder_design (designing a protein that binds a target), "
-            "de_novo_backbone (designing a new protein backbone from scratch), or "
-            "motif_scaffolding (embedding a functional motif into a new scaffold). "
-            "Also recommend the appropriate computational tool. "
-            "Use after the target structure is resolved and the user has described their goal."
+            "Classify the user's protein design intent and recommend the appropriate tool. "
+            "Design types: minibinder (small de novo binder), vhh_nanobody (single-domain antibody-like), "
+            "de_novo_backbone (new fold without binding target), motif_scaffolding (embed motif in new scaffold), "
+            "conformational_ensemble (sample conformational landscape), structure_prediction (predict/validate 3D structure). "
+            "Use AFTER asking the user what type of protein they want to design and receiving their answer."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "design_type": {
                     "type": "string",
-                    "enum": ["binder_design", "de_novo_backbone", "motif_scaffolding"],
+                    "enum": [
+                        "minibinder",
+                        "vhh_nanobody",
+                        "de_novo_backbone",
+                        "motif_scaffolding",
+                        "conformational_ensemble",
+                        "structure_prediction",
+                    ],
                 },
                 "recommended_tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
                 },
                 "rationale": {
                     "type": "string",
@@ -76,7 +82,7 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
                 },
                 "target_chain": {
                     "type": "string",
@@ -119,7 +125,7 @@ TOOL_DEFINITIONS = [
                 },
                 "tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
                 },
                 "parameters": {
                     "type": "object",

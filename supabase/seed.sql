@@ -13,7 +13,18 @@ INSERT INTO auth.users (
     created_at,
     updated_at,
     aud,
-    role
+    role,
+    confirmation_token,
+    recovery_token,
+    email_change_token_new,
+    email_change,
+    email_change_token_current,
+    phone,
+    phone_change,
+    phone_change_token,
+    reauthentication_token,
+    raw_app_meta_data,
+    raw_user_meta_data
 ) VALUES (
     '00000000-0000-0000-0000-000000000001',
     '00000000-0000-0000-0000-000000000000',
@@ -23,7 +34,18 @@ INSERT INTO auth.users (
     NOW(),
     NOW(),
     'authenticated',
-    'authenticated'
+    'authenticated',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '{"provider": "email", "providers": ["email"]}',
+    '{}'
 ) ON CONFLICT (id) DO NOTHING;
 
 -- Mirror in public.users (required by FK on jobs table)
