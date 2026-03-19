@@ -60,10 +60,6 @@ app.include_router(agent_router)
 from billing.router import router as billing_router
 app.include_router(billing_router)
 
-# Job execution pipeline router (Plan 03-03)
-from webhooks.router import router as webhooks_router  # noqa: E402
-app.include_router(webhooks_router)
-
 
 @app.get("/health")
 async def health():
