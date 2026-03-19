@@ -1,0 +1,171 @@
+/**
+ * AgentMessage — left-aligned chat bubble for agent responses.
+ *
+ * Renders markdown content (bold, inline code, bullet lists) using a lightweight
+ * regex-based approach — no external markdown library required for the limited
+ * subset used in agent responses.
+ *
+ * Below the text, optionally renders:
+ * - Action buttons (outline variant, max 4) for confirmation steps
+ * - Inline structured cards (StructurePreviewCard, ReviewCard, ValidationCard)
+ */
+
+import { Button } from "@/components/ui/button";
+import { StructurePreviewCard } from "./StructurePreviewCard";
+import { ReviewCard } from "./ReviewCard";
+import { ValidationCard } from "./ValidationCard";
+import type { ChatCard, ActionButton } from "@/lib/agent";
+
+interface AgentMessageProps {
+  content: string;
+  cards?: ChatCard[];
+  actions?: ActionButton[];
+  onAction?: (value: string) => void;
+  onLaunchJob?: () => void;
+  onEditParams?: () => void;
+  onAcknowledgeWarnings?: () => void;
+  onUseDifferentStructure?: () => void;
+  warningsAcknowledged?: boolean;
+  isValidating?: boolean;
+}
+
+/**
+ * Converts a limited subset of markdown to React elements.
+ *
+ * Supported:
+ * - **bold** → <strong>
+ * - `inline code` → <code>
+ * - Lines starting with "- " → unordered list items
+ *
+ * All other content is rendered as plain text paragraphs.
+ */
+function renderMarkdown(text: string): React.ReactNode {
+  // Split into paragraphs / blocks by double newlines
+  const blocks = text.split(/\n\n+/);
+
+  return blocks.map((block, blockIndex) => {
+    const lines = block.split("\n");
+    const isListBlock = lines.every((l) => l.trimStart().startsWith("- ") || l.trim() === "");
+
+    if (isListBlock) {
+      const listItems = lines.filter((l) => l.trimStart().startsWith("- "));
+      return (
+        <ul key={blockIndex} className="list-disc ml-4 space-y-1 my-1">
+          {listItems.map((item, i) => (
+            <li key={i}>{renderInline(item.replace(/^\s*-\s+/, ""))}</li>
+          ))}
+        </ul>
+      );
+    }
+
+    return (
+      <p key={blockIndex} className="leading-relaxed">
+        {renderInline(block)}
+      </p>
+    );
+  });
+}
+
+/**
+ * Renders inline markdown tokens (**bold** and `code`) within a text string.
+ * Returns an array of React nodes with the appropriate elements.
+ */
+function renderInline(text: string): React.ReactNode[] {
+  // Pattern matches **bold** or `code` segments
+  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return <strong key={i}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return (
+        <code key={i} className="font-mono text-sm bg-muted px-1 py-0.5 rounded">
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
+export function AgentMessage({
+  content,
+  cards,
+  actions,
+  onAction,
+  onLaunchJob,
+  onEditParams,
+  onAcknowledgeWarnings,
+  onUseDifferentStructure,
+  warningsAcknowledged = false,
+  isValidating = false,
+}: AgentMessageProps) {
+  return (
+    <div className="flex justify-start px-4 py-1">
+      <div className="max-w-[85%] w-full">
+        {/* Message bubble */}
+        {content && (
+          <div className="rounded-2xl rounded-tl-sm bg-card ring-1 ring-foreground/10 px-4 py-3 text-base text-foreground space-y-2">
+            {renderMarkdown(content)}
+          </div>
+        )}
+
+        {/* Action buttons — confirmation choices from the agent */}
+        {actions && actions.length > 0 && (
+          <div className="flex flex-wrap gap-2 mt-2">
+            {actions.slice(0, 4).map((action, i) => (
+              <Button
+                key={i}
+                variant="outline"
+                size="sm"
+                onClick={() => onAction?.(action.value)}
+              >
+                {action.label}
+              </Button>
+            ))}
+          </div>
+        )}
+
+        {/* Inline structured cards */}
+        {cards && cards.length > 0 && (
+          <div className="mt-2 space-y-2">
+            {cards.map((card, i) => {
+              if (card.type === "structure_preview") {
+                return (
+                  <StructurePreviewCard
+                    key={i}
+                    data={card.data}
+                    onUseDifferent={onUseDifferentStructure}
+                  />
+                );
+              }
+              if (card.type === "validation") {
+                return (
+                  <ValidationCard
+                    key={i}
+                    data={card.data}
+                    onAcknowledge={() => onAcknowledgeWarnings?.()}
+                    acknowledged={warningsAcknowledged}
+                  />
+                );
+              }
+              if (card.type === "review") {
+                return (
+                  <ReviewCard
+                    key={i}
+                    data={card.data}
+                    onLaunch={() => onLaunchJob?.()}
+                    onEdit={() => onEditParams?.()}
+                    disabled={isValidating}
+                    warningsAcknowledged={warningsAcknowledged}
+                  />
+                );
+              }
+              return null;
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

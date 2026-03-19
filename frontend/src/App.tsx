@@ -6,6 +6,7 @@ import { VerifyEmail } from "./pages/VerifyEmail";
 import { EmailConfirmed } from "./pages/EmailConfirmed";
 import { ResetPassword } from "./pages/ResetPassword";
 import { ResetPasswordConfirm } from "./pages/ResetPasswordConfirm";
+import { ChatPage } from "./components/chat/ChatPage";
 
 /**
  * Detects Supabase auth redirects with tokens in the URL hash fragment
@@ -55,14 +56,7 @@ function App() {
           <Route path="/email-confirmed" element={<EmailConfirmed />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/reset-password/confirm" element={<ResetPasswordConfirm />} />
-          <Route
-            path="/"
-            element={
-              <div className="flex items-center justify-center min-h-screen">
-                <p className="text-muted-foreground">LLM Protein Designer -- Logged in</p>
-              </div>
-            }
-          />
+          <Route path="/" element={<ChatPage />} />
         </Routes>
       </div>
     </BrowserRouter>
