@@ -21,3 +21,39 @@ def get_s3_client():
         config=Config(signature_version="s3v4"),
         region_name="auto",
     )
+
+
+def generate_presigned_put_url(key: str, expires_in: int = 3600) -> str:
+    """Presigned PUT URL for direct container upload to R2/MinIO.
+
+    Args:
+        key: S3 object key (path within the bucket).
+        expires_in: URL expiry in seconds. Default 1 hour.
+
+    Returns:
+        Presigned URL string that allows a PUT request without credentials.
+    """
+    client = get_s3_client()
+    return client.generate_presigned_url(
+        "put_object",
+        Params={"Bucket": settings.s3_bucket_name, "Key": key},
+        ExpiresIn=expires_in,
+    )
+
+
+def generate_presigned_get_url(key: str, expires_in: int = 3600) -> str:
+    """Presigned GET URL for download from R2/MinIO.
+
+    Args:
+        key: S3 object key (path within the bucket).
+        expires_in: URL expiry in seconds. Default 1 hour.
+
+    Returns:
+        Presigned URL string that allows a GET request without credentials.
+    """
+    client = get_s3_client()
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.s3_bucket_name, "Key": key},
+        ExpiresIn=expires_in,
+    )

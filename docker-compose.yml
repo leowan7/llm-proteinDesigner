@@ -29,5 +29,16 @@ services:
     volumes:
       - minio_data:/data
 
+  worker:
+    build: ./backend
+    env_file:
+      - .env.local
+    depends_on:
+      - redis
+      - minio
+    volumes:
+      - ./backend:/app
+    command: arq worker.main.WorkerSettings
+
 volumes:
   minio_data:

@@ -1,0 +1,13 @@
+{
+  "pythonVersion": "3.13",
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonPlatform": "All",
+  "typeCheckingMode": "off",
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none",
+  "reportMissingModuleAttribute": "none",
+  "exclude": [
+    "**/__pycache__"
+  ]
+}
