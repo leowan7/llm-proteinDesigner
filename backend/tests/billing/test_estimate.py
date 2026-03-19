@@ -38,3 +38,14 @@ class TestCostEstimation:
             f"100-design estimate ({batch_high}) should exceed "
             f"1-design estimate ({single_high})"
         )
+
+    def test_estimate_all_tools_have_ranges(self):
+        """Verify all four supported tools return valid (low, high) cost ranges.
+        Each tool must return positive values with low <= high.
+        """
+        for tool in ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"]:
+            low, high = estimate_cost_range(tool)
+            assert low > 0, f"Tool '{tool}': low estimate should be positive, got {low}"
+            assert high >= low, (
+                f"Tool '{tool}': high ({high}) should be >= low ({low})"
+            )

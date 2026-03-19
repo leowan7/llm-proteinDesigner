@@ -7,7 +7,9 @@ Covers:
 Implementation target: Plan 03-02.
 """
 
-import pytest
+from unittest.mock import patch, MagicMock
+
+from billing.stripe_client import check_payment_method
 
 
 class TestPaymentGate:
@@ -17,16 +19,18 @@ class TestPaymentGate:
         """Mock stripe.Customer.retrieve to return a customer object with
         invoice_settings.default_payment_method set to a non-None value.
         Verify check_payment_method returns True.
-
-        Stub — implementation in Plan 03-02.
         """
-        pytest.skip("STUB -- implementation in Plan 03-02")
+        mock_customer = MagicMock()
+        mock_customer.invoice_settings.default_payment_method = "pm_xxx"
+        with patch("billing.stripe_client.stripe.Customer.retrieve", return_value=mock_customer):
+            assert check_payment_method("cus_123") is True
 
     def test_check_payment_method_false(self):
         """Mock stripe.Customer.retrieve to return a customer object with
         invoice_settings.default_payment_method set to None or empty.
         Verify check_payment_method returns False.
-
-        Stub — implementation in Plan 03-02.
         """
-        pytest.skip("STUB -- implementation in Plan 03-02")
+        mock_customer = MagicMock()
+        mock_customer.invoice_settings.default_payment_method = None
+        with patch("billing.stripe_client.stripe.Customer.retrieve", return_value=mock_customer):
+            assert check_payment_method("cus_123") is False
