@@ -50,6 +50,16 @@ if not settings.testing:
 # Routers
 app.include_router(auth_router)
 
+# PDB pipeline router (Plan 02-02 — guarded in case it runs after this plan)
+try:
+    from pdb_utils.router import router as pdb_router
+    app.include_router(pdb_router)
+except ImportError:
+    pass  # pdb_utils.router not yet created (Plan 02-02)
+
+from agent.router import router as agent_router
+app.include_router(agent_router)
+
 
 @app.get("/health")
 async def health():
