@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-03-19T18:56:37.289Z"
+stopped_at: Completed 03-04-PLAN.md
+last_updated: "2026-03-19T19:02:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 03 (job-execution-frontend-and-billing) — EXECUTING
-Plan: 2 of 5
+Plan: 4 of 5
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Plan: 2 of 5
 | Phase 03-job-execution-frontend-and-billing P01 | 15min | 3 tasks | 18 files |
 | Phase 03 P02 | 8 | 2 tasks | 5 files |
 | Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
+| Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -96,6 +97,9 @@ Recent decisions affecting current work:
 - [Phase 03]: Estimate endpoint is unauthenticated (informational); all payment-mutating endpoints require get_current_user
 - [Phase 03-job-execution-frontend-and-billing]: FastAPI Depends() requires app.dependency_overrides for test mocking — unittest.mock.patch does not intercept dependency injection
 - [Phase 03-job-execution-frontend-and-billing]: Router and worker DB pool mocks must be separate objects — shared side_effect iterators are consumed by both callers causing StopIteration
+- [Phase 03-job-execution-frontend-and-billing]: SSE subscription uses AbortController.abort() for cleanup on unmount — avoids leaked streams when user navigates away from JobPage
+- [Phase 03-job-execution-frontend-and-billing]: BindCraftZeroOutputCard uses no destructive colors — zero-output is expected BindCraft behavior, not failure; distinct from JobFailureCard
+- [Phase 03-job-execution-frontend-and-billing]: JobPage re-fetches full job on terminal SSE event — ensures candidates and billing data are present when rendering results section
 
 ### Pending Todos
 
