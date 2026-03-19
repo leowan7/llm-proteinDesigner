@@ -49,6 +49,30 @@ class Settings(BaseSettings):
     agent_max_tokens: int = 2048
     agent_session_ttl_seconds: int = 3600  # Redis session TTL: 1 hour
 
+    # Stripe
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_meter_event_name: str = "gpu_seconds"
+
+    # RunPod
+    runpod_api_key: str = ""
+    runpod_webhook_secret: str = ""
+    runpod_endpoint_rfdiffusion: str = ""
+    runpod_endpoint_rfantibody: str = ""
+    runpod_endpoint_bindcraft: str = ""
+    runpod_endpoint_boltzgen: str = ""
+
+    # Resend (for job notifications)
+    resend_api_key: str = ""
+    resend_from_email: str = "Kendrew.AI <jobs@kendrew.ai>"
+
+    # App base URL (used in email links and Stripe return URLs)
+    app_base_url: str = "http://localhost:8000"
+
+    # GPU pricing (dollars per second on A100 80GB)
+    gpu_price_per_second: float = 0.0012
+    gpu_markup_percent: float = 30.0
+
     class Config:
         env_file = ".env.local"
         env_file_encoding = "utf-8"
