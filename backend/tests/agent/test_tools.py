@@ -18,22 +18,26 @@ class TestIntentClassification:
     """AGENT-01: Agent classifies user's design intent."""
 
     def test_classify_intent_returns_valid_type(self):
-        """classify_intent tool schema includes all 3 design_type enum values."""
+        """classify_intent tool schema includes all design_type enum values."""
         tool = _get_tool("classify_intent")
         design_type_enum = tool["input_schema"]["properties"]["design_type"]["enum"]
-        assert "binder_design" in design_type_enum
+        assert "minibinder" in design_type_enum
+        assert "vhh_nanobody" in design_type_enum
         assert "de_novo_backbone" in design_type_enum
         assert "motif_scaffolding" in design_type_enum
-        assert len(design_type_enum) == 3
+        assert "conformational_ensemble" in design_type_enum
+        assert "structure_prediction" in design_type_enum
+        assert len(design_type_enum) == 6
 
     def test_classify_intent_includes_tool_recommendation(self):
-        """classify_intent tool schema includes all 3 recommended_tool enum values."""
+        """classify_intent tool schema includes all 4 recommended_tool enum values."""
         tool = _get_tool("classify_intent")
         tool_enum = tool["input_schema"]["properties"]["recommended_tool"]["enum"]
         assert "rfdiffusion" in tool_enum
+        assert "rfantibody" in tool_enum
         assert "bindcraft" in tool_enum
         assert "boltzgen" in tool_enum
-        assert len(tool_enum) == 3
+        assert len(tool_enum) == 4
 
 
 class TestToolRecommendation:
