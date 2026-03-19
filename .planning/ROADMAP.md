@@ -13,7 +13,7 @@ Four phases build the platform from the ground up: Phase 1 establishes the authe
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [ ] **Phase 1: Foundation** - PostgreSQL schema, object storage, authentication, and dev environment
-- [ ] **Phase 2: Agent and Structure Input** - Claude wizard, PDB ingest pipeline, pre-flight validation, and GPU provider abstraction
+- [x] **Phase 2: Agent and Structure Input** - Claude wizard, PDB ingest pipeline, pre-flight validation, and GPU provider abstraction (completed 2026-03-19)
 - [ ] **Phase 3: Job Execution, Frontend, and Billing** - Async job dispatch, SSE monitoring, results delivery, frontend, and Stripe billing
 - [ ] **Phase 4: Production Hardening** - RunPod provider, chaos testing, billing reconciliation, and pre-launch validation
 
@@ -85,6 +85,6 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 3/4 | In Progress|  |
-| 2. Agent and Structure Input | 4/5 | In Progress|  |
+| 2. Agent and Structure Input | 5/5 | Complete   | 2026-03-19 |
 | 3. Job Execution, Frontend, and Billing | 0/TBD | Not started | - |
 | 4. Production Hardening | 0/TBD | Not started | - |

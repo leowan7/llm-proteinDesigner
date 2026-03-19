@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-04-PLAN.md
-last_updated: "2026-03-19T13:00:16.465Z"
+stopped_at: Completed 02-05-PLAN.md
+last_updated: "2026-03-19T14:00:00.000Z"
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 9
-  completed_plans: 8
+  completed_plans: 9
 ---
 
 # Project State
@@ -23,8 +23,8 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 
 ## Current Position
 
-Phase: 02 (agent-and-structure-input) — EXECUTING
-Plan: 3 of 5
+Phase: 02 (agent-and-structure-input) — COMPLETE
+Plan: 5 of 5
 
 ## Performance Metrics
 
@@ -83,6 +83,9 @@ Recent decisions affecting current work:
 - [Phase 02-agent-and-structure-input]: shadcn AI chat components unavailable for base-nova style via CLI — created manual equivalents (MessageList wraps ScrollArea, ChatInput wraps Textarea with drag handlers)
 - [Phase 02-agent-and-structure-input]: SSE client uses fetch + ReadableStream (not EventSource) — EventSource is GET-only, agent endpoint requires POST body with session_id and message
 - [Phase 02-agent-and-structure-input]: Inline markdown renderer is regex-based (no library) — agent responses use only bold, inline code, and bullets; full parser not warranted
+- [Phase 02-agent-and-structure-input]: CSRF token read from csrftoken cookie and sent as X-CSRFToken header in all POST requests from SSE agent client — CSRFMiddleware blocks unauthenticated state-changing requests
+- [Phase 02-agent-and-structure-input]: RFantibody added as fourth tool option alongside RFdiffusion, BindCraft, BoltzGen — accurate representation of Ranomics production toolset; system prompt grounded in published tool capabilities
+- [Phase 02-agent-and-structure-input]: StructurePreviewCard renders defensively with optional chaining on all fields — agent streams tool results incrementally, cards must handle partial data without crashing
 
 ### Pending Todos
 
@@ -96,6 +99,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-19T13:00:16.462Z
-Stopped at: Completed 02-04-PLAN.md
+Last session: 2026-03-19T14:00:00.000Z
+Stopped at: Completed 02-05-PLAN.md
 Resume file: None
