@@ -27,6 +27,10 @@ export function AuthLayout({ title, subtitle, footer, children }: AuthLayoutProp
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
       <Card className="w-full max-w-[400px]">
         <CardHeader className="space-y-2 p-6">
+          <div className="flex items-center gap-2.5 mb-2">
+            <img src="/logo.svg" alt="Kendrew.AI" className="size-7" />
+            <span className="text-lg font-semibold text-foreground">Kendrew<span className="text-primary">.AI</span></span>
+          </div>
           <h1 className="text-xl font-semibold leading-[1.2] tracking-tight">
             {title}
           </h1>

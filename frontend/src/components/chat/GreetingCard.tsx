@@ -12,12 +12,15 @@ export function GreetingCard() {
     <div className="flex justify-center px-4 py-6">
       <Card className="w-full max-w-2xl bg-card border-border/50">
         <CardContent className="px-6 py-6 text-center">
+          <div className="flex justify-center mb-4">
+            <img src="/logo.svg" alt="Kendrew.AI" className="size-10" />
+          </div>
           <h2 className="text-xl font-semibold text-foreground mb-3">
             What are you designing today?
           </h2>
           <p className="text-base text-muted-foreground leading-relaxed">
-            Describe your target protein, paste a PDB or UniProt accession, or drag in a .pdb
-            file. I'll identify the right tool and guide you through the parameters.
+            Describe your target protein, paste a PDB or UniProt accession, or drag in a
+            .pdb file. I'll identify the right tool and guide you through the parameters.
           </p>
         </CardContent>
       </Card>

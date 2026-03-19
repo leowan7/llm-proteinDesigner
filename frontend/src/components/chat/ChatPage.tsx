@@ -421,7 +421,10 @@ export function ChatPage() {
     <div className="flex flex-col h-screen bg-background">
       {/* Header */}
       <header className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
-        <h1 className="text-xl font-semibold text-foreground">Protein Designer</h1>
+        <div className="flex items-center gap-2.5">
+          <img src="/logo.svg" alt="Kendrew.AI" className="size-7" />
+          <h1 className="text-xl font-semibold text-foreground">Kendrew<span className="text-primary">.AI</span></h1>
+        </div>
         <div className="flex items-center gap-2">
           {/* Mobile: context panel sheet trigger */}
           <Sheet>
