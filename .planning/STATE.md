@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-03-19T18:42:03.335Z"
+stopped_at: Completed 03-03-PLAN.md
+last_updated: "2026-03-19T18:56:37.289Z"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State
@@ -55,6 +55,7 @@ Plan: 2 of 5
 | Phase 02-agent-and-structure-input P04 | 6min | 2 tasks | 18 files |
 | Phase 03-job-execution-frontend-and-billing P01 | 15min | 3 tasks | 18 files |
 | Phase 03 P02 | 8 | 2 tasks | 5 files |
+| Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,8 @@ Recent decisions affecting current work:
 - [Phase 03-job-execution-frontend-and-billing]: estimate_cost_range scales by max(1, num_designs/10) — batch sizes up to 10 run concurrently; beyond 10 cost scales linearly
 - [Phase 03]: Billing router uses _resolve_stripe_customer helper to avoid duplicating pool acquisition and email lookup across 3 auth-protected endpoints
 - [Phase 03]: Estimate endpoint is unauthenticated (informational); all payment-mutating endpoints require get_current_user
+- [Phase 03-job-execution-frontend-and-billing]: FastAPI Depends() requires app.dependency_overrides for test mocking — unittest.mock.patch does not intercept dependency injection
+- [Phase 03-job-execution-frontend-and-billing]: Router and worker DB pool mocks must be separate objects — shared side_effect iterators are consumed by both callers causing StopIteration
 
 ### Pending Todos
 
@@ -106,6 +109,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-19T18:42:03.331Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-03-19T18:56:37.286Z
+Stopped at: Completed 03-03-PLAN.md
 Resume file: None
