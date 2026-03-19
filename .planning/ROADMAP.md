@@ -45,7 +45,13 @@ Plans:
   3. Agent classifies the user's design intent, recommends the correct tool (RFdiffusion, BindCraft, or Boltzgen) with a plain-language rationale, and requires explicit user confirmation before proceeding
   4. Agent guides the user through a wizard that collects all required parameters; user sees a plain-language summary of what the agent understood before confirming
   5. Agent surfaces pre-flight validation warnings (PDB quality, hotspot feasibility, parameter sanity) and requires user acknowledgment before allowing dispatch to proceed
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 02-01-PLAN.md — Type contracts, DB migration, config, and test scaffolds
+- [ ] 02-02-PLAN.md — PDB pipeline backend (fetch, normalize, validate, router)
+- [ ] 02-03-PLAN.md — Agent backend (tools, session, SSE router, system prompt)
+- [ ] 02-04-PLAN.md — Frontend chat UI (ChatPage, components, agent API client)
+- [ ] 02-05-PLAN.md — Integration wiring and end-to-end verification
 
 ### Phase 3: Job Execution, Frontend, and Billing
 **Goal**: A scientist can launch a validated job, watch its status in real time, download ranked PDB structures and a design report, and be charged accurately for GPU compute consumed
@@ -74,11 +80,11 @@ Plans:
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Foundation | 3/4 | In Progress|  |
-| 2. Agent and Structure Input | 0/TBD | Not started | - |
+| 2. Agent and Structure Input | 0/5 | Not started | - |
 | 3. Job Execution, Frontend, and Billing | 0/TBD | Not started | - |
 | 4. Production Hardening | 0/TBD | Not started | - |
