@@ -34,7 +34,7 @@ import {
   uploadPdbFile,
   sendMessage,
 } from "@/lib/agent";
-import type { ChatMessage, ChatCard, AgentEvent } from "@/lib/agent";
+import type { ChatMessage, ChatCard, AgentEvent, ActionButton, ReviewData } from "@/lib/agent";
 
 /** Generate a unique message ID */
 function newId(): string {
@@ -52,6 +52,26 @@ export function ChatPage() {
 
   // Tracks the in-progress assistant message id during streaming
   const currentAssistantIdRef = useRef<string | null>(null);
+
+  // Accumulated context from tool results, used to assemble ReviewData across turns.
+  // classify_intent result: saved so ReviewData can include design_goal and rationale.
+  const intentResultRef = useRef<{
+    design_type: string;
+    recommended_tool: string;
+    rationale: string;
+  } | null>(null);
+
+  // resolve_structure result: saved so ReviewData can reference the resolved PDB id.
+  const structureResultRef = useRef<Record<string, unknown> | null>(null);
+
+  // collect_parameters result: saved so validate_preflight can assemble the full review card.
+  const parametersResultRef = useRef<{
+    tool: string;
+    target_chain: string;
+    hotspot_residues: number[];
+    parameters: Record<string, unknown>;
+    parameter_descriptions: Record<string, { label: string; description: string; default: unknown }>;
+  } | null>(null);
 
   /** Initialize a new session on mount */
   useEffect(() => {
@@ -84,7 +104,7 @@ export function ChatPage() {
         ),
       );
     } else if (event.type === "tool_result") {
-      // Build a ChatCard from the tool result
+      // Build a ChatCard from the tool result (may also emit review card via setTimeout)
       const card = buildCard(event.tool_name, event.result);
       if (card) {
         setLastCard(card);
@@ -92,6 +112,18 @@ export function ChatPage() {
           prev.map((msg) =>
             msg.id === assistantId
               ? { ...msg, cards: [...(msg.cards ?? []), card] }
+              : msg,
+          ),
+        );
+      }
+
+      // Build action buttons (classify_intent yields tool confirmation buttons)
+      const actions = buildActions(event.tool_name, event.result);
+      if (actions.length > 0) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantId
+              ? { ...msg, actions: [...(msg.actions ?? []), ...actions] }
               : msg,
           ),
         );
@@ -116,22 +148,126 @@ export function ChatPage() {
 
   /**
    * Build a ChatCard from a tool_result SSE event.
-   * Returns null for tool results that don't map to a card.
+   *
+   * Returns null for tool results that produce action buttons instead of
+   * structured cards (classify_intent), or that have no visual card output.
+   *
+   * Side effects: updates intentResultRef, structureResultRef, and
+   * parametersResultRef to accumulate data needed for the ReviewCard.
    */
   function buildCard(
     toolName: string,
     result: Record<string, unknown>,
   ): ChatCard | null {
     if (toolName === "resolve_structure") {
+      // Save for ReviewData assembly later (pdb_id used as target_pdb_id)
+      structureResultRef.current = result;
       return { type: "structure_preview", data: result as ChatCard["data"] & object } as ChatCard;
     }
+
+    if (toolName === "classify_intent") {
+      // Save intent for ReviewData assembly -- no card returned here;
+      // action buttons are added to the assistant message by buildActions().
+      intentResultRef.current = {
+        design_type: result.design_type as string,
+        recommended_tool: result.recommended_tool as string,
+        rationale: result.rationale as string,
+      };
+      return null;
+    }
+
+    if (toolName === "collect_parameters") {
+      // Save parameters for ReviewData assembly when validate_preflight fires.
+      parametersResultRef.current = {
+        tool: result.tool as string,
+        target_chain: result.target_chain as string,
+        hotspot_residues: (result.hotspot_residues as number[]) ?? [],
+        parameters: (result.parameters as Record<string, unknown>) ?? {},
+        parameter_descriptions: (result.parameter_descriptions as Record<
+          string,
+          { label: string; description: string; default: unknown }
+        >) ?? {},
+      };
+      // No card at this stage; the ReviewCard assembles after validation.
+      return null;
+    }
+
     if (toolName === "validate_preflight") {
-      return { type: "validation", data: result as ChatCard["data"] & object } as ChatCard;
+      // Emit a ValidationCard for immediate feedback
+      const validationCard: ChatCard = {
+        type: "validation",
+        data: result as ChatCard["data"] & object,
+      };
+
+      // Also assemble the full ReviewCard from accumulated tool results.
+      // This is a best-effort assembly: fields default to empty strings if
+      // the earlier tools did not fire (e.g. user uploaded a file instead of
+      // typing a protein name, so resolve_structure may not have run).
+      if (parametersResultRef.current) {
+        const params = parametersResultRef.current;
+        const intent = intentResultRef.current;
+        const structure = structureResultRef.current;
+
+        const reviewData: ReviewData = {
+          design_goal: intent?.design_type
+            ? `${intent.design_type.replace(/_/g, " ")} — ${params.tool}`
+            : `Design job using ${params.tool}`,
+          tool: params.tool,
+          rationale: intent?.rationale ?? "",
+          target_pdb_id:
+            (structure?.pdb_id as string) ??
+            (structure?.uniprot_accession as string) ??
+            "unknown",
+          target_chain: params.target_chain,
+          hotspot_residues: params.hotspot_residues,
+          parameters: params.parameters,
+          parameter_descriptions: params.parameter_descriptions,
+          estimated_cost_usd: 0, // Phase 3 billing; placeholder until billing is wired
+          validation_results: (result.validation_results as ReviewData["validation_results"]) ?? [],
+          can_proceed: (result.can_proceed as boolean) ?? false,
+          has_warnings: (result.has_warnings as boolean) ?? false,
+        };
+
+        // Defer setting the review card so validation card renders first
+        setTimeout(() => {
+          setLastCard({ type: "review", data: reviewData });
+          setMessages((prev) => {
+            const aid = currentAssistantIdRef.current;
+            if (!aid) return prev;
+            return prev.map((msg) =>
+              msg.id === aid
+                ? { ...msg, cards: [...(msg.cards ?? []), { type: "review", data: reviewData }] }
+                : msg,
+            );
+          });
+        }, 0);
+      }
+
+      return validationCard;
     }
-    if (toolName === "prepare_review") {
-      return { type: "review", data: result as ChatCard["data"] & object } as ChatCard;
-    }
+
     return null;
+  }
+
+  /**
+   * Build action buttons for a classify_intent tool result.
+   *
+   * Returns buttons allowing the user to confirm or change the recommended
+   * tool. Returns empty array for all other tool names.
+   */
+  function buildActions(
+    toolName: string,
+    result: Record<string, unknown>,
+  ): ActionButton[] {
+    if (toolName === "classify_intent") {
+      const tool = (result.recommended_tool as string) ?? "the recommended tool";
+      const toolLabel = tool.charAt(0).toUpperCase() + tool.slice(1);
+      return [
+        { label: `Yes, use ${toolLabel}`, value: `Yes, use ${toolLabel}` },
+        { label: "Let me change something", value: "Let me change something" },
+      ];
+    }
+    return [];
   }
 
   /**
@@ -231,6 +367,11 @@ export function ChatPage() {
     setIsProcessing(false);
     setStatusText("");
     setShowNewSessionConfirm(false);
+
+    // Reset accumulated tool result state for the new session
+    intentResultRef.current = null;
+    structureResultRef.current = null;
+    parametersResultRef.current = null;
   }, [sessionId]);
 
   /** Render the context panel content (most recent structured card) */

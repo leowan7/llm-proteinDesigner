@@ -95,8 +95,22 @@ async def agent_message(
                     messages=messages,
                 )
 
-                # Append Claude's response to history
-                messages.append({"role": "assistant", "content": response.content})
+                # Serialize ContentBlock objects to dicts before storing in history.
+                # The Anthropic SDK returns response.content as a list of TextBlock/
+                # ToolUseBlock objects which are not JSON-serializable. We convert them
+                # to plain dicts so Redis (via session_manager.save) can serialize them.
+                serialized_content = []
+                for block in response.content:
+                    if block.type == "text":
+                        serialized_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        serialized_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+                messages.append({"role": "assistant", "content": serialized_content})
 
                 if response.stop_reason == "end_turn":
                     # Stream the final text content to the client
