@@ -14,19 +14,19 @@
 
 ### Structure Input
 
-- [ ] **INPUT-01**: User can upload a PDB file as the target structure for a design job
+- [x] **INPUT-01**: User can upload a PDB file as the target structure for a design job
 - [ ] **INPUT-02**: User can provide a PDB accession ID; system fetches the structure from RCSB automatically
 - [ ] **INPUT-03**: User can provide a UniProt accession ID; system resolves it to a PDB structure and fetches it
 - [ ] **INPUT-04**: User can describe a target in natural language only (e.g. "IL-6 receptor"); agent identifies and fetches the canonical structure
-- [ ] **INPUT-05**: System normalizes all uploaded/fetched PDB files before use (multi-model NMR, insertion codes, altloc atoms, MSE residues handled)
+- [x] **INPUT-05**: System normalizes all uploaded/fetched PDB files before use (multi-model NMR, insertion codes, altloc atoms, MSE residues handled)
 
 ### Agent & Wizard
 
-- [ ] **AGENT-01**: Agent classifies user's design intent from natural language (binder design, de novo backbone, motif scaffolding)
-- [ ] **AGENT-02**: Agent recommends the appropriate tool (RFdiffusion, BindCraft, or Boltzgen) with a plain-language rationale; user must explicitly confirm before proceeding
+- [x] **AGENT-01**: Agent classifies user's design intent from natural language (binder design, de novo backbone, motif scaffolding)
+- [x] **AGENT-02**: Agent recommends the appropriate tool (RFdiffusion, BindCraft, or Boltzgen) with a plain-language rationale; user must explicitly confirm before proceeding
 - [ ] **AGENT-03**: Agent runs a guided wizard to collect required parameters (chain length, number of designs, binding site/hotspot residues, etc.) before launching the job
-- [ ] **AGENT-04**: Agent performs pre-flight validation on inputs before dispatching: PDB quality check, hotspot feasibility, parameter sanity
-- [ ] **AGENT-05**: Agent surfaces validation warnings to the user and requires acknowledgment before continuing if issues are found
+- [x] **AGENT-04**: Agent performs pre-flight validation on inputs before dispatching: PDB quality check, hotspot feasibility, parameter sanity
+- [x] **AGENT-05**: Agent surfaces validation warnings to the user and requires acknowledgment before continuing if issues are found
 
 ### Job Management
 
@@ -95,16 +95,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTH-02 | Phase 1 | Complete |
 | AUTH-03 | Phase 1 | Complete |
 | AUTH-04 | Phase 1 | Complete |
-| INPUT-01 | Phase 2 | Pending |
+| INPUT-01 | Phase 2 | Complete |
 | INPUT-02 | Phase 2 | Pending |
 | INPUT-03 | Phase 2 | Pending |
 | INPUT-04 | Phase 2 | Pending |
-| INPUT-05 | Phase 2 | Pending |
-| AGENT-01 | Phase 2 | Pending |
-| AGENT-02 | Phase 2 | Pending |
+| INPUT-05 | Phase 2 | Complete |
+| AGENT-01 | Phase 2 | Complete |
+| AGENT-02 | Phase 2 | Complete |
 | AGENT-03 | Phase 2 | Pending |
-| AGENT-04 | Phase 2 | Pending |
-| AGENT-05 | Phase 2 | Pending |
+| AGENT-04 | Phase 2 | Complete |
+| AGENT-05 | Phase 2 | Complete |
 | JOB-01 | Phase 3 | Pending |
 | JOB-02 | Phase 3 | Pending |
 | JOB-03 | Phase 3 | Pending |
