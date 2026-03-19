@@ -37,6 +37,18 @@ class Settings(BaseSettings):
     debug: bool = True
     testing: bool = False
 
+    # Anthropic (Claude agent)
+    anthropic_api_key: str = ""
+
+    # External API base URLs
+    rcsb_base_url: str = "https://files.rcsb.org"
+    uniprot_base_url: str = "https://rest.uniprot.org"
+
+    # Agent
+    agent_model: str = "claude-sonnet-4-5"
+    agent_max_tokens: int = 2048
+    agent_session_ttl_seconds: int = 3600  # Redis session TTL: 1 hour
+
     class Config:
         env_file = ".env.local"
         env_file_encoding = "utf-8"
