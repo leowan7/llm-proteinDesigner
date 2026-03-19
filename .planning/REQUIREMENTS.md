@@ -15,9 +15,9 @@
 ### Structure Input
 
 - [x] **INPUT-01**: User can upload a PDB file as the target structure for a design job
-- [ ] **INPUT-02**: User can provide a PDB accession ID; system fetches the structure from RCSB automatically
-- [ ] **INPUT-03**: User can provide a UniProt accession ID; system resolves it to a PDB structure and fetches it
-- [ ] **INPUT-04**: User can describe a target in natural language only (e.g. "IL-6 receptor"); agent identifies and fetches the canonical structure
+- [x] **INPUT-02**: User can provide a PDB accession ID; system fetches the structure from RCSB automatically
+- [x] **INPUT-03**: User can provide a UniProt accession ID; system resolves it to a PDB structure and fetches it
+- [x] **INPUT-04**: User can describe a target in natural language only (e.g. "IL-6 receptor"); agent identifies and fetches the canonical structure
 - [x] **INPUT-05**: System normalizes all uploaded/fetched PDB files before use (multi-model NMR, insertion codes, altloc atoms, MSE residues handled)
 
 ### Agent & Wizard
@@ -96,9 +96,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AUTH-03 | Phase 1 | Complete |
 | AUTH-04 | Phase 1 | Complete |
 | INPUT-01 | Phase 2 | Complete |
-| INPUT-02 | Phase 2 | Pending |
-| INPUT-03 | Phase 2 | Pending |
-| INPUT-04 | Phase 2 | Pending |
+| INPUT-02 | Phase 2 | Complete |
+| INPUT-03 | Phase 2 | Complete |
+| INPUT-04 | Phase 2 | Complete |
 | INPUT-05 | Phase 2 | Complete |
 | AGENT-01 | Phase 2 | Complete |
 | AGENT-02 | Phase 2 | Complete |

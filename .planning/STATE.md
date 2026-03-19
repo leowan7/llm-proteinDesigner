@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 02-03-PLAN.md
-last_updated: "2026-03-19T12:45:59Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-03-19T12:50:09.045Z"
 progress:
   total_phases: 4
   completed_phases: 1
   total_plans: 9
-  completed_plans: 5
+  completed_plans: 7
 ---
 
 # Project State
@@ -51,6 +51,7 @@ Plan: 3 of 5
 | Phase 01-foundation P03 | 11 | 2 tasks | 28 files |
 | Phase 02-agent-and-structure-input P01 | 5min | 2 tasks | 14 files |
 | Phase 02-agent-and-structure-input P03 | 5min | 2 tasks | 7 files |
+| Phase 02-agent-and-structure-input P02 | 6min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,9 @@ Recent decisions affecting current work:
 - [Phase 02-agent-and-structure-input]: WIZARD_PARAMS: 3 rfdiffusion params, 4 bindcraft params, 3 boltzgen params — essential inputs only, advanced params deferred to v2
 - [Phase 02-agent-and-structure-input]: pdb_utils imports in tools.py guarded with try/except ImportError — Plan 02-02 runs in same wave; guard prevents ImportError if 02-03 completes first
 - [Phase 02-agent-and-structure-input]: Anthropic SDK messages.create is synchronous inside async SSE generator — acceptable since tool I/O is the dominant latency source
+- [Phase 02-agent-and-structure-input]: pdb_utils.* import path used throughout (not pdb.*) — directory renamed in Plan 02-01 to avoid shadowing Python stdlib debugger module
+- [Phase 02-agent-and-structure-input]: BioPython DisorderedAtom handles altloc implicitly (highest occupancy default) — no explicit altloc normalization pass required
+- [Phase 02-agent-and-structure-input]: resolve_pdb_for_uniprot propagates 404 as HTTPStatusError; router converts to 404 HTTPException with user-friendly message
 
 ### Pending Todos
 
@@ -88,6 +92,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-19T12:45:59Z
-Stopped at: Completed 02-03-PLAN.md
+Last session: 2026-03-19T12:50:09.040Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None
