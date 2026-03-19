@@ -1,10 +1,15 @@
-"""Shared test fixtures for auth integration tests.
+"""Shared test fixtures for auth integration tests and Phase 2 unit tests.
 
-These tests require a running Supabase local stack (supabase start).
+Auth integration tests require a running Supabase local stack (supabase start).
 They hit the real Supabase Auth service -- not mocks.
+
+Phase 2 fixtures (test_pdb_path, temp_dir, mock_redis) are lightweight and
+require no external services.
 """
 
 import os
+import pathlib
+import tempfile
 from dotenv import load_dotenv
 
 # Load .env.local BEFORE setting defaults -- this ensures the real
@@ -39,3 +44,41 @@ async def client():
 # Pre-verified test user credentials (from seed.sql)
 TEST_USER_EMAIL = "test@example.com"
 TEST_USER_PASSWORD = "Password123!"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 fixtures — no external services required
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def test_pdb_path():
+    """Path to the minimal test PDB fixture file."""
+    return str(pathlib.Path(__file__).parent / "fixtures" / "test_structure.pdb")
+
+
+@pytest.fixture
+def temp_dir():
+    """Temporary directory for PDB output files, cleaned up after test."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield tmpdir
+
+
+@pytest.fixture
+def mock_redis():
+    """Fake Redis-like dict for session storage tests (no real Redis needed)."""
+
+    class FakeRedis:
+        def __init__(self):
+            self._store = {}
+
+        async def get(self, key):
+            return self._store.get(key)
+
+        async def set(self, key, value, ex=None):
+            self._store[key] = value
+
+        async def delete(self, key):
+            self._store.pop(key, None)
+
+    return FakeRedis()
