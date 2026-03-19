@@ -260,6 +260,37 @@ export async function getPaymentStatus(): Promise<{ has_payment_method: boolean 
 }
 
 /**
+ * Dispatch a pre-created job after the payment gate check.
+ *
+ * The backend verifies the user has a payment method (returning 402 if not),
+ * then calls launch_job() to set status=queued and enqueue the arq task.
+ *
+ * @param jobId - UUID of the existing job row created by the agent wizard.
+ * @returns Object with job_id and status="queued" on success.
+ * @throws Error with message "payment_required" when the user has no payment method.
+ */
+export async function launchJob(jobId: string): Promise<{ job_id: string; status: string }> {
+  const csrf = getCsrfToken();
+  const response = await fetch(`${API_BASE}/jobs/launch`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(csrf ? { "X-CSRFToken": csrf } : {}),
+    },
+    body: JSON.stringify({ job_id: jobId }),
+  });
+  if (response.status === 402) {
+    throw new Error("payment_required");
+  }
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: "Launch failed" }));
+    throw new Error((err as { detail: string }).detail ?? "Launch failed");
+  }
+  return response.json() as Promise<{ job_id: string; status: string }>;
+}
+
+/**
  * Create a Stripe Checkout session for adding a payment method.
  *
  * @param returnUrl - URL to redirect to after the Checkout session completes.

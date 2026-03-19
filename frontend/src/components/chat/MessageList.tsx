@@ -24,7 +24,8 @@ interface MessageListProps {
   statusText: string;
   warningsAcknowledged: boolean;
   onAction: (value: string) => void;
-  onLaunchJob: () => void;
+  /** Called with job ID when the ReviewCard successfully dispatches a job. */
+  onJobLaunched: (jobId: string) => void;
   onEditParams: () => void;
   onAcknowledgeWarnings: () => void;
   onUseDifferentStructure: () => void;
@@ -41,7 +42,7 @@ export function MessageList({
   statusText,
   warningsAcknowledged,
   onAction,
-  onLaunchJob,
+  onJobLaunched,
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
@@ -86,7 +87,7 @@ export function MessageList({
               cards={message.cards}
               actions={message.actions}
               onAction={onAction}
-              onLaunchJob={onLaunchJob}
+              onJobLaunched={onJobLaunched}
               onEditParams={onEditParams}
               onAcknowledgeWarnings={onAcknowledgeWarnings}
               onUseDifferentStructure={onUseDifferentStructure}

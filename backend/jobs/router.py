@@ -1,6 +1,7 @@
 """Job API endpoints.
 
 Provides:
+- POST /jobs/launch           — payment gate check then dispatch a job
 - GET  /jobs/              — list jobs for current user
 - GET  /jobs/{job_id}      — get single job with candidates
 - GET  /jobs/{job_id}/status   — SSE stream of status events
@@ -14,14 +15,17 @@ import json
 import zipfile
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status as http_status
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
+from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
-from billing.stripe_client import record_gpu_usage
+from billing.stripe_client import check_payment_method, get_or_create_customer, record_gpu_usage
 from config import settings
 from db.connection import get_db_pool
 from gpu.runpod import RunPodProvider
+from jobs.dispatch import launch_job
 from storage.client import generate_presigned_get_url, get_s3_client
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -33,6 +37,80 @@ _ENDPOINT_IDS: dict[str, str] = {
     "bindcraft": settings.runpod_endpoint_bindcraft,
     "boltzgen": settings.runpod_endpoint_boltzgen,
 }
+
+
+# ---------------------------------------------------------------------------
+# Launch endpoint — payment gate + dispatch
+# ---------------------------------------------------------------------------
+
+class LaunchRequest(BaseModel):
+    """Request body for POST /jobs/launch."""
+
+    job_id: str
+
+
+@router.post("/launch")
+async def launch_job_endpoint(
+    body: LaunchRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """BILL-04 / JOB-01: Payment gate check then job dispatch.
+
+    Verifies the authenticated user has a Stripe payment method on file before
+    calling launch_job(). Returns 402 if no payment method is found so the
+    frontend can redirect to Stripe Checkout.
+
+    Args:
+        body.job_id: UUID of an existing job row (created by the agent wizard).
+        user_id: Injected by the auth dependency.
+
+    Returns:
+        JSON with job_id and status="queued" on success.
+
+    Raises:
+        HTTPException 402: If the user has no payment method configured.
+        HTTPException 404: If the job row does not exist for this user.
+    """
+    pool = await get_db_pool()
+
+    # Fetch job row to validate ownership and get job_spec.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT job_spec FROM public.jobs WHERE id = $1 AND user_id = $2",
+            body.job_id,
+            user_id,
+        )
+    if not row:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    # Resolve Stripe customer and check payment method.
+    async with pool.acquire() as conn:
+        user_row = await conn.fetchrow(
+            "SELECT email, stripe_customer_id FROM public.users WHERE id = $1",
+            user_id,
+        )
+    if not user_row:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    stripe_customer_id = await get_or_create_customer(
+        email=user_row["email"],
+        user_id=user_id,
+        pool=pool,
+    )
+
+    has_payment = check_payment_method(stripe_customer_id)
+    if not has_payment:
+        raise HTTPException(
+            status_code=http_status.HTTP_402_PAYMENT_REQUIRED,
+            detail="payment_required",
+        )
+
+    # Parse job_spec and dispatch.
+    spec_data = json.loads(row["job_spec"] or "{}")
+    job_spec = JobSpec(**spec_data)
+    await launch_job(job_id=body.job_id, job_spec=job_spec, user_id=user_id, pool=pool)
+
+    return {"job_id": body.job_id, "status": "queued"}
 
 
 # ---------------------------------------------------------------------------

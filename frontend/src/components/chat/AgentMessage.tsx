@@ -21,12 +21,17 @@ interface AgentMessageProps {
   cards?: ChatCard[];
   actions?: ActionButton[];
   onAction?: (value: string) => void;
-  onLaunchJob?: () => void;
+  /** Called with the launched job ID after the ReviewCard dispatches a job. */
+  onJobLaunched?: (jobId: string) => void;
   onEditParams?: () => void;
   onAcknowledgeWarnings?: () => void;
   onUseDifferentStructure?: () => void;
   warningsAcknowledged?: boolean;
   isValidating?: boolean;
+  /** When true, ReviewCard auto-retries launch after Stripe setup success. */
+  autoRetryAfterSetup?: boolean;
+  /** When true, ReviewCard shows the payment cancelled alert. */
+  setupCancelled?: boolean;
 }
 
 /**
@@ -93,12 +98,14 @@ export function AgentMessage({
   cards,
   actions,
   onAction,
-  onLaunchJob,
+  onJobLaunched,
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
   warningsAcknowledged = false,
   isValidating = false,
+  autoRetryAfterSetup = false,
+  setupCancelled = false,
 }: AgentMessageProps) {
   return (
     <div className="flex justify-start px-4 py-1">
@@ -155,10 +162,12 @@ export function AgentMessage({
                   <ReviewCard
                     key={i}
                     data={card.data}
-                    onLaunch={() => onLaunchJob?.()}
+                    onJobLaunched={(jobId) => onJobLaunched?.(jobId)}
                     onEdit={() => onEditParams?.()}
                     disabled={isValidating}
                     warningsAcknowledged={warningsAcknowledged}
+                    autoRetryAfterSetup={autoRetryAfterSetup}
+                    setupCancelled={setupCancelled}
                   />
                 );
               }

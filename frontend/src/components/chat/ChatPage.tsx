@@ -13,11 +13,17 @@
  * - statusText: most recent status event from SSE
  * - lastCard: most recent structured card (mirrored in context panel)
  * - warningsAcknowledged: user has acknowledged pre-flight warnings
+ * - activeJobId: job ID after launch; drives SSE status subscription
+ * - jobStatus: most recent JobStatusEvent received via SSE
  *
  * Session lifecycle:
  * - createSession on mount
  * - deleteSession + createSession on "New Session"
  * - No persistence between page refreshes (session is ephemeral)
+ *
+ * Stripe Checkout return handling:
+ * - ?setup=success → auto-retry launch on the ReviewCard
+ * - ?setup=cancelled → show "payment required" alert on the ReviewCard
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
@@ -28,6 +34,8 @@ import { ChatInput } from "./ChatInput";
 import { StructurePreviewCard } from "./StructurePreviewCard";
 import { ReviewCard } from "./ReviewCard";
 import { ValidationCard } from "./ValidationCard";
+import { JobStatusCard } from "@/components/jobs/JobStatusCard";
+import { JobCompletionCard } from "@/components/jobs/JobCompletionCard";
 import {
   createSession,
   deleteSession,
@@ -35,10 +43,32 @@ import {
   sendMessage,
 } from "@/lib/agent";
 import type { ChatMessage, ChatCard, AgentEvent, ActionButton, ReviewData } from "@/lib/agent";
+import {
+  subscribeToJobStatus,
+  cancelJob,
+  getJob,
+} from "@/lib/jobs";
+import type { JobStatusEvent, JobData } from "@/lib/jobs";
 
 /** Generate a unique message ID */
 function newId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Parse Stripe Checkout return query params from the current URL. */
+function getSetupParam(): "success" | "cancelled" | null {
+  const params = new URLSearchParams(window.location.search);
+  const setup = params.get("setup");
+  if (setup === "success") return "success";
+  if (setup === "cancelled") return "cancelled";
+  return null;
+}
+
+/** Remove ?setup= from the URL without a page reload. */
+function clearSetupParam() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("setup");
+  window.history.replaceState({}, "", url.toString());
 }
 
 export function ChatPage() {
@@ -50,21 +80,31 @@ export function ChatPage() {
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
   const [showNewSessionConfirm, setShowNewSessionConfirm] = useState(false);
 
+  // Job tracking state after launch
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [jobStatus, setJobStatus] = useState<JobStatusEvent | null>(null);
+  const [completedJob, setCompletedJob] = useState<JobData | null>(null);
+
+  // Stripe Checkout return state (resolved on mount, cleared after use)
+  const [setupParam] = useState<"success" | "cancelled" | null>(() => {
+    const param = getSetupParam();
+    if (param) clearSetupParam();
+    return param;
+  });
+
   // Tracks the in-progress assistant message id during streaming
   const currentAssistantIdRef = useRef<string | null>(null);
 
+  // Ref for the SSE unsubscribe function — cleaned up on unmount or new session
+  const jobUnsubscribeRef = useRef<(() => void) | null>(null);
+
   // Accumulated context from tool results, used to assemble ReviewData across turns.
-  // classify_intent result: saved so ReviewData can include design_goal and rationale.
   const intentResultRef = useRef<{
     design_type: string;
     recommended_tool: string;
     rationale: string;
   } | null>(null);
-
-  // resolve_structure result: saved so ReviewData can reference the resolved PDB id.
   const structureResultRef = useRef<Record<string, unknown> | null>(null);
-
-  // collect_parameters result: saved so validate_preflight can assemble the full review card.
   const parametersResultRef = useRef<{
     tool: string;
     target_chain: string;
@@ -72,6 +112,13 @@ export function ChatPage() {
     parameters: Record<string, unknown>;
     parameter_descriptions: Record<string, { label: string; description: string; default: unknown }>;
   } | null>(null);
+
+  // Cleanup SSE subscription on unmount
+  useEffect(() => {
+    return () => {
+      jobUnsubscribeRef.current?.();
+    };
+  }, []);
 
   /** Initialize a new session on mount */
   useEffect(() => {
@@ -86,6 +133,58 @@ export function ChatPage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  /**
+   * Called by ReviewCard after a job is successfully dispatched.
+   * Stores the job ID, subscribes to SSE updates, and renders an inline
+   * JobStatusCard in the chat thread.
+   */
+  const onJobLaunched = useCallback((jobId: string) => {
+    setActiveJobId(jobId);
+    setJobStatus(null);
+    setCompletedJob(null);
+
+    // Add an inline job status card message to the chat thread
+    const statusMessageId = newId();
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: statusMessageId,
+        role: "assistant" as const,
+        content: "",
+        // The job status card is rendered by MessageList via the jobId field
+      },
+    ]);
+
+    // Unsubscribe from any previous job SSE stream
+    jobUnsubscribeRef.current?.();
+
+    // Subscribe to real-time job status events
+    const unsubscribe = subscribeToJobStatus(
+      jobId,
+      async (event) => {
+        setJobStatus(event);
+
+        // On terminal status: fetch full job data for completion/failure card
+        if (event.status === "complete" || event.status === "failed" || event.status === "cancelled") {
+          unsubscribe();
+          jobUnsubscribeRef.current = null;
+
+          try {
+            const fullJob = await getJob(jobId);
+            setCompletedJob(fullJob);
+          } catch {
+            // If fetch fails, use what we know from the SSE event
+          }
+        }
+      },
+      (err) => {
+        console.error("Job SSE error:", err);
+      },
+    );
+
+    jobUnsubscribeRef.current = unsubscribe;
   }, []);
 
   /**
@@ -104,7 +203,6 @@ export function ChatPage() {
         ),
       );
     } else if (event.type === "tool_result") {
-      // Build a ChatCard from the tool result (may also emit review card via setTimeout)
       const card = buildCard(event.tool_name, event.result);
       if (card) {
         setLastCard(card);
@@ -117,7 +215,6 @@ export function ChatPage() {
         );
       }
 
-      // Build action buttons (classify_intent yields tool confirmation buttons)
       const actions = buildActions(event.tool_name, event.result);
       if (actions.length > 0) {
         setMessages((prev) =>
@@ -134,7 +231,6 @@ export function ChatPage() {
     } else if (event.type === "error") {
       setIsProcessing(false);
       setStatusText("");
-      // Append error as a system message
       setMessages((prev) => [
         ...prev,
         {
@@ -149,9 +245,6 @@ export function ChatPage() {
   /**
    * Build a ChatCard from a tool_result SSE event.
    *
-   * Returns null for tool results that produce action buttons instead of
-   * structured cards (classify_intent), or that have no visual card output.
-   *
    * Side effects: updates intentResultRef, structureResultRef, and
    * parametersResultRef to accumulate data needed for the ReviewCard.
    */
@@ -160,14 +253,11 @@ export function ChatPage() {
     result: Record<string, unknown>,
   ): ChatCard | null {
     if (toolName === "resolve_structure") {
-      // Save for ReviewData assembly later (pdb_id used as target_pdb_id)
       structureResultRef.current = result;
       return { type: "structure_preview", data: result } as ChatCard;
     }
 
     if (toolName === "classify_intent") {
-      // Save intent for ReviewData assembly -- no card returned here;
-      // action buttons are added to the assistant message by buildActions().
       intentResultRef.current = {
         design_type: result.design_type as string,
         recommended_tool: result.recommended_tool as string,
@@ -177,7 +267,6 @@ export function ChatPage() {
     }
 
     if (toolName === "collect_parameters") {
-      // Save parameters for ReviewData assembly when validate_preflight fires.
       parametersResultRef.current = {
         tool: result.tool as string,
         target_chain: result.target_chain as string,
@@ -188,21 +277,15 @@ export function ChatPage() {
           { label: string; description: string; default: unknown }
         >) ?? {},
       };
-      // No card at this stage; the ReviewCard assembles after validation.
       return null;
     }
 
     if (toolName === "validate_preflight") {
-      // Emit a ValidationCard for immediate feedback
       const validationCard: ChatCard = {
         type: "validation",
         data: result as ChatCard["data"] & object,
       };
 
-      // Also assemble the full ReviewCard from accumulated tool results.
-      // This is a best-effort assembly: fields default to empty strings if
-      // the earlier tools did not fire (e.g. user uploaded a file instead of
-      // typing a protein name, so resolve_structure may not have run).
       if (parametersResultRef.current) {
         const params = parametersResultRef.current;
         const intent = intentResultRef.current;
@@ -222,13 +305,12 @@ export function ChatPage() {
           hotspot_residues: params.hotspot_residues,
           parameters: params.parameters,
           parameter_descriptions: params.parameter_descriptions,
-          estimated_cost_usd: 0, // Phase 3 billing; placeholder until billing is wired
+          estimated_cost_usd: 0, // Replaced by live getCostEstimate call in ReviewCard
           validation_results: (result.validation_results as ReviewData["validation_results"]) ?? [],
           can_proceed: (result.can_proceed as boolean) ?? false,
           has_warnings: (result.has_warnings as boolean) ?? false,
         };
 
-        // Defer setting the review card so validation card renders first
         setTimeout(() => {
           setLastCard({ type: "review", data: reviewData });
           setMessages((prev) => {
@@ -249,12 +331,6 @@ export function ChatPage() {
     return null;
   }
 
-  /**
-   * Build action buttons for a classify_intent tool result.
-   *
-   * Returns buttons allowing the user to confirm or change the recommended
-   * tool. Returns empty array for all other tool names.
-   */
   function buildActions(
     toolName: string,
     result: Record<string, unknown>,
@@ -270,10 +346,6 @@ export function ChatPage() {
     return [];
   }
 
-  /**
-   * Send a user message (and optionally a PDB file) to the agent.
-   * Handles file upload first, then sends the message with context.
-   */
   const handleSend = useCallback(
     async (text: string, file?: File) => {
       if (!sessionId) return;
@@ -284,7 +356,6 @@ export function ChatPage() {
 
       let messageText = text;
 
-      // Upload file first if provided, then include context in the message
       if (file) {
         try {
           const uploadResult = await uploadPdbFile(file);
@@ -304,14 +375,12 @@ export function ChatPage() {
         }
       }
 
-      // Add user message to history
       const userMessage: ChatMessage = {
         id: newId(),
         role: "user",
         content: text || `[Uploaded ${file?.name ?? "file"}]`,
       };
 
-      // Create in-progress assistant message
       const assistantId = newId();
       currentAssistantIdRef.current = assistantId;
       const assistantMessage: ChatMessage = {
@@ -344,7 +413,6 @@ export function ChatPage() {
     [sessionId, isProcessing, handleEvent],
   );
 
-  /** Handle action button clicks — send the button's value as a user message */
   const handleAction = useCallback(
     (value: string) => {
       handleSend(value);
@@ -352,8 +420,11 @@ export function ChatPage() {
     [handleSend],
   );
 
-  /** Start a new session — requires confirmation */
   const handleNewSession = useCallback(async () => {
+    // Unsubscribe from any active job SSE stream
+    jobUnsubscribeRef.current?.();
+    jobUnsubscribeRef.current = null;
+
     if (sessionId) {
       await deleteSession(sessionId).catch(() => {});
     }
@@ -367,8 +438,10 @@ export function ChatPage() {
     setIsProcessing(false);
     setStatusText("");
     setShowNewSessionConfirm(false);
+    setActiveJobId(null);
+    setJobStatus(null);
+    setCompletedJob(null);
 
-    // Reset accumulated tool result state for the new session
     intentResultRef.current = null;
     structureResultRef.current = null;
     parametersResultRef.current = null;
@@ -407,14 +480,96 @@ export function ChatPage() {
       return (
         <ReviewCard
           data={lastCard.data}
-          onLaunch={() => handleSend("Launch the job")}
+          onJobLaunched={onJobLaunched}
           onEdit={() => handleSend("I want to edit the parameters")}
           disabled={isProcessing}
           warningsAcknowledged={warningsAcknowledged}
+          autoRetryAfterSetup={setupParam === "success"}
+          setupCancelled={setupParam === "cancelled"}
         />
       );
     }
     return null;
+  }
+
+  /**
+   * Render the inline job tracking section shown in chat after a job is launched.
+   * Shows a JobStatusCard while running, then a JobCompletionCard on completion.
+   */
+  function renderInlineJobTracking() {
+    if (!activeJobId) return null;
+
+    // If job has reached a terminal state
+    if (completedJob) {
+      if (completedJob.status === "complete") {
+        return (
+          <div className="px-4 py-2">
+            <JobCompletionCard
+              jobId={activeJobId}
+              candidateCount={completedJob.results?.candidate_count ?? 0}
+              gpuSeconds={completedJob.gpu_seconds}
+              gpuCostUsd={completedJob.gpu_cost_usd}
+            />
+          </div>
+        );
+      }
+      if (completedJob.status === "failed") {
+        return (
+          <div className="px-4 py-2">
+            <p className="text-sm text-muted-foreground">
+              Job failed
+              {completedJob.error_category ? ` — ${completedJob.error_category}` : ""}.
+              View details on the{" "}
+              <a href={`/jobs/${activeJobId}`} className="underline text-foreground">
+                job page
+              </a>
+              .
+            </p>
+          </div>
+        );
+      }
+      if (completedJob.status === "cancelled") {
+        return (
+          <div className="px-4 py-2">
+            <p className="text-sm text-muted-foreground">
+              Job cancelled. View details on the{" "}
+              <a href={`/jobs/${activeJobId}`} className="underline text-foreground">
+                job page
+              </a>
+              .
+            </p>
+          </div>
+        );
+      }
+    }
+
+    // While job is running or queued — show JobStatusCard
+    if (jobStatus) {
+      const currentStatus = jobStatus.status as "queued" | "running" | "complete" | "failed" | "cancelled";
+      // Extract tool from the review card data if available
+      const tool = lastCard?.type === "review" ? lastCard.data.tool : "rfdiffusion";
+
+      return (
+        <div className="px-4 py-2">
+          <JobStatusCard
+            jobId={activeJobId}
+            status={currentStatus}
+            stage={jobStatus.stage}
+            tool={tool}
+            onCancel={async () => {
+              await cancelJob(activeJobId);
+            }}
+          />
+        </div>
+      );
+    }
+
+    // Brief gap between launch and first SSE event
+    return (
+      <div className="px-4 py-2">
+        <p className="text-sm text-muted-foreground">Job queued...</p>
+      </div>
+    );
   }
 
   return (
@@ -480,11 +635,13 @@ export function ChatPage() {
             statusText={statusText}
             warningsAcknowledged={warningsAcknowledged}
             onAction={handleAction}
-            onLaunchJob={() => handleSend("Launch the job")}
+            onJobLaunched={onJobLaunched}
             onEditParams={() => handleSend("I want to edit the parameters")}
             onAcknowledgeWarnings={() => setWarningsAcknowledged(true)}
             onUseDifferentStructure={() => handleSend("I want to use a different structure")}
           />
+          {/* Inline job tracking section — appears below messages after launch */}
+          {renderInlineJobTracking()}
           <ChatInput onSend={handleSend} isProcessing={isProcessing} />
         </div>
 
