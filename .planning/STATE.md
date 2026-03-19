@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: unknown
-stopped_at: Phase 3 context gathered
-last_updated: "2026-03-19T17:28:20.779Z"
+status: executing
+stopped_at: "Completed 03-01-PLAN.md"
+last_updated: "2026-03-19T18:35:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 9
-  completed_plans: 9
+  total_plans: 14
+  completed_plans: 10
 ---
 
 # Project State
@@ -19,20 +19,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 02 — agent-and-structure-input
+**Current focus:** Phase 03 — job-execution-frontend-and-billing
 
 ## Current Position
 
-Phase: 02 (agent-and-structure-input) — COMPLETE
-Plan: 5 of 5
+Phase: 03 (job-execution-frontend-and-billing) — EXECUTING
+Plan: 2 of 5
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 0
-- Average duration: —
-- Total execution time: 0 hours
+- Total plans completed: 1
+- Average duration: 15 min
+- Total execution time: 0.25 hours
 
 **By Phase:**
 
@@ -53,6 +53,7 @@ Plan: 5 of 5
 | Phase 02-agent-and-structure-input P03 | 5min | 2 tasks | 7 files |
 | Phase 02-agent-and-structure-input P02 | 6min | 2 tasks | 8 files |
 | Phase 02-agent-and-structure-input P04 | 6min | 2 tasks | 18 files |
+| Phase 03-job-execution-frontend-and-billing P01 | 15min | 3 tasks | 18 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Recent decisions affecting current work:
 - [Phase 02-agent-and-structure-input]: CSRF token read from csrftoken cookie and sent as X-CSRFToken header in all POST requests from SSE agent client — CSRFMiddleware blocks unauthenticated state-changing requests
 - [Phase 02-agent-and-structure-input]: RFantibody added as fourth tool option alongside RFdiffusion, BindCraft, BoltzGen — accurate representation of Ranomics production toolset; system prompt grounded in published tool capabilities
 - [Phase 02-agent-and-structure-input]: StructurePreviewCard renders defensively with optional chaining on all fields — agent streams tool results incrementally, cards must handle partial data without crashing
+- [Phase 03-job-execution-frontend-and-billing]: GPUProvider ABC defines 4 abstract methods (submit_job, get_status, cancel_job, get_results); get_results on RunPod re-fetches status endpoint (output embedded in status response, no separate results endpoint)
+- [Phase 03-job-execution-frontend-and-billing]: Stripe Billing Meters API value field must be str(gpu_seconds) not int — API rejects integer values; enforced in stripe_client.py and documented in test scaffold
+- [Phase 03-job-execution-frontend-and-billing]: estimate_cost_range scales by max(1, num_designs/10) — batch sizes up to 10 run concurrently; beyond 10 cost scales linearly
 
 ### Pending Todos
 
@@ -99,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-19T17:28:20.775Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-job-execution-frontend-and-billing/03-CONTEXT.md
+Last session: 2026-03-19T18:35:00.000Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: .planning/phases/03-job-execution-frontend-and-billing/03-02-PLAN.md

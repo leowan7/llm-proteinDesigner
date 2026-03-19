@@ -30,22 +30,22 @@
 
 ### Job Management
 
-- [ ] **JOB-01**: User can see real-time job status updates in the UI (queued, running, complete, failed) without refreshing the page
-- [ ] **JOB-02**: User receives an email notification when a job completes or fails
-- [ ] **JOB-03**: User can cancel a running job; GPU billing stops on cancellation
+- [x] **JOB-01**: User can see real-time job status updates in the UI (queued, running, complete, failed) without refreshing the page
+- [x] **JOB-02**: User receives an email notification when a job completes or fails
+- [x] **JOB-03**: User can cancel a running job; GPU billing stops on cancellation
 
 ### Results
 
-- [ ] **RESULT-01**: Completed job returns all output PDB structures as downloadable files, ranked by design score
-- [ ] **RESULT-02**: Completed job returns a design report: run parameters, scoring metrics, ranked candidate summary
-- [ ] **RESULT-03**: Agent provides post-job next-step guidance (e.g. suggested AlphaFold validation, expression system, synthesis considerations)
+- [x] **RESULT-01**: Completed job returns all output PDB structures as downloadable files, ranked by design score
+- [x] **RESULT-02**: Completed job returns a design report: run parameters, scoring metrics, ranked candidate summary
+- [x] **RESULT-03**: Agent provides post-job next-step guidance (e.g. suggested AlphaFold validation, expression system, synthesis considerations)
 
 ### Billing
 
-- [ ] **BILL-01**: User is charged per job on completion, priced by actual GPU compute time (Stripe Billing Meters API)
-- [ ] **BILL-02**: User sees an estimated GPU cost before confirming job launch
-- [ ] **BILL-03**: User must have a valid payment method on file before launching any job
-- [ ] **BILL-04**: Job state is written to the database before any GPU provider API call (prevents double-billing on retry)
+- [x] **BILL-01**: User is charged per job on completion, priced by actual GPU compute time (Stripe Billing Meters API)
+- [x] **BILL-02**: User sees an estimated GPU cost before confirming job launch
+- [x] **BILL-03**: User must have a valid payment method on file before launching any job
+- [x] **BILL-04**: Job state is written to the database before any GPU provider API call (prevents double-billing on retry)
 
 ## v2 Requirements
 
@@ -105,16 +105,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 | AGENT-03 | Phase 2 | Complete |
 | AGENT-04 | Phase 2 | Complete |
 | AGENT-05 | Phase 2 | Complete |
-| JOB-01 | Phase 3 | Pending |
-| JOB-02 | Phase 3 | Pending |
-| JOB-03 | Phase 3 | Pending |
-| RESULT-01 | Phase 3 | Pending |
-| RESULT-02 | Phase 3 | Pending |
-| RESULT-03 | Phase 3 | Pending |
-| BILL-01 | Phase 3 | Pending |
-| BILL-02 | Phase 3 | Pending |
-| BILL-03 | Phase 3 | Pending |
-| BILL-04 | Phase 3 | Pending |
+| JOB-01 | Phase 3 | Complete |
+| JOB-02 | Phase 3 | Complete |
+| JOB-03 | Phase 3 | Complete |
+| RESULT-01 | Phase 3 | Complete |
+| RESULT-02 | Phase 3 | Complete |
+| RESULT-03 | Phase 3 | Complete |
+| BILL-01 | Phase 3 | Complete |
+| BILL-02 | Phase 3 | Complete |
+| BILL-03 | Phase 3 | Complete |
+| BILL-04 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 24 total
