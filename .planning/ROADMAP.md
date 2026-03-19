@@ -63,7 +63,13 @@ Plans:
   3. User can download all output PDB files ranked by design score and view the design report (run parameters, scoring metrics, ranked candidate summary)
   4. Agent provides post-job next-step guidance (AlphaFold validation recommendation, synthesis considerations) on the results page
   5. User sees a GPU cost estimate before confirming job launch; payment method is required before any job dispatches; Stripe is charged the actual GPU compute cost at confirmed job completion; job state is persisted to the database before any GPU provider API call
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 03-01-PLAN.md — Foundation: DB migration, config, GPUProvider ABC, type contracts, test scaffolds
+- [ ] 03-02-PLAN.md — Billing backend: Stripe client, cost estimation, payment gate, billing router
+- [ ] 03-03-PLAN.md — Job execution backend: worker, dispatch, webhooks, job router, notifications
+- [ ] 03-04-PLAN.md — Frontend: JobPage, all job components, SSE client, route registration
+- [ ] 03-05-PLAN.md — Integration wiring: chat-to-job launch flow, end-to-end human verification
 
 ### Phase 4: Production Hardening
 **Goal**: The platform is safe to open to external users — second GPU provider is integrated, billing integrity is verified against real GPU costs, and the system survives failure scenarios without double-charging or data loss
@@ -86,5 +92,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4
 |-------|----------------|--------|-----------|
 | 1. Foundation | 3/4 | In Progress|  |
 | 2. Agent and Structure Input | 5/5 | Complete   | 2026-03-19 |
-| 3. Job Execution, Frontend, and Billing | 0/TBD | Not started | - |
+| 3. Job Execution, Frontend, and Billing | 0/5 | Not started | - |
 | 4. Production Hardening | 0/TBD | Not started | - |
