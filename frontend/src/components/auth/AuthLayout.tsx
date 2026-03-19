@@ -38,7 +38,7 @@ export function AuthLayout({ title, subtitle, footer, children }: AuthLayoutProp
           {children}
         </CardContent>
         {footer && (
-          <CardFooter className="flex flex-col items-center gap-2 px-4 pb-4 pt-0 text-sm text-muted-foreground">
+          <CardFooter className="flex flex-col items-center gap-2 px-4 py-4 text-center text-sm text-muted-foreground">
             {footer}
           </CardFooter>
         )}

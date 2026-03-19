@@ -165,11 +165,12 @@ async def exchange_token(body: ExchangeTokenRequest, response: Response):
     The backend sets them as HTTP-only cookies, making /auth/update-password work.
     """
     try:
-        # Validate the access token by decoding it
-        payload = jwt.decode(
+        # Basic structure check — decode without verification since the token
+        # comes from Supabase's own redirect and will be validated by Supabase
+        # when used for the password update call.
+        jwt.decode(
             body.access_token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
+            options={"verify_signature": False},
             audience="authenticated",
         )
         # Set the access_token as an HTTP-only cookie

@@ -42,6 +42,7 @@ if not settings.testing:
     app.add_middleware(
         CSRFMiddleware,
         secret=settings.csrf_secret,
+        sensitive_cookies={"access_token", "refresh_token"},
         cookie_samesite="lax",
         cookie_secure=settings.cookie_secure,
     )

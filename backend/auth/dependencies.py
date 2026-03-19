@@ -23,12 +23,25 @@ async def get_current_user(access_token: str | None = Cookie(default=None)) -> s
             detail="Not authenticated",
         )
     try:
-        payload = jwt.decode(
-            access_token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        # Try HS256 first (older Supabase), fall back to ES256 (newer Supabase)
+        try:
+            payload = jwt.decode(
+                access_token,
+                settings.supabase_jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+            )
+        except (jwt.exceptions.InvalidAlgorithmError, jwt.exceptions.InvalidSignatureError):
+            # Newer Supabase uses ES256 asymmetric signing — fetch JWKS
+            jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
+            jwks_client = jwt.PyJWKClient(jwks_url)
+            signing_key = jwks_client.get_signing_key_from_jwt(access_token)
+            payload = jwt.decode(
+                access_token,
+                signing_key.key,
+                algorithms=["ES256"],
+                audience="authenticated",
+            )
         return payload["sub"]
     except jwt.ExpiredSignatureError:
         raise HTTPException(

@@ -48,8 +48,8 @@
     --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.205 0 0);
     --popover-foreground: oklch(0.985 0 0);
-    /* indigo-500 override: HSL 238.7 83.5% 66.7% → OKLCH equivalent */
-    --primary: 238.7 83.5% 66.7%;
+    /* indigo-500 */
+    --primary: oklch(0.585 0.233 277.117);
     --primary-foreground: oklch(1 0 0);
     --secondary: oklch(0.269 0 0);
     --secondary-foreground: oklch(0.985 0 0);
@@ -60,8 +60,8 @@
     --destructive: oklch(0.704 0.191 22.216);
     --border: oklch(1 0 0 / 10%);
     --input: oklch(1 0 0 / 15%);
-    /* indigo-500 focus ring — same hue as primary */
-    --ring: 238.7 83.5% 66.7%;
+    /* indigo-500 focus ring */
+    --ring: oklch(0.585 0.233 277.117);
     --chart-1: oklch(0.809 0.105 251.813);
     --chart-2: oklch(0.623 0.214 259.815);
     --chart-3: oklch(0.546 0.245 262.881);
