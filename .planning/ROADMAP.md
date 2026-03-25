@@ -246,7 +246,7 @@ Post-launch growth: 12 (Teams), 13 (API)
 | 1. Foundation | Auth, DB, dev env | 3/4 | In Progress | |
 | 2. Agent + Structure Input | Agent, PDB pipeline | 5/5 | Complete | 2026-03-19 |
 | 3. Jobs, Frontend, Billing | Job dispatch, UI, Stripe | 4/5 | In Progress | |
-| 4. Pipeline Validation | Real GPU runs for all 5 tools | 0/7 | Not started | - |
+| 4. Pipeline Validation | Real GPU runs for all 5 tools | 1/7 | In Progress | - |
 | 5. Production Hardening | Security, monitoring, billing | 0/TBD | Not started | - |
 | 6. UI Improvements | Sidebar, sessions, settings | 0/TBD | Not started | - |
 | 7. Admin Dashboard | User/job/revenue monitoring | 0/TBD | Not started | - |

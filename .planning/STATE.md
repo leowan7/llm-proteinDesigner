@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: unknown
-stopped_at: Completed 03-04-PLAN.md
-last_updated: "2026-03-19T19:02:00.000Z"
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-03-25T16:38:00.000Z"
 progress:
   total_phases: 4
   completed_phases: 2
   total_plans: 14
-  completed_plans: 13
+  completed_plans: 14
 ---
 
 # Project State
@@ -19,12 +19,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 03 — job-execution-frontend-and-billing
+**Current focus:** Phase 04 — pipeline-validation
 
 ## Current Position
 
-Phase: 03 (job-execution-frontend-and-billing) — EXECUTING
-Plan: 4 of 5
+Phase: 04 (pipeline-validation) — EXECUTING
+Plan: 1 of 7
 
 ## Performance Metrics
 
@@ -57,6 +57,7 @@ Plan: 4 of 5
 | Phase 03 P02 | 8 | 2 tasks | 5 files |
 | Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
+| Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -100,6 +101,10 @@ Recent decisions affecting current work:
 - [Phase 03-job-execution-frontend-and-billing]: SSE subscription uses AbortController.abort() for cleanup on unmount — avoids leaked streams when user navigates away from JobPage
 - [Phase 03-job-execution-frontend-and-billing]: BindCraftZeroOutputCard uses no destructive colors — zero-output is expected BindCraft behavior, not failure; distinct from JobFailureCard
 - [Phase 03-job-execution-frontend-and-billing]: JobPage re-fetches full job on terminal SSE event — ensures candidates and billing data are present when rendering results section
+- [Phase 04-pipeline-validation]: ToolPipeline ABC with generate_config + parse_results + timeout/expiry properties: each tool encapsulates its own config format and output parsing
+- [Phase 04-pipeline-validation]: Presigned URL expiry defaults to 1.5x execution timeout (min 7200s); BindCraft overrides to 21600s (6hr) for its 4hr runtime
+- [Phase 04-pipeline-validation]: PXDesign basic preset only in v1 -- extended mode requires MSA preparation, deferred to future release
+- [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
 
 ### Pending Todos
 
@@ -113,6 +118,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-19T18:56:37.286Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-03-25T16:38:00.000Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
