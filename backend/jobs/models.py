@@ -46,6 +46,7 @@ TOOL_STAGE_MAP: dict[str, JobStage] = {
     "rfantibody": JobStage.RUNNING_DIFFUSION,
     "bindcraft": JobStage.RUNNING_BINDING,
     "boltzgen": JobStage.RUNNING_GENERATION,
+    "pxdesign": JobStage.RUNNING_GENERATION,
 }
 
 

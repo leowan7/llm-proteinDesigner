@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     uniprot_base_url: str = "https://rest.uniprot.org"
 
     # Agent
-    agent_model: str = "claude-sonnet-4-5"
+    agent_model: str = "claude-sonnet-4-6"
     agent_max_tokens: int = 2048
     agent_session_ttl_seconds: int = 3600  # Redis session TTL: 1 hour
 
@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     runpod_endpoint_rfantibody: str = ""
     runpod_endpoint_bindcraft: str = ""
     runpod_endpoint_boltzgen: str = ""
+    runpod_endpoint_pxdesign: str = ""
 
     # Resend (for job notifications)
     resend_api_key: str = ""

@@ -50,6 +50,8 @@ class RunPodProvider(GPUProvider):
             "input": submission.input_payload,
             "webhook": submission.webhook_url,
         }
+        if submission.policy:
+            payload["policy"] = submission.policy
         response = await self._client.post(url, json=payload)
         response.raise_for_status()
         data = response.json()

@@ -15,6 +15,7 @@ class GPUJobSubmission:
     endpoint_id: str        # Provider-specific endpoint/function identifier
     input_payload: dict     # Tool-specific input data (JSON-serializable)
     webhook_url: str        # URL for the provider to POST status updates
+    policy: dict | None = None  # Optional RunPod execution policy (e.g. executionTimeout)
 
 
 @dataclass

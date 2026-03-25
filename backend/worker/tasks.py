@@ -19,7 +19,8 @@ from db.connection import get_db_pool
 from gpu.provider import GPUJobSubmission
 from gpu.runpod import RunPodProvider
 from jobs.models import TOOL_STAGE_MAP
-from storage.client import generate_presigned_put_url
+from pipelines import PIPELINE_MAP
+from storage.client import generate_presigned_get_url, generate_presigned_put_url
 
 
 # Map tool names to their RunPod endpoint IDs from settings.
@@ -28,6 +29,7 @@ ENDPOINT_IDS: dict[str, str] = {
     "rfantibody": settings.runpod_endpoint_rfantibody,
     "bindcraft": settings.runpod_endpoint_bindcraft,
     "boltzgen": settings.runpod_endpoint_boltzgen,
+    "pxdesign": settings.runpod_endpoint_pxdesign,
 }
 
 
@@ -143,25 +145,40 @@ async def run_job(ctx: dict, job_id: str) -> None:
     await update_job_status(job_id, "running", stage="Initializing GPU")
     await publish_status(job_id, "running", "Initializing GPU")
 
+    # Look up the tool pipeline for timeout and URL expiry settings.
+    pipeline = PIPELINE_MAP[tool]
+    url_expiry = pipeline.presigned_url_expiry_seconds
+
+    # Generate presigned GET URL for the input PDB (container downloads target).
+    input_pdb_url = generate_presigned_get_url(
+        spec_data["target_pdb_path"], expires_in=url_expiry
+    )
+
     # Generate presigned PUT URLs so the RunPod container can upload outputs directly.
     num_designs = spec_data.get("parameters", {}).get("num_designs", 10)
     output_prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
     presigned_urls = [
-        generate_presigned_put_url(f"{output_prefix}design_{i + 1:03d}.pdb")
+        generate_presigned_put_url(
+            f"{output_prefix}design_{i + 1:03d}.pdb", expires_in=url_expiry
+        )
         for i in range(num_designs)
     ]
-    report_url = generate_presigned_put_url(f"{output_prefix}report.txt")
+    report_url = generate_presigned_put_url(
+        f"{output_prefix}report.txt", expires_in=url_expiry
+    )
 
-    # Submit to RunPod.
+    # Submit to RunPod with per-tool execution timeout policy.
     endpoint_id = ENDPOINT_IDS.get(tool, "")
     submission = GPUJobSubmission(
         endpoint_id=endpoint_id,
         input_payload={
             "job_spec": spec_data,
+            "input_presigned_url": input_pdb_url,
             "output_presigned_urls": presigned_urls,
             "report_presigned_url": report_url,
         },
         webhook_url=f"{settings.app_base_url}/webhooks/runpod",
+        policy={"executionTimeout": pipeline.execution_timeout_ms},
     )
     runpod_job_id = await provider.submit_job(submission)
 

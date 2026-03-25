@@ -25,7 +25,7 @@ class JobSpec(BaseModel):
     must block dispatch.
     """
 
-    tool: Literal["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"]
+    tool: Literal["rfdiffusion", "rfantibody", "bindcraft", "boltzgen", "pxdesign"]
     target_pdb_path: str                 # MinIO path: users/{uid}/jobs/{jid}/inputs/target.cif
     target_chain: str                    # e.g. "A"
     hotspot_residues: list[int]          # e.g. [45, 48, 52]; empty list if not applicable
