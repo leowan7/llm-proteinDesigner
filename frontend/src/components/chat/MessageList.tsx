@@ -29,6 +29,8 @@ interface MessageListProps {
   onEditParams: () => void;
   onAcknowledgeWarnings: () => void;
   onUseDifferentStructure: () => void;
+  /** Called when an example prompt is clicked in GreetingCard (D-21). */
+  onPromptClick?: (prompt: string) => void;
 }
 
 /** Determines if any card in a message is a ReviewCard (controls isValidating state) */
@@ -46,6 +48,7 @@ export function MessageList({
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
+  onPromptClick,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -74,7 +77,7 @@ export function MessageList({
   return (
     <ScrollArea className="flex-1 overflow-y-auto" ref={scrollContainerRef as React.RefObject<HTMLDivElement>}>
       <div className="py-4 space-y-1" onScroll={handleScroll}>
-        <GreetingCard />
+        <GreetingCard onPromptClick={onPromptClick} />
 
         {messages.map((message) => {
           if (message.role === "user") {

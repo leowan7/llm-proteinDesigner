@@ -10,7 +10,8 @@
  * - Disabled state while agent is processing (SSE stream active)
  */
 
-import { useState, useRef, useCallback, type KeyboardEvent, type DragEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent, type DragEvent } from "react";
+import type React from "react";
 import { SendHorizontal } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,12 @@ import { Button } from "@/components/ui/button";
 interface ChatInputProps {
   onSend: (message: string, file?: File) => void;
   isProcessing: boolean;
+  /** Optional controlled value — set by parent to inject text (e.g. from example prompts). */
+  injectedValue?: string;
+  /** Called after injected value is consumed so parent can reset its state. */
+  onInjectedValueConsumed?: () => void;
+  /** Ref forwarded to the underlying textarea element (for focus control). */
+  textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
 }
 
 /** Format file size in human-readable KB */
@@ -25,11 +32,26 @@ function formatFileSize(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`;
 }
 
-export function ChatInput({ onSend, isProcessing }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  isProcessing,
+  injectedValue,
+  onInjectedValueConsumed,
+  textareaRef: externalTextareaRef,
+}: ChatInputProps) {
   const [text, setText] = useState("");
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const internalTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = externalTextareaRef ?? internalTextareaRef;
+
+  // Consume injected value from parent (example prompt clicks)
+  useEffect(() => {
+    if (injectedValue !== undefined && injectedValue !== "") {
+      setText(injectedValue);
+      onInjectedValueConsumed?.();
+    }
+  }, [injectedValue, onInjectedValueConsumed]);
 
   /** Check if a dragged file is an accepted PDB or mmCIF format */
   function isAcceptedFile(file: File): boolean {

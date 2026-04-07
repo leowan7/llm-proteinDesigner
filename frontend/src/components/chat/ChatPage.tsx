@@ -26,7 +26,7 @@
  * - ?setup=cancelled → show "payment required" alert on the ReviewCard
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { MessageList } from "./MessageList";
@@ -79,6 +79,11 @@ export function ChatPage() {
   const [lastCard, setLastCard] = useState<ChatCard | null>(null);
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
   const [showNewSessionConfirm, setShowNewSessionConfirm] = useState(false);
+
+  // Input value injected by example prompt clicks in GreetingCard
+  const [injectedInputValue, setInjectedInputValue] = useState("");
+  // Ref forwarded to the ChatInput's textarea for programmatic focus
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Job tracking state after launch
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -176,6 +181,18 @@ export function ChatPage() {
             setCompletedJob(fullJob);
           } catch {
             // If fetch fails, use what we know from the SSE event
+          }
+
+          // Post-first-job completion one-time guidance message (D-23)
+          if (event.status === "complete" && !localStorage.getItem("kendrew_first_job_shown")) {
+            const firstJobMsg: ChatMessage = {
+              id: newId(),
+              role: "assistant",
+              content:
+                "Your first design job is complete. Find all past sessions in the sidebar and all job results under Jobs.",
+            };
+            setMessages((prev) => [...prev, firstJobMsg]);
+            localStorage.setItem("kendrew_first_job_shown", "true");
           }
         }
       },
@@ -639,10 +656,21 @@ export function ChatPage() {
             onEditParams={() => handleSend("I want to edit the parameters")}
             onAcknowledgeWarnings={() => setWarningsAcknowledged(true)}
             onUseDifferentStructure={() => handleSend("I want to use a different structure")}
+            onPromptClick={(prompt) => {
+              // Auto-fill the chat input with the selected example prompt (D-21)
+              setInjectedInputValue(prompt);
+              chatInputRef.current?.focus();
+            }}
           />
           {/* Inline job tracking section — appears below messages after launch */}
           {renderInlineJobTracking()}
-          <ChatInput onSend={handleSend} isProcessing={isProcessing} />
+          <ChatInput
+            onSend={handleSend}
+            isProcessing={isProcessing}
+            injectedValue={injectedInputValue}
+            onInjectedValueConsumed={() => setInjectedInputValue("")}
+            textareaRef={chatInputRef as RefObject<HTMLTextAreaElement | null>}
+          />
         </div>
 
         {/* Right column: context panel (40% on desktop, hidden on mobile) */}
