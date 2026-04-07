@@ -67,6 +67,9 @@ app.include_router(webhooks_router)
 from jobs.router import router as jobs_router
 app.include_router(jobs_router)
 
+from user.router import router as user_router
+app.include_router(user_router)
+
 
 @app.get("/health")
 async def health():

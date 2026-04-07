@@ -5,6 +5,7 @@ and pre-job cost estimation. Authenticated endpoints require a valid
 JWT in the access_token HTTP-only cookie.
 """
 
+import stripe
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -16,7 +17,6 @@ from billing.stripe_client import (
     create_setup_session,
     get_or_create_customer,
 )
-from config import settings
 from db.connection import get_db_pool
 
 router = APIRouter(prefix="/billing", tags=["billing"])
@@ -120,6 +120,46 @@ async def payment_status(user_id: str = Depends(get_current_user)):
     stripe_customer_id = await _resolve_stripe_customer(user_id)
     has_method = check_payment_method(stripe_customer_id)
     return {"has_payment_method": has_method}
+
+
+@router.get("/payment-method")
+async def get_payment_method(user_id: str = Depends(get_current_user)):
+    """Return the authenticated user's default Stripe payment method details.
+
+    Retrieves the card brand, last 4 digits, and expiry from the Stripe
+    customer's ``invoice_settings.default_payment_method``. This is the
+    payment method set when the user completed a Stripe Checkout setup session.
+
+    Args:
+        user_id: Injected by the auth dependency.
+
+    Returns:
+        Dict with ``has_payment_method`` bool. If True, also includes
+        ``brand``, ``last4``, ``exp_month``, ``exp_year``.
+    """
+    stripe_customer_id = await _resolve_stripe_customer(user_id)
+
+    customer = stripe.Customer.retrieve(
+        stripe_customer_id,
+        expand=["default_source", "invoice_settings.default_payment_method"],
+    )
+
+    pm = customer.invoice_settings.default_payment_method
+    if not pm:
+        return {"has_payment_method": False}
+
+    card = getattr(pm, "card", None)
+    if not card:
+        # Payment method exists but is not a card type — still signal present.
+        return {"has_payment_method": True}
+
+    return {
+        "has_payment_method": True,
+        "brand": card.brand,
+        "last4": card.last4,
+        "exp_month": card.exp_month,
+        "exp_year": card.exp_year,
+    }
 
 
 @router.get("/estimate")
