@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Phase 6 context gathered
-last_updated: "2026-04-07T03:45:28.434Z"
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-04-07T15:14:31.731Z"
 progress:
   total_phases: 13
-  completed_phases: 3
-  total_plans: 26
-  completed_plans: 19
+  completed_phases: 2
+  total_plans: 21
+  completed_plans: 15
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 04 (pipeline-validation) — EXECUTING
-Plan: 6 of 7
+Plan: 2 of 7
 
 ## Performance Metrics
 
@@ -58,11 +58,7 @@ Plan: 6 of 7
 | Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
-| Phase 05-production-hardening P02 | 3min | 1 tasks | 4 files |
-| Phase 05 P01 | 6min | 2 tasks | 9 files |
-| Phase 05 P03 | 4min | 2 tasks | 5 files |
-| Phase 05 P04 | 4min | 2 tasks | 6 files |
-| Phase 05 P05 | 5min | 2 tasks | 10 files |
+| Phase 06-ui-improvements P01 | 15 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -110,14 +106,9 @@ Recent decisions affecting current work:
 - [Phase 04-pipeline-validation]: Presigned URL expiry defaults to 1.5x execution timeout (min 7200s); BindCraft overrides to 21600s (6hr) for its 4hr runtime
 - [Phase 04-pipeline-validation]: PXDesign basic preset only in v1 -- extended mode requires MSA preparation, deferred to future release
 - [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
-- [Phase 05-production-hardening]: Stripe idempotency key format gpu_usage_{job_id} -- scoped per job, 24hr dedup window
-- [Phase 05-production-hardening]: Malformed webhook timestamps skip replay check rather than rejecting -- backward compatibility
-- [Phase 05]: Rate limit key extracts user_id from access_token cookie (decode without verify) for per-user limits, falls back to client IP
-- [Phase 05]: Sentry APM disabled (traces_sample_rate=0.0) for v1 -- error tracking only
-- [Phase 05]: Heartbeat URL derived from webhook URL via string replace; stale billing capped at threshold
-- [Phase 05]: On-demand upload URLs replace pre-generated URLs; job token (token_urlsafe(32)) authenticates container-to-backend uploads
-- [Phase 05]: Sentry APM disabled (tracesSampleRate=0) for v1 -- error tracking only
-- [Phase 05]: SSE counter uses shared Redis key with 5-min TTL safety net across agent and jobs routers
+- [Phase 06-ui-improvements]: agent_history JSONB stores full Anthropic messages array (tool_use/tool_result); session_messages stores user-visible rows only for sidebar rendering (D-09)
+- [Phase 06-ui-improvements]: Title generation uses asyncio.create_task + run_in_executor to fire Haiku call without blocking SSE stream; triggered when user_sort == 0 (first message)
+- [Phase 06-ui-improvements]: list_sessions uses updated_at keyset cursor pagination to prevent offset drift as active sessions are bumped to top
 
 ### Pending Todos
 
@@ -131,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T03:45:28.418Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-ui-improvements/06-CONTEXT.md
+Last session: 2026-04-07T15:14:31.722Z
+Stopped at: Completed 06-01-PLAN.md
+Resume file: None
