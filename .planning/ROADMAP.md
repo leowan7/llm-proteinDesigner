@@ -263,7 +263,7 @@ real GPU output and cannot be mocked.
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 5. Production Hardening | Security, idempotency, billing | 0/5 | Planned | Phase 3 (done) |
+| 5. Production Hardening | Security, idempotency, billing | 4/5 | In Progress|  |
 | 6. UI Improvements | Sidebar, sessions, settings | 0/TBD | Not started | Phase 3 (done) |
 | 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/TBD | Not started | Phase 5 |
 | 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 |
