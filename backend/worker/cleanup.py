@@ -217,6 +217,55 @@ async def detect_stale_jobs() -> int:
     return killed
 
 
+async def check_daily_gpu_spend() -> None:
+    """Check total GPU spend in the last 24 hours and alert if over threshold.
+
+    Queries the jobs table for completed/cancelled/failed jobs in the last 24
+    hours, sums gpu_cost_usd, and sends an alert email via Resend if over
+    the configured threshold (gpu_daily_spend_alert_usd).
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT COALESCE(SUM(gpu_cost_usd), 0) as total_spend
+               FROM public.jobs
+               WHERE completed_at > NOW() - INTERVAL '24 hours'
+               AND status IN ('complete', 'cancelled', 'failed')"""
+        )
+
+    total_spend = float(row["total_spend"]) if row else 0.0
+    logger.info(
+        "Daily GPU spend: $%.2f (threshold: $%.2f)",
+        total_spend,
+        settings.gpu_daily_spend_alert_usd,
+    )
+
+    if total_spend > settings.gpu_daily_spend_alert_usd:
+        logger.warning(
+            "GPU spend alert: $%.2f exceeds $%.2f threshold",
+            total_spend,
+            settings.gpu_daily_spend_alert_usd,
+        )
+        if settings.resend_api_key:
+            import resend
+
+            resend.api_key = settings.resend_api_key
+            try:
+                resend.Emails.send({
+                    "from": settings.resend_from_email,
+                    "to": ["leo@ranomics.com"],
+                    "subject": f"[Kendrew] GPU spend alert: ${total_spend:.2f} in 24h",
+                    "text": (
+                        f"Daily GPU spend has reached ${total_spend:.2f}, "
+                        f"exceeding the ${settings.gpu_daily_spend_alert_usd:.2f} threshold.\n\n"
+                        f"Review active jobs and GPU usage in the Kendrew admin dashboard."
+                    ),
+                })
+                logger.info("GPU spend alert email sent")
+            except Exception as exc:
+                logger.error("Failed to send GPU spend alert: %s", exc)
+
+
 async def main():
     """Run orphan cleanup as a standalone script."""
     logging.basicConfig(

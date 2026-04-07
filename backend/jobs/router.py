@@ -12,6 +12,7 @@ Provides:
 import datetime
 import io
 import json
+import uuid as uuid_mod
 import zipfile
 
 import redis.asyncio as aioredis
@@ -30,6 +31,34 @@ from jobs.dispatch import launch_job
 from storage.client import generate_presigned_get_url, generate_presigned_put_url, get_s3_client
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+MAX_SSE_PER_USER = settings.max_sse_connections_per_user
+
+
+async def _check_sse_limit(user_id: str) -> None:
+    """Check if user has exceeded max concurrent SSE connections.
+
+    Uses a Redis key with TTL to track active SSE connections.
+    Raises HTTPException 429 if limit exceeded.
+    """
+    r = aioredis.from_url(settings.redis_url)
+    key = f"sse_count:{user_id}"
+    count = await r.incr(key)
+    await r.expire(key, 300)  # Auto-expire after 5 min (safety net)
+    if count > MAX_SSE_PER_USER:
+        await r.decr(key)
+        await r.aclose()
+        raise HTTPException(status_code=429, detail="Too many active connections")
+    await r.aclose()
+
+
+async def _release_sse_slot(user_id: str) -> None:
+    """Decrement the SSE connection counter when a stream closes."""
+    r = aioredis.from_url(settings.redis_url)
+    key = f"sse_count:{user_id}"
+    await r.decr(key)
+    await r.aclose()
+
 
 # Map tool name to RunPod endpoint ID from settings.
 _ENDPOINT_IDS: dict[str, str] = {
@@ -75,6 +104,12 @@ async def launch_job_endpoint(
         HTTPException 402: If the user has no payment method configured.
         HTTPException 404: If the job row does not exist for this user.
     """
+    # Validate job_id is a valid UUID format.
+    try:
+        uuid_mod.UUID(body.job_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid job_id format — must be a valid UUID")
+
     pool = await get_db_pool()
 
     # Fetch job row to validate ownership and get job_spec.
@@ -219,6 +254,9 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
     Returns:
         StreamingResponse with media_type="text/event-stream".
     """
+    # Enforce per-user SSE connection limit.
+    await _check_sse_limit(user_id)
+
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -227,10 +265,19 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
             user_id,
         )
     if not row:
+        await _release_sse_slot(user_id)
         raise HTTPException(status_code=404, detail="Job not found")
 
+    async def _wrapped_sse():
+        """Wrap SSE generator to release the connection slot on close."""
+        try:
+            async for event in _sse_event_generator(job_id, row["status"], row["stage"] or ""):
+                yield event
+        finally:
+            await _release_sse_slot(user_id)
+
     return StreamingResponse(
-        _sse_event_generator(job_id, row["status"], row["stage"] or ""),
+        _wrapped_sse(),
         media_type="text/event-stream",
     )
 

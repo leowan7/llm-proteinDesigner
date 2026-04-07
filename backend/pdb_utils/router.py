@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from auth.dependencies import get_current_user
 from pdb_utils.fetch import fetch_pdb_file, resolve_pdb_for_uniprot, search_uniprot
 from pdb_utils.normalize import normalize_structure
+from pdb_utils.metadata import extract_structure_metadata
 
 router = APIRouter(prefix="/pdb", tags=["pdb"])
 
@@ -67,9 +68,16 @@ async def upload_pdb(
             detail="File must have a .pdb, .cif, or .mmcif extension",
         )
 
+    # Enforce max upload size (50 MB).
+    max_upload_bytes = 50 * 1024 * 1024
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = os.path.join(tmpdir, filename)
         content = await file.read()
+        if len(content) > max_upload_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large ({len(content)} bytes). Maximum is 50 MB.",
+            )
         with open(raw_path, "wb") as f:
             f.write(content)
 
@@ -78,7 +86,19 @@ async def upload_pdb(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
-        return {"normalized_path": result.output_path, "changes": result.changes}
+        try:
+            meta = extract_structure_metadata(result.output_path)
+        except Exception:
+            meta = {}
+
+        return {
+            "normalized_path": result.output_path,
+            "changes": result.changes,
+            "chain_count": meta.get("chain_count", 0),
+            "chain_ids": meta.get("chain_ids", []),
+            "selected_chain": meta.get("selected_chain", "A"),
+            "residue_count": meta.get("residue_count", 0),
+        }
 
 
 @router.post("/fetch")

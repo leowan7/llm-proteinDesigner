@@ -13,7 +13,7 @@ from arq.connections import RedisSettings
 from arq.cron import cron
 
 from config import settings
-from worker.cleanup import cleanup_orphan_pods, detect_stale_jobs
+from worker.cleanup import check_daily_gpu_spend, cleanup_orphan_pods, detect_stale_jobs
 from worker.tasks import run_job
 
 
@@ -31,6 +31,7 @@ class WorkerSettings:
     cron_jobs = [
         cron(cleanup_orphan_pods, minute={0, 10, 20, 30, 40, 50}),
         cron(detect_stale_jobs, minute={2, 12, 22, 32, 42, 52}),
+        cron(check_daily_gpu_spend, hour={8, 20}, minute=0),
     ]
 
     redis_settings = RedisSettings.from_dsn(settings.redis_url)

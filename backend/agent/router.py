@@ -14,8 +14,10 @@ SSE event types streamed by POST /agent/message:
 """
 
 import json
+import logging
 
 import anthropic
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -26,6 +28,38 @@ from agent.tools import TOOL_DEFINITIONS, dispatch_tool
 from auth.dependencies import get_current_user
 from config import settings
 from middleware.rate_limit import limiter
+
+logger = logging.getLogger(__name__)
+
+MAX_SSE_PER_USER = settings.max_sse_connections_per_user
+
+# Maximum allowed length for agent chat messages (characters).
+MAX_MESSAGE_LENGTH = 10_000
+
+
+async def _check_sse_limit(user_id: str) -> None:
+    """Check if user has exceeded max concurrent SSE connections.
+
+    Uses a Redis key with TTL to track active SSE connections.
+    Raises HTTPException 429 if limit exceeded.
+    """
+    r = aioredis.from_url(settings.redis_url)
+    key = f"sse_count:{user_id}"
+    count = await r.incr(key)
+    await r.expire(key, 300)  # Auto-expire after 5 min (safety net)
+    if count > MAX_SSE_PER_USER:
+        await r.decr(key)
+        await r.aclose()
+        raise HTTPException(status_code=429, detail="Too many active connections")
+    await r.aclose()
+
+
+async def _release_sse_slot(user_id: str) -> None:
+    """Decrement the SSE connection counter when a stream closes."""
+    r = aioredis.from_url(settings.redis_url)
+    key = f"sse_count:{user_id}"
+    await r.decr(key)
+    await r.aclose()
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -76,9 +110,20 @@ async def agent_message(
 
     Returns a text/event-stream with events described in module docstring.
     """
+    # Validate message length to prevent oversized payloads.
+    if len(req.message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Message too long ({len(req.message)} chars). Maximum is {MAX_MESSAGE_LENGTH}.",
+        )
+
+    # Enforce per-user SSE connection limit.
+    await _check_sse_limit(user_id)
+
     try:
         messages = await session_manager.load(user_id, req.session_id)
     except ValueError:
+        await _release_sse_slot(user_id)
         raise HTTPException(status_code=404, detail="Session not found or expired")
 
     messages.append({"role": "user", "content": req.message})
@@ -171,6 +216,8 @@ async def agent_message(
         except Exception:
             # Do not leak internal error details to the client
             yield f"data: {json.dumps({'type': 'error', 'text': 'An unexpected error occurred. Please try again.'})}\n\n"
+        finally:
+            await _release_sse_slot(user_id)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

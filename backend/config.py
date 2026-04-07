@@ -88,6 +88,15 @@ class Settings(BaseSettings):
     # Upload URL expiry for on-demand container uploads (seconds)
     upload_url_expiry_seconds: int = 3600
 
+    # GPU spend alerting
+    gpu_daily_spend_alert_usd: float = 50.0
+
+    # SSE connection limits
+    max_sse_connections_per_user: int = 3
+
+    # Sentry frontend (separate DSN for browser project)
+    sentry_dsn_frontend: str = ""
+
     # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec)
     gpu_price_per_second: float = 0.0000917
     gpu_markup_percent: float = 30.0
