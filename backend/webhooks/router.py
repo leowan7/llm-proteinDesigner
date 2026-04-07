@@ -259,3 +259,59 @@ async def runpod_webhook(request: Request):
             )
 
     return {"received": True}
+
+
+@router.post("/heartbeat")
+async def heartbeat_webhook(request: Request):
+    """Receive container heartbeat with stage and progress.
+
+    Called every 60 seconds by the pipeline container. Updates job stage
+    and last_heartbeat_at in DB, publishes SSE event for live progress.
+
+    Expected payload:
+        job_id: str          Kendrew job UUID
+        stage: str           Current pipeline stage (e.g., "Running RFdiffusion")
+        designs_completed: int  Number of designs finished so far
+        designs_total: int      Total designs requested
+    """
+    body = await request.body()
+    validate_runpod_signature(body, request.headers.get("X-RunPod-Signature"))
+
+    payload = json.loads(body)
+    job_id = payload.get("job_id", "")
+    stage = payload.get("stage", "")
+    designs_completed = payload.get("designs_completed", 0)
+    designs_total = payload.get("designs_total", 0)
+
+    if not job_id:
+        return {"received": True}
+
+    # Build progress string: "Running RFdiffusion - 45/100 designs"
+    progress_stage = stage
+    if designs_total > 0:
+        progress_stage = f"{stage} - {designs_completed}/{designs_total} designs"
+
+    pool = await get_db_pool()
+
+    # Verify job exists and is running (ignore heartbeats for terminal jobs)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status FROM public.jobs WHERE id = $1", job_id
+        )
+    if not row or row["status"] != "running":
+        return {"received": True}
+
+    # Update heartbeat timestamp and stage
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE public.jobs
+               SET last_heartbeat_at = NOW(), stage = $1, updated_at = NOW()
+               WHERE id = $2""",
+            progress_stage,
+            job_id,
+        )
+
+    # Publish SSE event for live frontend progress
+    await publish_status(job_id, "running", progress_stage)
+
+    return {"received": True}
