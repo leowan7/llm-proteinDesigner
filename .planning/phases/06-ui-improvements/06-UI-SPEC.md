@@ -163,6 +163,10 @@ Keyboard shortcut: `Cmd+B` / `Ctrl+B` toggles sidebar (shadcn SidebarProvider bu
 
 Three-zone layout on desktop: Sidebar (left, fixed width) + Chat (60% of remaining) + Context panel (40% of remaining, ResizablePanel). On tablet/mobile: sidebar overlay + single-column chat, context panel via Sheet trigger.
 
+**Primary focal point:**
+- First load (no prior messages): GreetingCard heading ("What are you designing today?") is the visual anchor. Chat input is below the fold on short viewports and scrolls into view on focus.
+- Return visit (existing session loaded): Chat input is the primary focal point. GreetingCard is not shown. `autoFocus` on the textarea when the session mounts.
+
 ### Job History Page (`/jobs`)
 
 Full-width table within app shell. Max content width: 1200px, centered, `px-6` horizontal padding.
@@ -185,7 +189,7 @@ Centered container, max-width 640px, `px-6 py-8`. Tabs stack vertically on mobil
 - `SidebarGroup` / `SidebarGroupLabel` — date grouping ("Today", "This Week", "Earlier")
 - `SidebarMenu` / `SidebarMenuItem` / `SidebarMenuButton` — session list items and nav links
 - `SidebarSeparator` — divider between sessions and nav
-- `SidebarTrigger` — collapse/expand toggle (placed in header)
+- `SidebarTrigger` — collapse/expand toggle (placed in header); wrap in `Tooltip` with content "Toggle sidebar" as sighted-user label fallback (icon-only button)
 
 ### Settings Components (new — install `npx shadcn add tabs`)
 
@@ -213,8 +217,8 @@ Centered container, max-width 640px, `px-6 py-8`. Tabs stack vertically on mobil
 
 | Element | Copy |
 |---------|------|
-| New Session button | "New session" |
-| Session list empty state | "No previous sessions." |
+| New Session button | "Start new session" |
+| Session list empty state | "No sessions yet. Start one above." |
 | Session list section — today | "Today" |
 | Session list section — this week | "This week" |
 | Session list section — older | "Earlier" |
@@ -239,8 +243,10 @@ Centered container, max-width 640px, `px-6 py-8`. Tabs stack vertically on mobil
 | Column — designs | "Designs" |
 | Column — cost | "Cost" |
 | Column — actions | (no header label — actions column) |
-| Row action — view | "View" |
-| Row action — download | "Download" |
+| Row action — view (table row context) | "View" |
+| Row action — download (table row context) | "Download" |
+| Row action — view (mobile card, no row context) | "View job" |
+| Row action — download (mobile card, no row context) | "Download results" |
 | Pagination previous | "Previous" |
 | Pagination next | "Next" |
 
@@ -291,7 +297,7 @@ Centered container, max-width 640px, `px-6 py-8`. Tabs stack vertically on mobil
 
 | Action | Trigger | Dialog title | Dialog body | Confirm button | Cancel button |
 |--------|---------|-------------|-------------|----------------|---------------|
-| Delete session | Session context menu → "Delete" | "Delete session?" | "This will permanently delete this conversation and all associated messages. Jobs linked to this session are not deleted." | "Delete session" (`variant="destructive"`) | "Cancel" |
+| Delete session | Session context menu → "Delete" | "Delete session?" | "This will permanently delete this conversation and all associated messages. Jobs linked to this session are not deleted." | "Delete session" (`variant="destructive"`) | "Keep session" |
 | Cancel job | JobPage "Cancel job" button | "Cancel this job?" | "The GPU job will be stopped and billing will end at the time of cancellation. This cannot be undone." | "Cancel job" (`variant="destructive"`) | "Keep running" |
 
 ### Error States
@@ -314,7 +320,7 @@ Centered container, max-width 640px, `px-6 py-8`. Tabs stack vertically on mobil
 |-----------|--------------|
 | Sidebar session list | `role="list"` on `<ul>`, `role="listitem"` implicit on `<li>` |
 | Active session item | `aria-current="page"` |
-| Sidebar toggle button | `aria-label="Toggle sidebar"` (no visible text) |
+| Sidebar toggle button | `aria-label="Toggle sidebar"` (no visible text); also wrapped in `Tooltip` with content "Toggle sidebar" for sighted-user pointer fallback |
 | Chat message list | `aria-live="polite"` `aria-atomic="false"` on the container — new messages announced as they arrive |
 | Agent status text | `aria-live="assertive"` on the status line ("Running diffusion…") |
 | Job SSE status updates | `aria-live="assertive"` on the status badge text container |
@@ -419,3 +425,9 @@ No third-party registries. `components.json` `registries` field confirmed empty 
 | Status badges sr-only D-25 | CONTEXT.md D-25 | Color table + ARIA table |
 | Semantic table headers D-26 | CONTEXT.md D-26 | Accessibility Contract |
 | Reduced motion D-27 | CONTEXT.md D-27 | Animation Contract |
+
+## Revision Log
+
+| Date | Changes |
+|------|---------|
+| 2026-04-07 | Block 1-A: New Session button copy changed from "New session" to "Start new session" (verb-noun form). Block 1-B: Session list empty state changed from "No previous sessions." to "No sessions yet. Start one above." (adds solution path). Non-blocking: Added primary focal point declaration for ChatPage (GreetingCard heading on first load, chat input on return visits). Non-blocking: Delete session dialog dismiss changed from "Cancel" to "Keep session" for consistency with "Keep running" pattern. Non-blocking: Added Tooltip wrapper requirement on SidebarTrigger for sighted-user label fallback. Non-blocking: Added "View job" / "Download results" mobile card copy variants to Job History copywriting table. |
