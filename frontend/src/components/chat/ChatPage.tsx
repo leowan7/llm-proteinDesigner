@@ -2,13 +2,13 @@
  * ChatPage — full-width chat interface for the protein design agent.
  *
  * Layout:
+ * - Rendered inside AuthenticatedLayout which provides sidebar + AppHeader
  * - Two-column on desktop: 60% chat (MessageList + ChatInput), 40% context panel
  * - Single-column on mobile: context panel accessible via "View summary" Sheet
- * - Full-width, does NOT use AuthLayout (chat needs the full viewport)
  *
  * State:
- * - messages: running chat history
- * - sessionId: active agent session (created on mount)
+ * - messages: running chat history (loaded from persistent session on mount)
+ * - sessionId: active session UUID (read from URL params /chat/:sessionId)
  * - isProcessing: true while SSE stream is active
  * - statusText: most recent status event from SSE
  * - lastCard: most recent structured card (mirrored in context panel)
@@ -17,16 +17,18 @@
  * - jobStatus: most recent JobStatusEvent received via SSE
  *
  * Session lifecycle:
- * - createSession on mount
- * - deleteSession + createSession on "New Session"
- * - No persistence between page refreshes (session is ephemeral)
+ * - URL param /chat/:sessionId drives the active session
+ * - Bare /chat URL: redirect to most recent session or create new one for brand new users
+ * - No ephemeral Redis sessions — all sessions are PostgreSQL backed (Plan 06-01)
+ * - Session list refresh triggered via useLayoutContext().refreshSessions after agent done
  *
  * Stripe Checkout return handling:
  * - ?setup=success → auto-retry launch on the ReviewCard
  * - ?setup=cancelled → show "payment required" alert on the ReviewCard
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { MessageList } from "./MessageList";
@@ -37,8 +39,6 @@ import { ValidationCard } from "./ValidationCard";
 import { JobStatusCard } from "@/components/jobs/JobStatusCard";
 import { JobCompletionCard } from "@/components/jobs/JobCompletionCard";
 import {
-  createSession,
-  deleteSession,
   uploadPdbFile,
   sendMessage,
 } from "@/lib/agent";
@@ -49,6 +49,8 @@ import {
   getJob,
 } from "@/lib/jobs";
 import type { JobStatusEvent, JobData } from "@/lib/jobs";
+import { listSessions, loadSession, createPersistentSession } from "@/lib/sessions";
+import { useLayoutContext } from "@/components/layout/AuthenticatedLayout";
 
 /** Generate a unique message ID */
 function newId(): string {
@@ -72,13 +74,16 @@ function clearSetupParam() {
 }
 
 export function ChatPage() {
+  const { sessionId } = useParams<{ sessionId: string }>();
+  const navigate = useNavigate();
+  const { refreshSessions } = useLayoutContext();
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [sessionId, setSessionId] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusText, setStatusText] = useState("");
   const [lastCard, setLastCard] = useState<ChatCard | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
-  const [showNewSessionConfirm, setShowNewSessionConfirm] = useState(false);
 
   // Job tracking state after launch
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -91,6 +96,41 @@ export function ChatPage() {
     if (param) clearSetupParam();
     return param;
   });
+
+  // Shared chain selection state — synced between chat card and context panel
+  const [selectedChain, setSelectedChain] = useState<string | null>(null);
+
+  // Resizable panel state (percentage for chat panel width)
+  const [chatWidthPercent, setChatWidthPercent] = useState(60);
+  const isDraggingRef = useRef(false);
+
+  const handleDragStart = useCallback((e: ReactMouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+
+    const onMouseMove = (ev: globalThis.MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const container = document.getElementById("chat-layout");
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      const pct = ((ev.clientX - rect.left) / rect.width) * 100;
+      // Clamp between 30% and 80%
+      setChatWidthPercent(Math.min(80, Math.max(30, pct)));
+    };
+
+    const onMouseUp = () => {
+      isDraggingRef.current = false;
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+  }, []);
 
   // Tracks the in-progress assistant message id during streaming
   const currentAssistantIdRef = useRef<string | null>(null);
@@ -120,20 +160,96 @@ export function ChatPage() {
     };
   }, []);
 
-  /** Initialize a new session on mount */
+  /**
+   * Handle bare /chat URL (no sessionId).
+   *
+   * - If user has existing sessions, navigate to the most recent one.
+   * - If user has no sessions (brand new user), create a new persistent session
+   *   and navigate to it.
+   *
+   * This runs only when sessionId is undefined (bare /chat route).
+   */
   useEffect(() => {
+    if (sessionId) return; // URL already has a session
+
     let cancelled = false;
-    createSession()
-      .then((id) => {
-        if (!cancelled) setSessionId(id);
-      })
-      .catch((err) => {
-        console.error("Failed to create session:", err);
-      });
+
+    async function resolveSession() {
+      try {
+        const { sessions } = await listSessions(1);
+        if (cancelled) return;
+
+        if (sessions.length > 0) {
+          // Navigate to most recent session
+          navigate(`/chat/${sessions[0].id}`, { replace: true });
+        } else {
+          // Brand new user — create a persistent session
+          const newSession = await createPersistentSession();
+          if (cancelled) return;
+          await refreshSessions();
+          navigate(`/chat/${newSession.id}`, { replace: true });
+        }
+      } catch (err) {
+        console.error("Failed to resolve session:", err);
+      }
+    }
+
+    resolveSession();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [sessionId, navigate, refreshSessions]);
+
+  /**
+   * Load session history when sessionId changes.
+   * Reconstructs messages from the persistent session.
+   */
+  useEffect(() => {
+    if (!sessionId) return;
+
+    let cancelled = false;
+
+    // Reset per-session state
+    setMessages([]);
+    setLastCard(null);
+    setWarningsAcknowledged(false);
+    setActiveJobId(null);
+    setJobStatus(null);
+    setCompletedJob(null);
+    intentResultRef.current = null;
+    structureResultRef.current = null;
+    parametersResultRef.current = null;
+
+    async function loadSessionData() {
+      try {
+        const sessionData = await loadSession(sessionId!);
+        if (cancelled) return;
+
+        const loadedMessages: ChatMessage[] = sessionData.messages
+          .sort((a, b) => a.sort_order - b.sort_order)
+          .map((m) => ({
+            id: m.id,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            cards: m.cards as ChatCard[] | undefined,
+          }));
+
+        setMessages(loadedMessages);
+      } catch (err) {
+        console.error("Failed to load session:", err);
+        setMessages([{
+          id: newId(),
+          role: "assistant",
+          content: "Unable to load conversation history. Refresh the page to try again.",
+        }]);
+      }
+    }
+
+    loadSessionData();
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   /**
    * Called by ReviewCard after a job is successfully dispatched.
@@ -207,30 +323,29 @@ export function ChatPage() {
       if (card) {
         setLastCard(card);
         setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantId
-              ? { ...msg, cards: [...(msg.cards ?? []), card] }
-              : msg,
-          ),
+          prev.map((msg) => {
+            if (msg.id !== assistantId) return msg;
+            const existing = msg.cards ?? [];
+            // Structure cards: replace any previous structure card (don't accumulate)
+            if (card.type === "structure_preview") {
+              const filtered = existing.filter((c) => c.type !== "structure_preview");
+              return { ...msg, cards: [...filtered, card] };
+            }
+            return { ...msg, cards: [...existing, card] };
+          }),
         );
       }
 
-      const actions = buildActions(event.tool_name, event.result);
-      if (actions.length > 0) {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantId
-              ? { ...msg, actions: [...(msg.actions ?? []), ...actions] }
-              : msg,
-          ),
-        );
-      }
     } else if (event.type === "done") {
       setIsProcessing(false);
       setStatusText("");
+      abortControllerRef.current = null;
+      // Refresh sidebar session list so new/updated title appears
+      refreshSessions().catch(() => {});
     } else if (event.type === "error") {
       setIsProcessing(false);
       setStatusText("");
+      abortControllerRef.current = null;
       setMessages((prev) => [
         ...prev,
         {
@@ -240,7 +355,7 @@ export function ChatPage() {
         },
       ]);
     }
-  }, []);
+  }, [refreshSessions]);
 
   /**
    * Build a ChatCard from a tool_result SSE event.
@@ -253,8 +368,19 @@ export function ChatPage() {
     result: Record<string, unknown>,
   ): ChatCard | null {
     if (toolName === "resolve_structure") {
+      // Only show a structure card if we got real PDB metadata (pdb_id + chains)
+      if (result.pdb_id && result.chains) {
+        structureResultRef.current = result;
+        return { type: "structure_preview", data: result } as ChatCard;
+      }
+      // UniProt-only results (no PDB resolved yet) — store ref but don't render a card
       structureResultRef.current = result;
-      return { type: "structure_preview", data: result } as ChatCard;
+      return null;
+    }
+
+    if (toolName === "extract_interface") {
+      // Interface extraction results don't need their own card — data feeds into parameters
+      return null;
     }
 
     if (toolName === "classify_intent") {
@@ -303,7 +429,7 @@ export function ChatPage() {
             "unknown",
           target_chain: params.target_chain,
           hotspot_residues: params.hotspot_residues,
-          parameters: params.parameters,
+          parameters: { ...params.parameters, job_id: result.job_id as string },
           parameter_descriptions: params.parameter_descriptions,
           estimated_cost_usd: 0, // Replaced by live getCostEstimate call in ReviewCard
           validation_results: (result.validation_results as ReviewData["validation_results"]) ?? [],
@@ -329,21 +455,6 @@ export function ChatPage() {
     }
 
     return null;
-  }
-
-  function buildActions(
-    toolName: string,
-    result: Record<string, unknown>,
-  ): ActionButton[] {
-    if (toolName === "classify_intent") {
-      const tool = (result.recommended_tool as string) ?? "the recommended tool";
-      const toolLabel = tool.charAt(0).toUpperCase() + tool.slice(1);
-      return [
-        { label: `Yes, use ${toolLabel}`, value: `Yes, use ${toolLabel}` },
-        { label: "Let me change something", value: "Let me change something" },
-      ];
-    }
-    return [];
   }
 
   const handleSend = useCallback(
@@ -392,10 +503,26 @@ export function ChatPage() {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
       try {
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
         await sendMessage(sessionId, messageText, (event) =>
           handleEvent(event, assistantId),
+          controller.signal,
         );
       } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          // User clicked stop — just end processing
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantId && !msg.content
+                ? { ...msg, content: "Stopped." }
+                : msg,
+            ),
+          );
+          setIsProcessing(false);
+          abortControllerRef.current = null;
+          return;
+        }
         setMessages((prev) =>
           prev.map((msg) =>
             msg.id === assistantId
@@ -413,39 +540,20 @@ export function ChatPage() {
     [sessionId, isProcessing, handleEvent],
   );
 
-  const handleAction = useCallback(
-    (value: string) => {
-      handleSend(value);
+  /** Shared chain selection handler — used by both chat and context panel cards */
+  const handleChainSelected = useCallback(
+    (chainId: string) => {
+      setSelectedChain(chainId);
+      if (structureResultRef.current) {
+        structureResultRef.current.selected_chain = chainId;
+      }
+      const chains = (lastCard?.data as Record<string, unknown> | undefined)?.chains as Array<{id: string; name: string}> | undefined;
+      const chain = chains?.find((c) => c.id === chainId);
+      const chainLabel = chain ? `${chainId} (${chain.name})` : chainId;
+      handleSend(`I want to target chain ${chainLabel}`);
     },
-    [handleSend],
+    [lastCard, handleSend],
   );
-
-  const handleNewSession = useCallback(async () => {
-    // Unsubscribe from any active job SSE stream
-    jobUnsubscribeRef.current?.();
-    jobUnsubscribeRef.current = null;
-
-    if (sessionId) {
-      await deleteSession(sessionId).catch(() => {});
-    }
-    const newSessionId = await createSession().catch(() => null);
-    if (newSessionId) {
-      setSessionId(newSessionId);
-    }
-    setMessages([]);
-    setLastCard(null);
-    setWarningsAcknowledged(false);
-    setIsProcessing(false);
-    setStatusText("");
-    setShowNewSessionConfirm(false);
-    setActiveJobId(null);
-    setJobStatus(null);
-    setCompletedJob(null);
-
-    intentResultRef.current = null;
-    structureResultRef.current = null;
-    parametersResultRef.current = null;
-  }, [sessionId]);
 
   /** Render the context panel content (most recent structured card) */
   function renderContextPanel() {
@@ -463,7 +571,9 @@ export function ChatPage() {
       return (
         <StructurePreviewCard
           data={lastCard.data}
+          selectedChainOverride={selectedChain ?? undefined}
           onUseDifferent={() => handleSend("I want to use a different structure")}
+          onChainSelected={handleChainSelected}
         />
       );
     }
@@ -477,6 +587,30 @@ export function ChatPage() {
       );
     }
     if (lastCard.type === "review") {
+      // After job launch, show summary without action buttons
+      if (activeJobId) {
+        const rd = lastCard.data as ReviewData;
+        return (
+          <div className="rounded-xl border border-border/50 bg-card p-4 space-y-3 font-body">
+            <span className="font-display text-xs font-semibold text-muted-foreground uppercase tracking-[0.15em]">
+              Job Review
+            </span>
+            <div>
+              <p className="text-sm text-muted-foreground">Design goal</p>
+              <p className="font-display text-base text-foreground">{rd.design_goal}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Tool</p>
+              <p className="text-base text-foreground font-semibold">{rd.tool}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Target</p>
+              <p className="text-base font-mono text-foreground">{rd.target_pdb_id} / chain {rd.target_chain}</p>
+            </div>
+            <p className="text-sm text-emerald-400 font-semibold">Job launched successfully.</p>
+          </div>
+        );
+      }
       return (
         <ReviewCard
           data={lastCard.data}
@@ -573,18 +707,45 @@ export function ChatPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-background">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-border shrink-0">
-        <div className="flex items-center gap-2.5">
-          <img src="/logo.svg" alt="Kendrew.AI" className="size-7" />
-          <h1 className="text-xl font-semibold text-foreground">Kendrew<span className="text-primary">.AI</span></h1>
+    <div className="flex flex-col h-full bg-background">
+      {/* Main content area */}
+      <div id="chat-layout" className="flex flex-1 overflow-hidden">
+        {/* Left column: chat thread (resizable on desktop, full on mobile) */}
+        <div
+          className="flex flex-col flex-1 overflow-hidden surface-chat"
+          style={{ flexBasis: `${chatWidthPercent}%`, maxWidth: `${chatWidthPercent}%` }}
+        >
+          <MessageList
+            messages={messages}
+            isProcessing={isProcessing}
+            statusText={statusText}
+            warningsAcknowledged={warningsAcknowledged}
+            onJobLaunched={onJobLaunched}
+            onEditParams={() => handleSend("I want to edit the parameters")}
+            onAcknowledgeWarnings={() => setWarningsAcknowledged(true)}
+            onUseDifferentStructure={() => handleSend("I want to use a different structure")}
+            onChainSelected={handleChainSelected}
+            selectedChain={selectedChain ?? undefined}
+          />
+          {/* Inline job tracking section — appears below messages after launch */}
+          {renderInlineJobTracking()}
+          <ChatInput
+            onSend={handleSend}
+            isProcessing={isProcessing}
+            onStop={() => {
+              abortControllerRef.current?.abort();
+              abortControllerRef.current = null;
+              setIsProcessing(false);
+              setStatusText("");
+            }}
+          />
         </div>
-        <div className="flex items-center gap-2">
-          {/* Mobile: context panel sheet trigger */}
+
+        {/* Mobile: context panel sheet trigger */}
+        <div className="md:hidden absolute top-2 right-2">
           <Sheet>
             <SheetTrigger asChild>
-              <Button variant="ghost" size="sm" className="md:hidden">
+              <Button variant="ghost" size="sm">
                 View summary
               </Button>
             </SheetTrigger>
@@ -595,59 +756,22 @@ export function ChatPage() {
               <div className="overflow-y-auto mt-4 px-1">{renderContextPanel()}</div>
             </SheetContent>
           </Sheet>
-
-          {/* New Session button with inline confirmation */}
-          {!showNewSessionConfirm ? (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setShowNewSessionConfirm(true)}
-            >
-              New Session
-            </Button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-sm text-muted-foreground">
-                Start new session? Your current conversation will be cleared.
-              </span>
-              <Button variant="default" size="sm" onClick={handleNewSession}>
-                Confirm
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowNewSessionConfirm(false)}
-              >
-                Cancel
-              </Button>
-            </div>
-          )}
-        </div>
-      </header>
-
-      {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left column: chat thread (60% on desktop, full on mobile) */}
-        <div className="flex flex-col flex-1 md:w-3/5 md:max-w-[60%] overflow-hidden">
-          <MessageList
-            messages={messages}
-            isProcessing={isProcessing}
-            statusText={statusText}
-            warningsAcknowledged={warningsAcknowledged}
-            onAction={handleAction}
-            onJobLaunched={onJobLaunched}
-            onEditParams={() => handleSend("I want to edit the parameters")}
-            onAcknowledgeWarnings={() => setWarningsAcknowledged(true)}
-            onUseDifferentStructure={() => handleSend("I want to use a different structure")}
-          />
-          {/* Inline job tracking section — appears below messages after launch */}
-          {renderInlineJobTracking()}
-          <ChatInput onSend={handleSend} isProcessing={isProcessing} />
         </div>
 
-        {/* Right column: context panel (40% on desktop, hidden on mobile) */}
-        <div className="hidden md:flex md:flex-col md:w-2/5 border-l border-border overflow-y-auto p-4">
-          <p className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
+        {/* Drag handle for resizing panels */}
+        <div
+          onMouseDown={handleDragStart}
+          className="hidden md:flex items-center justify-center w-1.5 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors shrink-0"
+        >
+          <div className="w-0.5 h-8 rounded-full bg-border" />
+        </div>
+
+        {/* Right column: context panel (resizable on desktop, hidden on mobile) */}
+        <div
+          className="hidden md:flex md:flex-col overflow-y-auto p-4 surface-context"
+          style={{ flexBasis: `${100 - chatWidthPercent}%`, maxWidth: `${100 - chatWidthPercent}%` }}
+        >
+          <p className="font-display text-xs font-semibold text-muted-foreground uppercase tracking-[0.15em] mb-3">
             Current context
           </p>
           {renderContextPanel()}
