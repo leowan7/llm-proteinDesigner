@@ -118,7 +118,7 @@ Plans:
 - [x] 05-02-PLAN.md — Billing idempotency key, webhook replay protection, terminal-state guard
 - [x] 05-03-PLAN.md — Container heartbeat endpoint, stale job watchdog, live progress SSE
 - [x] 05-04-PLAN.md — On-demand upload URLs with job token auth, presigned URL security
-- [ ] 05-05-PLAN.md — Sentry frontend, GPU spend alerting, SSE limiter, input validation
+- [x] 05-05-PLAN.md — Sentry frontend, GPU spend alerting, SSE limiter, input validation
 
 ### Phase 6: UI Improvements
 **Goal**: The platform feels like a polished SaaS product — persistent sessions, navigable history, user settings, and WCAG 2.2 AA accessibility for biopharma procurement
