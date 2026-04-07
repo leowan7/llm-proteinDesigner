@@ -1,16 +1,18 @@
 """arq worker tasks for GPU job execution.
 
 This module is loaded by the arq worker process (worker/main.py).
-The run_job task submits a job to RunPod and stores the provider job ID.
-Completion is handled by the webhook router (webhooks/router.py), not polling.
+The run_job task creates a RunPod GPU Pod and stores the pod ID.
+Completion is handled by the webhook router (webhooks/router.py), which
+also terminates the pod after receiving results.
 
 Key design decisions:
-- Idempotent: skips submit if runpod_job_id is already set in the DB.
-- DB status is updated to 'running' before calling the GPU provider.
+- Idempotent: skips pod creation if runpod_job_id is already set in the DB.
+- DB status is updated to 'running' before creating the pod.
 - Redis pub/sub publishes status events consumed by the SSE endpoint.
 """
 
 import json
+import secrets
 
 import redis.asyncio as aioredis
 
@@ -20,16 +22,16 @@ from gpu.provider import GPUJobSubmission
 from gpu.runpod import RunPodProvider
 from jobs.models import TOOL_STAGE_MAP
 from pipelines import PIPELINE_MAP
-from storage.client import generate_presigned_get_url, generate_presigned_put_url
+from storage.client import generate_presigned_get_url
 
 
-# Map tool names to their RunPod endpoint IDs from settings.
-ENDPOINT_IDS: dict[str, str] = {
-    "rfdiffusion": settings.runpod_endpoint_rfdiffusion,
-    "rfantibody": settings.runpod_endpoint_rfantibody,
-    "bindcraft": settings.runpod_endpoint_bindcraft,
-    "boltzgen": settings.runpod_endpoint_boltzgen,
-    "pxdesign": settings.runpod_endpoint_pxdesign,
+# Map tool names to their Docker image names from settings.
+TOOL_IMAGES: dict[str, str] = {
+    "rfdiffusion": settings.runpod_image_rfdiffusion,
+    "rfantibody": settings.runpod_image_rfantibody,
+    "bindcraft": settings.runpod_image_bindcraft,
+    "boltzgen": settings.runpod_image_boltzgen,
+    "pxdesign": settings.runpod_image_pxdesign,
 }
 
 
@@ -107,13 +109,13 @@ async def update_job_status(
 
 
 async def run_job(ctx: dict, job_id: str) -> None:
-    """arq task: submit a job to RunPod and record the provider job ID.
+    """arq task: create a RunPod GPU Pod to execute a job.
 
-    This task is idempotent — if runpod_job_id is already set in the DB
-    (e.g. from a prior attempt), the submit is skipped to prevent duplicate jobs.
+    This task is idempotent — if runpod_job_id (pod ID) is already set in the
+    DB (e.g. from a prior attempt), pod creation is skipped.
 
-    Completion, billing, and email notifications are handled by the RunPod
-    webhook callback (webhooks/router.py), not by this task.
+    Completion, billing, pod termination, and email notifications are handled
+    by the webhook callback (webhooks/router.py), not by this task.
 
     Args:
         ctx: arq task context (not used directly).
@@ -130,10 +132,9 @@ async def run_job(ctx: dict, job_id: str) -> None:
         )
 
     if not row:
-        # Job not found — nothing to do.
         return
 
-    # Idempotency check: skip if already submitted to RunPod.
+    # Idempotency check: skip if already submitted (pod already created).
     if row["runpod_job_id"]:
         return
 
@@ -141,11 +142,21 @@ async def run_job(ctx: dict, job_id: str) -> None:
     tool = spec_data["tool"]
     user_id = str(row["user_id"])
 
-    # Update status to running / initializing before touching the GPU provider.
+    # Update status to running / initializing before creating the pod.
     await update_job_status(job_id, "running", stage="Initializing GPU")
     await publish_status(job_id, "running", "Initializing GPU")
 
-    # Look up the tool pipeline for timeout and URL expiry settings.
+    # Generate a job-specific token for container-to-backend authentication.
+    # The container uses this token to request fresh presigned upload URLs on-demand.
+    job_token = secrets.token_urlsafe(32)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE public.jobs SET job_token = $1 WHERE id = $2",
+            job_token,
+            job_id,
+        )
+
+    # Look up the tool pipeline for URL expiry settings.
     pipeline = PIPELINE_MAP[tool]
     url_expiry = pipeline.presigned_url_expiry_seconds
 
@@ -154,39 +165,43 @@ async def run_job(ctx: dict, job_id: str) -> None:
         spec_data["target_pdb_path"], expires_in=url_expiry
     )
 
-    # Generate presigned PUT URLs so the RunPod container can upload outputs directly.
-    num_designs = spec_data.get("parameters", {}).get("num_designs", 10)
-    output_prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
-    presigned_urls = [
-        generate_presigned_put_url(
-            f"{output_prefix}design_{i + 1:03d}.pdb", expires_in=url_expiry
+    # Resolve the Docker image for this tool.
+    image_name = TOOL_IMAGES.get(tool, "")
+    if not image_name:
+        await update_job_status(
+            job_id, "failed", stage="Failed",
+            error_category=f"No Docker image configured for tool: {tool}",
         )
-        for i in range(num_designs)
-    ]
-    report_url = generate_presigned_put_url(
-        f"{output_prefix}report.txt", expires_in=url_expiry
-    )
+        await publish_status(job_id, "failed", "Failed")
+        return
 
-    # Submit to RunPod with per-tool execution timeout policy.
-    endpoint_id = ENDPOINT_IDS.get(tool, "")
+    # Build the pod submission. endpoint_id is repurposed as the Docker image name.
+    # The policy dict carries pod-specific config (GPU type, volumes, etc.).
     submission = GPUJobSubmission(
-        endpoint_id=endpoint_id,
+        endpoint_id=image_name,
         input_payload={
             "job_spec": spec_data,
             "input_presigned_url": input_pdb_url,
-            "output_presigned_urls": presigned_urls,
-            "report_presigned_url": report_url,
+            "job_token": job_token,
+            "upload_urls_endpoint": f"{settings.app_base_url}/jobs/{job_id}/upload-urls",
         },
         webhook_url=f"{settings.app_base_url}/webhooks/runpod",
-        policy={"executionTimeout": pipeline.execution_timeout_ms},
+        policy={
+            "job_id": job_id,
+            "tool": tool,
+            "gpu_type_ids": settings.runpod_gpu_type_ids,
+            "container_disk_gb": settings.runpod_container_disk_gb,
+            "network_volume_id": settings.runpod_network_volume_id,
+            "container_registry_auth_id": settings.runpod_container_registry_auth_id,
+        },
     )
-    runpod_job_id = await provider.submit_job(submission)
+    pod_id = await provider.submit_job(submission)
 
-    # Persist the RunPod job ID for idempotency and cancellation.
+    # Persist the pod ID (stored in runpod_job_id column) for idempotency and termination.
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE public.jobs SET runpod_job_id = $1 WHERE id = $2",
-            runpod_job_id,
+            pod_id,
             job_id,
         )
 

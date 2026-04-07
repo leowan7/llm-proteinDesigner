@@ -85,6 +85,9 @@ class Settings(BaseSettings):
     # App base URL (used in email links and Stripe return URLs)
     app_base_url: str = "http://localhost:8000"
 
+    # Upload URL expiry for on-demand container uploads (seconds)
+    upload_url_expiry_seconds: int = 3600
+
     # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec)
     gpu_price_per_second: float = 0.0000917
     gpu_markup_percent: float = 30.0

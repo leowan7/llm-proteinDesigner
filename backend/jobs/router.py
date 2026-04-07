@@ -27,7 +27,7 @@ from config import settings
 from db.connection import get_db_pool
 from gpu.runpod import RunPodProvider
 from jobs.dispatch import launch_job
-from storage.client import generate_presigned_get_url, get_s3_client
+from storage.client import generate_presigned_get_url, generate_presigned_put_url, get_s3_client
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -354,6 +354,71 @@ async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
 
     return {"status": "cancelled", "gpu_seconds": gpu_seconds, "gpu_cost_usd": gpu_cost_usd}
 
+
+# ---------------------------------------------------------------------------
+# On-demand upload URL endpoint (container auth via job token)
+# ---------------------------------------------------------------------------
+
+class UploadUrlsRequest(BaseModel):
+    """Request body for POST /jobs/{job_id}/upload-urls."""
+
+    filenames: list[str]
+
+
+@router.post("/{job_id}/upload-urls")
+async def get_upload_urls(job_id: str, body: UploadUrlsRequest, request: Request):
+    """Generate fresh presigned PUT URLs for container file uploads.
+
+    Authenticated via job_token (Bearer token in Authorization header),
+    NOT via user JWT. The container receives the job_token as an env var.
+
+    Args:
+        job_id: Job UUID string.
+        body: List of filenames to generate upload URLs for.
+
+    Returns:
+        {"urls": {"filename.pdb": "https://presigned-url", ...}}
+    """
+    # Extract job token from Authorization header
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing job token")
+    provided_token = auth_header[7:]  # Strip "Bearer "
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id, status, job_token FROM public.jobs WHERE id = $1",
+            job_id,
+        )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not row["job_token"] or provided_token != row["job_token"]:
+        raise HTTPException(status_code=401, detail="Invalid job token")
+
+    if row["status"] != "running":
+        raise HTTPException(status_code=409, detail="Job is not running")
+
+    # Generate presigned PUT URLs for each requested filename
+    user_id = str(row["user_id"])
+    output_prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
+    urls = {}
+    for filename in body.filenames:
+        # Sanitize filename — strip path separators to prevent traversal
+        safe_name = filename.replace("/", "_").replace("\\", "_")
+        key = f"{output_prefix}{safe_name}"
+        urls[filename] = generate_presigned_put_url(
+            key, expires_in=settings.upload_url_expiry_seconds
+        )
+
+    return {"urls": urls}
+
+
+# ---------------------------------------------------------------------------
+# Get single job
+# ---------------------------------------------------------------------------
 
 @router.get("/{job_id}")
 async def get_job(job_id: str, user_id: str = Depends(get_current_user)):
