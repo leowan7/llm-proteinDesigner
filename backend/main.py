@@ -3,13 +3,33 @@
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from config import settings
 from auth.router import router as auth_router
 from db.connection import close_db_pool, get_db_pool
+from middleware.logging import StructuredLoggingMiddleware, setup_logging
+
+# Initialize Sentry error tracking (disabled when sentry_dsn is empty).
+if settings.sentry_dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        traces_sample_rate=0.0,  # No APM for v1
+        profiles_sample_rate=0.0,
+        integrations=[
+            StarletteIntegration(transaction_style="endpoint"),
+            FastApiIntegration(transaction_style="endpoint"),
+        ],
+        environment="development" if settings.debug else "production",
+    )
+
+# Configure structured JSON logging to stdout.
+setup_logging()
 
 
 @asynccontextmanager
@@ -53,6 +73,9 @@ if not settings.testing:
 if settings.rate_limit_enabled:
     from middleware.rate_limit import setup_rate_limiting
     setup_rate_limiting(app)
+
+# Structured logging — added last so it wraps all other middleware (outermost in Starlette).
+app.add_middleware(StructuredLoggingMiddleware)
 
 # Routers
 app.include_router(auth_router)
