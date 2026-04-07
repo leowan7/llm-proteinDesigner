@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 06-01-PLAN.md
-last_updated: "2026-04-07T15:14:31.731Z"
+stopped_at: Completed 06-02-PLAN.md
+last_updated: "2026-04-07T15:21:39.920Z"
 progress:
   total_phases: 13
   completed_phases: 2
@@ -58,7 +58,7 @@ Plan: 2 of 7
 | Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
-| Phase 06-ui-improvements P01 | 15 | 2 tasks | 6 files |
+| Phase 06-ui-improvements P02 | 12min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -106,9 +106,8 @@ Recent decisions affecting current work:
 - [Phase 04-pipeline-validation]: Presigned URL expiry defaults to 1.5x execution timeout (min 7200s); BindCraft overrides to 21600s (6hr) for its 4hr runtime
 - [Phase 04-pipeline-validation]: PXDesign basic preset only in v1 -- extended mode requires MSA preparation, deferred to future release
 - [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
-- [Phase 06-ui-improvements]: agent_history JSONB stores full Anthropic messages array (tool_use/tool_result); session_messages stores user-visible rows only for sidebar rendering (D-09)
-- [Phase 06-ui-improvements]: Title generation uses asyncio.create_task + run_in_executor to fire Haiku call without blocking SSE stream; triggered when user_sort == 0 (first message)
-- [Phase 06-ui-improvements]: list_sessions uses updated_at keyset cursor pagination to prevent offset drift as active sessions are bumped to top
+- [Phase 06-ui-improvements]: Rate limiting not added to new endpoints — slowapi not in requirements.txt; consistent with existing endpoints; deferred to hardening phase
+- [Phase 06-ui-improvements]: ALLOWED_STATUS_FILTERS = {'running', 'complete', 'failed'} per D-17 spec — 'cancelled' and 'queued' deliberately excluded from job list filter
 
 ### Pending Todos
 
@@ -122,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T15:14:31.722Z
-Stopped at: Completed 06-01-PLAN.md
+Last session: 2026-04-07T15:21:39.915Z
+Stopped at: Completed 06-02-PLAN.md
 Resume file: None
