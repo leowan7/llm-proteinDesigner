@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-04-07T15:21:39.920Z"
+stopped_at: Completed 06-04-PLAN.md
+last_updated: "2026-04-07T15:32:27.021Z"
 progress:
   total_phases: 13
   completed_phases: 2
   total_plans: 21
-  completed_plans: 15
+  completed_plans: 14
 ---
 
 # Project State
@@ -58,7 +58,7 @@ Plan: 2 of 7
 | Phase 03-job-execution-frontend-and-billing P03 | 35 | 2 tasks | 14 files |
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
-| Phase 06-ui-improvements P02 | 12min | 2 tasks | 5 files |
+| Phase 06-ui-improvements P04 | 387 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -106,8 +106,8 @@ Recent decisions affecting current work:
 - [Phase 04-pipeline-validation]: Presigned URL expiry defaults to 1.5x execution timeout (min 7200s); BindCraft overrides to 21600s (6hr) for its 4hr runtime
 - [Phase 04-pipeline-validation]: PXDesign basic preset only in v1 -- extended mode requires MSA preparation, deferred to future release
 - [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
-- [Phase 06-ui-improvements]: Rate limiting not added to new endpoints — slowapi not in requirements.txt; consistent with existing endpoints; deferred to hardening phase
-- [Phase 06-ui-improvements]: ALLOWED_STATUS_FILTERS = {'running', 'complete', 'failed'} per D-17 spec — 'cancelled' and 'queued' deliberately excluded from job list filter
+- [Phase 06-ui-improvements]: ChatInput injectedValue prop pattern for prompt injection rather than lifting full text state
+- [Phase 06-ui-improvements]: GreetingCard onPromptClick threaded through MessageList to avoid breaking MessageList props contract
 
 ### Pending Todos
 
@@ -121,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T15:21:39.915Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-04-07T15:32:27.014Z
+Stopped at: Completed 06-04-PLAN.md
 Resume file: None

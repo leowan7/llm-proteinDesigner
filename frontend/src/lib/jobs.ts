@@ -65,14 +65,17 @@ export interface JobData {
   created_at: string | null;
 }
 
-/** Summary item from GET /jobs/ list */
+/** Summary item from GET /jobs list (paginated) */
 export interface JobListItem {
   id: string;
+  tool: string | null;
   status: string;
-  tool: string;
-  created_at: string | null;
+  name: string | null;
+  created_at: string;
   completed_at: string | null;
   gpu_cost_usd: number | null;
+  candidate_count: number | null;
+  session_id: string | null;
 }
 
 /** Cost estimate from GET /billing/estimate */
@@ -172,7 +175,7 @@ export async function getJob(jobId: string): Promise<JobData> {
 }
 
 /**
- * Fetch the list of jobs for the current user.
+ * Fetch the list of jobs for the current user (legacy single-page fetch).
  *
  * @returns Array of JobListItem summaries, most recent first.
  */
@@ -182,6 +185,37 @@ export async function getJobList(): Promise<JobListItem[]> {
   });
   if (!response.ok) throw new Error(`Failed to fetch job list: ${response.status}`);
   return response.json() as Promise<JobListItem[]>;
+}
+
+/**
+ * Fetch a paginated list of jobs for the current user.
+ *
+ * Uses keyset pagination: pass the created_at timestamp of the last job
+ * in the current page as the `before` cursor to fetch the next page.
+ *
+ * @param params.limit  - Max jobs to return per page (default 25).
+ * @param params.status - Filter by status: "running", "complete", or "failed". Omit for all.
+ * @param params.before - ISO timestamp cursor for keyset pagination (exclusive).
+ * @returns Object with jobs array and has_more flag.
+ */
+export async function listJobs(
+  params: {
+    limit?: number;
+    status?: string | null;
+    before?: string | null;
+  } = {},
+): Promise<{ jobs: JobListItem[]; has_more: boolean }> {
+  const searchParams = new URLSearchParams();
+  if (params.limit) searchParams.set("limit", String(params.limit));
+  if (params.status) searchParams.set("status", params.status);
+  if (params.before) searchParams.set("before", params.before);
+  const query = searchParams.toString();
+  const url = query ? `/jobs?${query}` : "/jobs";
+  const response = await fetch(`${API_BASE}${url}`, {
+    credentials: "include",
+  });
+  if (!response.ok) throw new Error(`Failed to fetch jobs: ${response.status}`);
+  return response.json() as Promise<{ jobs: JobListItem[]; has_more: boolean }>;
 }
 
 /**

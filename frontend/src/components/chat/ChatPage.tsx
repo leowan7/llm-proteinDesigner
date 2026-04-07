@@ -27,7 +27,7 @@
  * - ?setup=cancelled → show "payment required" alert on the ReviewCard
  */
 
-import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -84,6 +84,11 @@ export function ChatPage() {
   const [lastCard, setLastCard] = useState<ChatCard | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
+
+  // Input value injected by example prompt clicks in GreetingCard
+  const [injectedInputValue, setInjectedInputValue] = useState("");
+  // Ref forwarded to the ChatInput's textarea for programmatic focus
+  const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
 
   // Job tracking state after launch
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -292,6 +297,18 @@ export function ChatPage() {
             setCompletedJob(fullJob);
           } catch {
             // If fetch fails, use what we know from the SSE event
+          }
+
+          // Post-first-job completion one-time guidance message (D-23)
+          if (event.status === "complete" && !localStorage.getItem("kendrew_first_job_shown")) {
+            const firstJobMsg: ChatMessage = {
+              id: newId(),
+              role: "assistant",
+              content:
+                "Your first design job is complete. Find all past sessions in the sidebar and all job results under Jobs.",
+            };
+            setMessages((prev) => [...prev, firstJobMsg]);
+            localStorage.setItem("kendrew_first_job_shown", "true");
           }
         }
       },
@@ -726,12 +743,19 @@ export function ChatPage() {
             onUseDifferentStructure={() => handleSend("I want to use a different structure")}
             onChainSelected={handleChainSelected}
             selectedChain={selectedChain ?? undefined}
+            onPromptClick={(prompt) => {
+              setInjectedInputValue(prompt);
+              chatInputRef.current?.focus();
+            }}
           />
           {/* Inline job tracking section — appears below messages after launch */}
           {renderInlineJobTracking()}
           <ChatInput
             onSend={handleSend}
             isProcessing={isProcessing}
+            injectedValue={injectedInputValue}
+            onInjectedValueConsumed={() => setInjectedInputValue("")}
+            textareaRef={chatInputRef as RefObject<HTMLTextAreaElement | null>}
             onStop={() => {
               abortControllerRef.current?.abort();
               abortControllerRef.current = null;
