@@ -418,10 +418,9 @@ def stage_proteinmpnn(
     if webhook_url and job_id:
         send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, len(backbone_pdbs))
 
-    designed_fastas = []
     binder_chain = "B" if target_chain == "A" else "A"
 
-    # Step 1: Parse all backbone PDBs into JSONL format using ProteinMPNN helper
+    # Step 1: Parse all backbone PDBs into JSONL format
     parsed_jsonl = os.path.join(output_dir, "parsed_pdbs.jsonl")
     parse_cmd = [
         "python", "/opt/ProteinMPNN/helper_scripts/parse_multiple_chains.py",
@@ -430,53 +429,42 @@ def stage_proteinmpnn(
     ]
     run_command(parse_cmd, timeout=120)
 
-    # Step 2: Assign fixed/design chains using ProteinMPNN helper
-    chain_id_jsonl = os.path.join(output_dir, "chain_id.jsonl")
+    # Step 2: Assign chains — design binder chain, fix target chain
+    assigned_jsonl = os.path.join(output_dir, "assigned_pdbs.jsonl")
     assign_cmd = [
         "python", "/opt/ProteinMPNN/helper_scripts/assign_fixed_chains.py",
         "--input_path", parsed_jsonl,
-        "--output_path", chain_id_jsonl,
+        "--output_path", assigned_jsonl,
         "--chain_list", binder_chain,
     ]
     run_command(assign_cmd, timeout=120)
 
-    # Step 3: Run ProteinMPNN on each backbone with the chain assignments
-    for idx, pdb_path in enumerate(backbone_pdbs):
-        design_name = Path(pdb_path).stem
-        per_design_out = os.path.join(output_dir, design_name)
-        os.makedirs(per_design_out, exist_ok=True)
+    # Step 3: Run ProteinMPNN on all backbones in one batch
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, len(backbone_pdbs))
 
-        cmd = [
-            "python", PROTEINMPNN_SCRIPT,
-            "--pdb_path", pdb_path,
-            "--out_folder", per_design_out,
-            "--num_seq_per_target", "1",
-            "--sampling_temp", "0.1",
-            "--model_name", "v_48_020",
-            "--batch_size", "1",
-            "--jsonl_path", parsed_jsonl,
-            "--chain_id_jsonl", chain_id_jsonl,
-        ]
+    cmd = [
+        "python", PROTEINMPNN_SCRIPT,
+        "--jsonl_path", parsed_jsonl,
+        "--chain_id_jsonl", assigned_jsonl,
+        "--out_folder", output_dir,
+        "--num_seq_per_target", "2",
+        "--sampling_temp", "0.1",
+        "--batch_size", "1",
+    ]
 
-        try:
-            run_command(cmd, timeout=300, cwd="/opt/ProteinMPNN")
-            fasta_files = glob(os.path.join(per_design_out, "seqs", "*.fa"))
-            if fasta_files:
-                designed_fastas.extend(fasta_files)
-                logger.info("ProteinMPNN designed sequence for %s", design_name)
-                if webhook_url and job_id:
-                    send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", idx + 1, len(backbone_pdbs))
-            else:
-                logger.warning("No FASTA output for %s", design_name)
-        except RuntimeError as exc:
-            logger.warning("ProteinMPNN failed for %s: %s", design_name, exc)
-            continue
+    run_command(cmd, timeout=600, cwd="/opt/ProteinMPNN")
 
-    if not designed_fastas:
-        raise RuntimeError("ProteinMPNN failed on all backbone inputs")
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "ProteinMPNN complete", len(backbone_pdbs), len(backbone_pdbs))
 
-    logger.info("ProteinMPNN produced %d designed sequences", len(designed_fastas))
-    return designed_fastas
+    # Collect all output FASTAs
+    fasta_files = glob(os.path.join(output_dir, "seqs", "*.fa"))
+    if not fasta_files:
+        raise RuntimeError("ProteinMPNN produced no FASTA output")
+
+    logger.info("ProteinMPNN produced %d designed sequences", len(fasta_files))
+    return fasta_files
 
 
 def _extract_sequences_from_fasta(fasta_path: str) -> dict[str, str]:
@@ -552,11 +540,23 @@ def stage_af2_validation(
     for idx, fasta_path in enumerate(designed_fastas):
         design_name = Path(fasta_path).stem
         sequences = _extract_sequences_from_fasta(fasta_path)
-        if not sequences:
-            logger.warning("No sequences in %s, skipping", fasta_path)
+        seq_list = list(sequences.values())
+        if len(seq_list) < 2:
+            logger.warning("No designed sequences in %s, skipping", fasta_path)
             continue
 
-        binder_sequence = list(sequences.values())[0]
+        # Index 0 is the input poly-Glycine backbone — skip it.
+        # Index 1 is the first designed sequence from ProteinMPNN.
+        full_designed_seq = seq_list[1]
+
+        # ProteinMPNN outputs all chains joined by '/': TargetSeq/BinderSeq
+        # Extract only the binder chain for AF2 multimer input.
+        chain_seqs = full_designed_seq.split("/")
+        if len(chain_seqs) < 2:
+            logger.warning("Unexpected chain format in ProteinMPNN output: %s", fasta_path)
+            continue
+
+        binder_sequence = chain_seqs[1] if target_chain == "A" else chain_seqs[0]
 
         combined_fasta = os.path.join(output_dir, f"{design_name}.fasta")
         with open(combined_fasta, "w") as fh:

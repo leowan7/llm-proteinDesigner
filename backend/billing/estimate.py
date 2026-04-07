@@ -2,7 +2,7 @@
 
 Provides a cost range (low, high) in USD before a job is submitted,
 accounting for tool-specific runtime ranges, design count scaling,
-the base GPU price per second, and the Ranomics markup percentage.
+the base GPU price per second, and the platform markup percentage.
 
 Runtime ranges are empirically derived from internal benchmarks on A100 80GB.
 """
@@ -16,6 +16,7 @@ TOOL_RUNTIME_RANGES: dict[str, tuple[int, int]] = {
     "rfantibody": (600, 1800),     # 10–30 min
     "bindcraft": (1800, 5400),     # 30–90 min
     "boltzgen": (300, 900),        # 5–15 min
+    "pxdesign": (600, 1800),      # 10–30 min (similar profile to RFdiffusion)
 }
 
 

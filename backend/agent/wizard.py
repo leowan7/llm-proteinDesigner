@@ -1,4 +1,4 @@
-"""Tool-specific wizard parameter definitions with Ranomics-curated defaults.
+"""Tool-specific wizard parameter definitions with Kendrew-curated defaults.
 
 Each tool has 3-5 essential parameters. Advanced settings are deferred to v2.
 These definitions drive the wizard UI and validate user-supplied parameters
@@ -58,9 +58,9 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
             label="Number of designs",
             param_type="int",
             default=10,
-            description="10 designs provides a reasonable screening pool.",
+            description="10 designs provides a reasonable screening pool. BindCraft's ~46% hit rate means even small runs yield candidates.",
             min_value=1,
-            max_value=50,
+            max_value=500,
         ),
         WizardParam(
             name="design_cycles",
@@ -95,10 +95,10 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
             name="num_designs",
             label="Number of designs",
             param_type="int",
-            default=10,
-            description="10 designs balances diversity with GPU cost for CDR loop generation.",
+            default=100,
+            description="100 designs for a pilot run. Production campaigns typically use 5,000-20,000.",
             min_value=1,
-            max_value=100,
+            max_value=20000,
         ),
         WizardParam(
             name="antibody_type",
@@ -117,31 +117,54 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
     ],
     "boltzgen": [
         WizardParam(
-            name="num_samples",
-            label="Number of conformational samples",
+            name="num_designs",
+            label="Number of designs",
             param_type="int",
             default=100,
-            description="100 samples captures the dominant conformational states.",
+            description="100 designs for a pilot run. Production campaigns typically use 10,000-60,000.",
             min_value=10,
-            max_value=1000,
+            max_value=60000,
         ),
         WizardParam(
-            name="temperature",
-            label="Sampling temperature",
-            param_type="float",
-            default=1.0,
-            description="1.0 samples the Boltzmann distribution; higher explores rare states.",
-            min_value=0.1,
-            max_value=5.0,
-        ),
-        WizardParam(
-            name="num_steps",
-            label="Integration steps",
+            name="budget",
+            label="Final candidate budget",
             param_type="int",
-            default=100,
-            description="100 steps provides good accuracy for the ODE solver.",
-            min_value=10,
+            default=50,
+            description="Number of top candidates after quality-diversity filtering. 20-100 typical.",
+            min_value=5,
             max_value=500,
+        ),
+        WizardParam(
+            name="protocol",
+            label="Design protocol",
+            param_type="str",
+            default="protein-anything",
+            description="protein-anything (minibinder), nanobody-anything (VHH), peptide-anything (cyclic peptide), protein-small_molecule, antibody-anything.",
+        ),
+    ],
+    "pxdesign": [
+        WizardParam(
+            name="num_designs",
+            label="Number of designs",
+            param_type="int",
+            default=100,
+            description="100 designs for a pilot run. Production campaigns typically use 5,000-20,000.",
+            min_value=10,
+            max_value=20000,
+        ),
+        WizardParam(
+            name="mode",
+            label="Filter mode",
+            param_type="str",
+            default="basic",
+            description="basic (AF2-IG only, faster) or extended (AF2-IG + Protenix, requires MSA, more discriminating).",
+        ),
+        WizardParam(
+            name="generator",
+            label="Design generator",
+            param_type="str",
+            default="diffusion",
+            description="diffusion (PXDesign-d, higher throughput) or hallucination (PXDesign-h, more diverse topologies).",
         ),
     ],
 }

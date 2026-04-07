@@ -153,3 +153,16 @@ None - no external service configuration required for this plan. The anthropic_a
 ---
 *Phase: 02-agent-and-structure-input*
 *Completed: 2026-03-19*
+
+## Self-Check: PASSED
+
+- FOUND: backend/agent/jobspec.py
+- FOUND: backend/agent/wizard.py
+- FOUND: backend/pdb_utils/models.py
+- FOUND: backend/config.py (with anthropic_api_key)
+- FOUND: supabase/migrations/20260319000001_jobspec.sql
+- FOUND: backend/tests/agent/test_jobspec.py (3 passing tests)
+- FOUND: backend/tests/fixtures/test_structure.pdb
+- FOUND commit 7865fc1: feat(02-01): type contracts, wizard params, config, and DB migration
+- FOUND commit 8c2ec4b: feat(02-01): test scaffolds for all Phase 2 requirements
+- FOUND commit 71f9fa8: docs(02-01): complete type-contracts-and-test-scaffolds plan

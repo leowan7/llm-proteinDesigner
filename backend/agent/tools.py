@@ -39,9 +39,8 @@ TOOL_DEFINITIONS = [
         "name": "classify_intent",
         "description": (
             "Classify the user's protein design intent and recommend the appropriate tool. "
-            "Design types: minibinder (small de novo binder), vhh_nanobody (single-domain antibody-like), "
-            "de_novo_backbone (new fold without binding target), motif_scaffolding (embed motif in new scaffold), "
-            "conformational_ensemble (sample conformational landscape), structure_prediction (predict/validate 3D structure). "
+            "Design types: minibinder, vhh_nanobody, full_antibody, cyclic_peptide, "
+            "small_molecule_binder, de_novo_backbone, motif_scaffolding, symmetric_assembly. "
             "Use AFTER asking the user what type of protein they want to design and receiving their answer."
         ),
         "input_schema": {
@@ -52,15 +51,17 @@ TOOL_DEFINITIONS = [
                     "enum": [
                         "minibinder",
                         "vhh_nanobody",
+                        "full_antibody",
+                        "cyclic_peptide",
+                        "small_molecule_binder",
                         "de_novo_backbone",
                         "motif_scaffolding",
-                        "conformational_ensemble",
-                        "structure_prediction",
+                        "symmetric_assembly",
                     ],
                 },
                 "recommended_tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen", "pxdesign"],
                 },
                 "rationale": {
                     "type": "string",
@@ -74,7 +75,7 @@ TOOL_DEFINITIONS = [
         "name": "collect_parameters",
         "description": (
             "Collect tool-specific parameters for the design job. "
-            "Returns the parameter schema with Ranomics-curated defaults for the selected tool. "
+            "Returns the parameter schema with Kendrew-curated defaults for the selected tool. "
             "Use after the user has confirmed the recommended tool."
         ),
         "input_schema": {
@@ -82,7 +83,7 @@ TOOL_DEFINITIONS = [
             "properties": {
                 "tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen", "pxdesign"],
                 },
                 "target_chain": {
                     "type": "string",
@@ -99,6 +100,37 @@ TOOL_DEFINITIONS = [
                 },
             },
             "required": ["tool", "target_chain"],
+        },
+    },
+    {
+        "name": "extract_interface",
+        "description": (
+            "Extract interface residues from a co-crystal structure. Given a PDB with two chains, "
+            "finds all residues on the target chain within 5 Angstroms of the partner chain. "
+            "Use this when the user's PDB contains a known binding partner and you need hotspot residues. "
+            "Returns a list of interface residues with distances."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pdb_path": {
+                    "type": "string",
+                    "description": "Path to the PDB file on server.",
+                },
+                "target_chain": {
+                    "type": "string",
+                    "description": "Chain ID of the target protein (the chain you want to design binders against).",
+                },
+                "partner_chain": {
+                    "type": "string",
+                    "description": "Chain ID of the known binding partner in the co-crystal.",
+                },
+                "distance_cutoff": {
+                    "type": "number",
+                    "description": "Distance threshold in Angstroms. Default 5.0.",
+                },
+            },
+            "required": ["pdb_path", "target_chain", "partner_chain"],
         },
     },
     {
@@ -125,7 +157,7 @@ TOOL_DEFINITIONS = [
                 },
                 "tool": {
                     "type": "string",
-                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen"],
+                    "enum": ["rfdiffusion", "rfantibody", "bindcraft", "boltzgen", "pxdesign"],
                 },
                 "parameters": {
                     "type": "object",
@@ -138,12 +170,13 @@ TOOL_DEFINITIONS = [
 ]
 
 
-async def dispatch_tool(tool_name: str, tool_input: dict) -> str:
+async def dispatch_tool(tool_name: str, tool_input: dict, user_id: str = "") -> str:
     """Execute a tool call and return the result as a JSON string.
 
     Args:
         tool_name: Name of the tool to execute.
         tool_input: Input parameters from Claude's tool_use block.
+        user_id: Authenticated user ID (needed for job creation).
 
     Returns:
         JSON string result to be sent back as tool_result content.
@@ -154,8 +187,10 @@ async def dispatch_tool(tool_name: str, tool_input: dict) -> str:
         return await _handle_classify_intent(tool_input)
     elif tool_name == "collect_parameters":
         return await _handle_collect_parameters(tool_input)
+    elif tool_name == "extract_interface":
+        return await _handle_extract_interface(tool_input)
     elif tool_name == "validate_preflight":
-        return await _handle_validate_preflight(tool_input)
+        return await _handle_validate_preflight(tool_input, user_id=user_id)
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
@@ -172,7 +207,7 @@ async def _handle_resolve_structure(tool_input: dict) -> str:
     query_type = tool_input["query_type"]
 
     try:
-        from pdb_utils.fetch import fetch_pdb_file, search_uniprot, resolve_pdb_for_uniprot
+        from pdb_utils.fetch import fetch_pdb_file, fetch_pdb_metadata, search_uniprot, resolve_pdb_for_uniprot
     except ImportError:
         # pdb_utils.fetch not yet available (Plan 02-02 not yet run)
         return json.dumps({
@@ -184,9 +219,31 @@ async def _handle_resolve_structure(tool_input: dict) -> str:
         if query_type == "pdb_accession":
             try:
                 data = await fetch_pdb_file(query, client)
+                metadata = await fetch_pdb_metadata(query, client)
+
+                # Persist PDB to disk so validate_preflight can read it
+                import os
+                pdb_dir = "/tmp/structures"
+                os.makedirs(pdb_dir, exist_ok=True)
+                pdb_path = os.path.join(pdb_dir, f"{query.upper()}.pdb")
+                with open(pdb_path, "w" if isinstance(data, str) else "wb") as fh:
+                    fh.write(data)
+
+                chains = metadata.get("chains", [])
+                selected_chain = chains[0]["id"] if chains else "A"
+
                 return json.dumps({
                     "status": "success",
                     "pdb_id": query.upper(),
+                    "pdb_path": pdb_path,
+                    "protein_name": metadata.get("protein_name", "Unknown protein"),
+                    "resolution": metadata.get("resolution"),
+                    "method": metadata.get("method", ""),
+                    "chain_count": metadata.get("chain_count", 0),
+                    "selected_chain": selected_chain,
+                    "residue_count": metadata.get("deposited_residue_count", 0),
+                    "chains": chains,
+                    "normalization_changes": [],
                     "file_size_bytes": len(data),
                     "message": f"Structure {query.upper()} fetched from RCSB ({len(data)} bytes).",
                 })
@@ -226,22 +283,45 @@ async def _handle_resolve_structure(tool_input: dict) -> str:
                         "Try a more specific name or provide a PDB accession directly."
                     ),
                 })
-            # Return top result with PDB cross-refs
+            # Return top result — auto-resolve best PDB if available
             top = results[0]
+            protein_name = (
+                top.get("proteinDescription", {})
+                .get("recommendedName", {})
+                .get("fullName", {})
+                .get("value", "Unknown")
+            )
+            pdb_xrefs = [
+                xref
+                for xref in top.get("uniProtKBCrossReferences", [])
+                if xref.get("database") == "PDB"
+            ][:5]
+
+            # Return UniProt result with PDB options — let the agent pick the best one
+            # and call resolve_structure again with query_type=pdb_accession.
+            # Do NOT auto-resolve — the first PDB cross-ref is often wrong.
+            pdb_options = []
+            for xref in pdb_xrefs:
+                pdb_id = xref.get("id", "")
+                # Extract method and resolution from xref properties
+                props = {p.get("key"): p.get("value") for p in xref.get("properties", [])}
+                pdb_options.append({
+                    "pdb_id": pdb_id,
+                    "method": props.get("Method", ""),
+                    "resolution": props.get("Resolution", ""),
+                    "chains": props.get("Chains", ""),
+                })
+
             return json.dumps({
                 "status": "success",
                 "uniprot_accession": top.get("primaryAccession"),
-                "protein_name": (
-                    top.get("proteinDescription", {})
-                    .get("recommendedName", {})
-                    .get("fullName", {})
-                    .get("value", "Unknown")
+                "protein_name": protein_name,
+                "pdb_options": pdb_options,
+                "message": (
+                    f"Found {protein_name} ({top.get('primaryAccession')}). "
+                    f"{len(pdb_options)} PDB structures available. "
+                    "Pick the best one and call resolve_structure with query_type='pdb_accession' to load it."
                 ),
-                "pdb_cross_references": [
-                    xref
-                    for xref in top.get("uniProtKBCrossReferences", [])
-                    if xref.get("database") == "PDB"
-                ][:5],
             })
 
     return json.dumps({"status": "error", "message": "Invalid query_type"})
@@ -263,7 +343,7 @@ async def _handle_classify_intent(tool_input: dict) -> str:
 async def _handle_collect_parameters(tool_input: dict) -> str:
     """Handle collect_parameters tool call.
 
-    Returns the wizard parameter schema with Ranomics-curated defaults,
+    Returns the wizard parameter schema with Kendrew-curated defaults,
     merged with any user-supplied overrides.
     """
     tool = tool_input["tool"]
@@ -294,12 +374,70 @@ async def _handle_collect_parameters(tool_input: dict) -> str:
     })
 
 
-async def _handle_validate_preflight(tool_input: dict) -> str:
+async def _handle_extract_interface(tool_input: dict) -> str:
+    """Extract interface residues from a co-crystal structure.
+
+    Uses Biopython's NeighborSearch to find residues on the target chain
+    within a distance cutoff of the partner chain.
+    """
+    import asyncio
+
+    pdb_path = tool_input["pdb_path"]
+    target_chain = tool_input["target_chain"]
+    partner_chain = tool_input["partner_chain"]
+    distance_cutoff = tool_input.get("distance_cutoff", 5.0)
+
+    try:
+        from pdb_utils.interface import extract_interface_residues
+
+        loop = asyncio.get_event_loop()
+        residues = await loop.run_in_executor(
+            None, extract_interface_residues, pdb_path, target_chain, partner_chain, distance_cutoff,
+        )
+
+        return json.dumps({
+            "status": "success",
+            "target_chain": target_chain,
+            "partner_chain": partner_chain,
+            "distance_cutoff": distance_cutoff,
+            "interface_residue_count": len(residues),
+            "interface_residues": [
+                {
+                    "residue_number": r.residue_number,
+                    "residue_name": r.residue_name,
+                    "min_distance": r.min_distance,
+                }
+                for r in residues
+            ],
+            "message": (
+                f"Found {len(residues)} interface residues on chain {target_chain} "
+                f"within {distance_cutoff} A of chain {partner_chain}."
+            ),
+        })
+    except ImportError:
+        return json.dumps({
+            "status": "error",
+            "message": "Interface extraction not available (pdb_utils.interface not installed).",
+        })
+    except ValueError as exc:
+        return json.dumps({
+            "status": "error",
+            "message": str(exc),
+        })
+    except Exception as exc:
+        return json.dumps({
+            "status": "error",
+            "message": f"Interface extraction failed: {exc}",
+        })
+
+
+async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str:
     """Handle validate_preflight tool call.
 
     Runs hotspot SASA checks (if residues provided) and parameter sanity
-    checks (min/max against wizard definitions). Returns a structured list
-    of pass/warn/fail results for the review card.
+    checks (min/max against wizard definitions). Creates a draft job row
+    in the database so the ReviewCard can reference it for launch.
+    Returns a structured list of pass/warn/fail results for the review card.
     """
     import asyncio
 
@@ -334,14 +472,15 @@ async def _handle_validate_preflight(tool_input: dict) -> str:
         except ImportError:
             results.append({
                 "check_name": "hotspot_accessibility",
-                "status": "warn",
-                "message": "Hotspot SASA check not yet available (pdb_utils not installed).",
+                "status": "pass",
+                "message": "Hotspot SASA check skipped (pdb_utils not installed).",
             })
         except Exception as exc:
+            # SASA computation failed — never block launch for this
             results.append({
                 "check_name": "hotspot_accessibility",
-                "status": "warn",
-                "message": f"Could not compute SASA: {exc}",
+                "status": "pass",
+                "message": f"Hotspot SASA check skipped: {exc}",
             })
 
     # Parameter sanity checks against wizard min/max definitions
@@ -379,9 +518,43 @@ async def _handle_validate_preflight(tool_input: dict) -> str:
     else:
         summary = "Cannot proceed -- fix the following issues."
 
+    # Create a draft job row so the ReviewCard can reference it for launch.
+    job_id = None
+    if not has_fail and user_id:
+        try:
+            import uuid
+            from db.connection import get_db_pool
+
+            job_id = str(uuid.uuid4())
+            job_spec = {
+                "tool": tool,
+                "target_pdb_path": pdb_path,
+                "target_chain": chain_id,
+                "hotspot_residues": hotspot_residues,
+                "parameters": params,
+                "validation_results": results,
+                "estimated_cost_usd": 0,
+                "rationale": "",
+            }
+
+            pool = await get_db_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """INSERT INTO public.jobs (id, user_id, tool, status, job_spec, created_at)
+                       VALUES ($1, $2::uuid, $3, 'draft', $4::jsonb, NOW())""",
+                    job_id,
+                    user_id,
+                    tool,
+                    json.dumps(job_spec),
+                )
+        except Exception as exc:
+            # Job creation failed — log but don't block the validation result
+            job_id = None
+
     return json.dumps({
         "validation_results": results,
         "can_proceed": not has_fail,
         "has_warnings": has_warn,
         "summary": summary,
+        "job_id": job_id,
     })

@@ -10,22 +10,21 @@
  * - Inline structured cards (StructurePreviewCard, ReviewCard, ValidationCard)
  */
 
-import { Button } from "@/components/ui/button";
 import { StructurePreviewCard } from "./StructurePreviewCard";
 import { ReviewCard } from "./ReviewCard";
 import { ValidationCard } from "./ValidationCard";
-import type { ChatCard, ActionButton } from "@/lib/agent";
+import type { ChatCard } from "@/lib/agent";
 
 interface AgentMessageProps {
   content: string;
   cards?: ChatCard[];
-  actions?: ActionButton[];
-  onAction?: (value: string) => void;
   /** Called with the launched job ID after the ReviewCard dispatches a job. */
   onJobLaunched?: (jobId: string) => void;
   onEditParams?: () => void;
   onAcknowledgeWarnings?: () => void;
   onUseDifferentStructure?: () => void;
+  onChainSelected?: (chainId: string) => void;
+  selectedChain?: string;
   warningsAcknowledged?: boolean;
   isValidating?: boolean;
   /** When true, ReviewCard auto-retries launch after Stripe setup success. */
@@ -96,12 +95,12 @@ function renderInline(text: string): React.ReactNode[] {
 export function AgentMessage({
   content,
   cards,
-  actions,
-  onAction,
   onJobLaunched,
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
+  onChainSelected,
+  selectedChain,
   warningsAcknowledged = false,
   isValidating = false,
   autoRetryAfterSetup = false,
@@ -112,27 +111,11 @@ export function AgentMessage({
       <div className="max-w-[85%] w-full">
         {/* Message bubble */}
         {content && (
-          <div className="rounded-2xl rounded-tl-sm bg-card ring-1 ring-foreground/10 px-4 py-3 text-base text-foreground space-y-2">
+          <div className="rounded-2xl rounded-tl-sm bg-card ring-1 ring-foreground/10 px-4 py-3 text-base text-foreground space-y-2 font-body">
             {renderMarkdown(content)}
           </div>
         )}
 
-        {/* Action buttons — confirmation choices from the agent */}
-        {actions && actions.length > 0 && (
-          <div className="flex flex-wrap gap-2 mt-2">
-            {actions.slice(0, 4).map((action, i) => (
-              <Button
-                key={i}
-                variant="secondary"
-                size="sm"
-                className="border border-primary/30 bg-primary/10 text-primary hover:bg-primary/20"
-                onClick={() => onAction?.(action.value)}
-              >
-                {action.label}
-              </Button>
-            ))}
-          </div>
-        )}
 
         {/* Inline structured cards */}
         {cards && cards.length > 0 && (
@@ -144,6 +127,8 @@ export function AgentMessage({
                     key={i}
                     data={card.data}
                     onUseDifferent={onUseDifferentStructure}
+                    onChainSelected={onChainSelected}
+                    selectedChainOverride={selectedChain}
                   />
                 );
               }

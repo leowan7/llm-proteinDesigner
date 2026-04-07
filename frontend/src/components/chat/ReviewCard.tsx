@@ -22,12 +22,10 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import type { ReviewData } from "@/lib/agent";
 import {
-  getCostEstimate,
   getPaymentStatus,
   createCheckoutSession,
   launchJob,
 } from "@/lib/jobs";
-import type { CostEstimate } from "@/lib/jobs";
 
 interface ReviewCardProps {
   data: ReviewData;
@@ -64,29 +62,18 @@ export function ReviewCard({
     has_warnings,
   } = data;
 
-  const [costEstimate, setCostEstimate] = useState<CostEstimate | null>(null);
-  const [estimateError, setEstimateError] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [launched, setLaunched] = useState(false);
   const [paymentAlertVisible, setPaymentAlertVisible] = useState(setupCancelled);
   const [launchError, setLaunchError] = useState<string | null>(null);
+  const [jobName, setJobName] = useState(design_goal || "");
 
   // Launch is available when: validation complete, can proceed, warnings acknowledged (if any)
   const validationComplete = validation_results.length > 0;
   const warningsOk = !has_warnings || warningsAcknowledged;
   const canLaunch = !disabled && !launching && validationComplete && can_proceed && warningsOk;
 
-  // Number of designs to estimate — use parameters.num_designs if available
-  const numDesigns = typeof parameters.num_designs === "number" ? parameters.num_designs : 1;
-
-  // Markup percentage for the breakdown display
-  const markupPercent = 30;
-
-  // Fetch cost estimate on mount
-  useEffect(() => {
-    getCostEstimate(tool, numDesigns)
-      .then((estimate) => setCostEstimate(estimate))
-      .catch(() => setEstimateError(true));
-  }, [tool, numDesigns]);
+  // Cost estimates hidden — pricing model not finalized
 
   /**
    * Core launch logic: check payment method, then POST /jobs/launch.
@@ -98,37 +85,50 @@ export function ReviewCard({
     setPaymentAlertVisible(false);
 
     try {
-      // 1. Check payment method
-      const { has_payment_method } = await getPaymentStatus();
-
-      if (!has_payment_method) {
-        // Redirect to Stripe Checkout for card setup
-        const { url } = await createCheckoutSession(window.location.href);
-        window.location.href = url;
-        // Navigation away — no need to reset launching state
-        return;
-      }
-
-      // 2. POST /jobs/launch — job_id must come from the wizard data
-      // The job_id is embedded in the ReviewData via the agent (stored as parameters.job_id)
+      // 1. Check job_id availability first (before network calls)
       const jobId = parameters.job_id as string | undefined;
       if (!jobId) {
         throw new Error("Job ID not available — please restart the wizard.");
       }
 
-      let result: { job_id: string; status: string };
+      // 2. Check payment method (graceful fallback if Stripe not configured)
+      let hasPayment = false;
       try {
-        result = await launchJob(jobId);
-      } catch (err) {
-        if (err instanceof Error && err.message === "payment_required") {
-          // Payment method disappeared between check and dispatch (race) — redirect
+        const paymentStatus = await getPaymentStatus();
+        hasPayment = paymentStatus.has_payment_method;
+      } catch {
+        // Stripe not configured — skip payment gate in dev
+        hasPayment = true;
+      }
+
+      if (!hasPayment) {
+        try {
           const { url } = await createCheckoutSession(window.location.href);
           window.location.href = url;
           return;
+        } catch {
+          throw new Error("Payment setup unavailable. Check Stripe configuration.");
+        }
+      }
+
+      // 3. POST /jobs/launch
+      let result: { job_id: string; status: string };
+      try {
+        result = await launchJob(jobId, jobName || undefined);
+      } catch (err) {
+        if (err instanceof Error && err.message === "payment_required") {
+          try {
+            const { url } = await createCheckoutSession(window.location.href);
+            window.location.href = url;
+            return;
+          } catch {
+            throw new Error("Payment setup unavailable. Check Stripe configuration.");
+          }
         }
         throw err;
       }
 
+      setLaunched(true);
       onJobLaunched(result.job_id);
     } catch (err) {
       setLaunchError(err instanceof Error ? err.message : "An unexpected error occurred.");
@@ -153,60 +153,12 @@ export function ReviewCard({
     }
   }, [setupCancelled]);
 
-  function renderCostSection() {
-    if (estimateError) {
-      return (
-        <div>
-          <p className="text-sm text-muted-foreground">Estimated GPU cost</p>
-          <p className="text-sm text-muted-foreground italic">Estimate unavailable</p>
-        </div>
-      );
-    }
-
-    if (!costEstimate) {
-      return (
-        <div>
-          <p className="text-sm text-muted-foreground">Estimated GPU cost</p>
-          <p className="text-sm text-muted-foreground">Loading estimate...</p>
-        </div>
-      );
-    }
-
-    const { low, high } = costEstimate;
-    // Markup-inclusive totals (estimate already includes markup from the backend)
-    return (
-      <div className="space-y-2">
-        <p className="text-sm text-muted-foreground mb-1">Estimated GPU cost</p>
-        {/* Cost breakdown rows */}
-        <div className="space-y-1">
-          <div className="flex justify-between items-baseline gap-4">
-            <span className="text-sm text-muted-foreground">GPU compute</span>
-            <span className="text-sm font-mono text-foreground">
-              ${(low / (1 + markupPercent / 100)).toFixed(2)}–${(high / (1 + markupPercent / 100)).toFixed(2)}
-            </span>
-          </div>
-          <div className="flex justify-between items-baseline gap-4">
-            <span className="text-sm text-muted-foreground">Platform fee</span>
-            <span className="text-sm font-mono text-foreground">{markupPercent}% platform fee</span>
-          </div>
-          <div className="flex justify-between items-baseline gap-4">
-            <span className="text-sm text-muted-foreground font-medium">Total</span>
-            <span className="text-sm font-mono font-medium text-foreground">
-              ${low.toFixed(2)}–${high.toFixed(2)} estimated
-            </span>
-          </div>
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Actual charge is based on GPU time consumed and may differ from this estimate.
-        </p>
-      </div>
-    );
-  }
+  // Cost section removed — pricing model not finalized
 
   return (
-    <Card className="my-2 ring-2 ring-primary/30 border-border/50">
+    <Card className="my-2 ring-2 ring-primary/30 border-border/50 font-body">
       <CardHeader className="px-4 pb-2 pt-4">
-        <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+        <span className="font-display text-xs font-semibold text-muted-foreground uppercase tracking-[0.15em]">
           Job Review
         </span>
       </CardHeader>
@@ -214,7 +166,7 @@ export function ReviewCard({
         {/* Design goal */}
         <div>
           <p className="text-sm text-muted-foreground mb-1">Design goal</p>
-          <p className="text-base text-foreground">{design_goal}</p>
+          <p className="font-display text-base text-foreground">{design_goal}</p>
         </div>
 
         <Separator />
@@ -222,7 +174,7 @@ export function ReviewCard({
         {/* Tool selected */}
         <div>
           <p className="text-sm text-muted-foreground mb-1">Tool</p>
-          <p className="text-base text-foreground font-medium">{tool}</p>
+          <p className="text-base text-foreground font-semibold">{tool}</p>
           <p className="text-sm text-muted-foreground mt-1">{rationale}</p>
         </div>
 
@@ -267,8 +219,20 @@ export function ReviewCard({
 
         <Separator />
 
-        {/* Cost estimate with breakdown */}
-        {renderCostSection()}
+        {/* Job name */}
+        <div>
+          <label htmlFor="job-name" className="text-sm text-muted-foreground mb-1 block">
+            Job name
+          </label>
+          <input
+            id="job-name"
+            type="text"
+            value={jobName}
+            onChange={(e) => setJobName(e.target.value)}
+            placeholder="e.g. EGFR minibinder pilot"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-ring"
+          />
+        </div>
 
         {/* Payment required alert (shown after Stripe setup cancelled) */}
         {paymentAlertVisible && (
@@ -286,20 +250,24 @@ export function ReviewCard({
           </Alert>
         )}
 
-        {/* Action buttons */}
-        <div className="flex gap-3 pt-1">
-          <Button
-            variant="default"
-            className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
-            onClick={() => void doLaunch()}
-            disabled={!canLaunch}
-          >
-            {launching ? "Launching..." : "Launch Job"}
-          </Button>
-          <Button variant="outline" onClick={onEdit} disabled={disabled || launching}>
-            {disabled ? "Validating..." : "Edit parameters"}
-          </Button>
-        </div>
+        {/* Action buttons — hidden after successful launch */}
+        {launched ? (
+          <p className="text-sm text-emerald-400 pt-1">Job launched successfully.</p>
+        ) : (
+          <div className="flex gap-3 pt-1">
+            <Button
+              variant="default"
+              className="flex-1 bg-primary text-primary-foreground hover:bg-primary/90"
+              onClick={() => void doLaunch()}
+              disabled={!canLaunch}
+            >
+              {launching ? "Launching..." : "Launch Job"}
+            </Button>
+            <Button variant="outline" onClick={onEdit} disabled={disabled || launching}>
+              {disabled ? "Validating..." : "Edit parameters"}
+            </Button>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

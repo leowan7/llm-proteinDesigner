@@ -180,7 +180,7 @@ export function JobPage() {
       {/* 4. Design candidates section */}
       {isComplete && (
         <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-foreground">Design candidates</h2>
+          <h2 className="font-display text-xl font-semibold text-foreground">Design candidates</h2>
 
           {isBindCraftZero ? (
             <BindCraftZeroOutputCard agentGuidance={job.results?.next_steps} />
@@ -212,7 +212,7 @@ export function JobPage() {
 
       {/* 7. Previous jobs section */}
       <div className="space-y-4">
-        <h2 className="text-xl font-semibold text-foreground">Previous jobs</h2>
+        <h2 className="font-display text-xl font-semibold text-foreground">Previous jobs</h2>
 
         {previousJobs.length === 0 ? (
           <div>

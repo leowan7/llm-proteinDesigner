@@ -303,7 +303,7 @@ export async function getPaymentStatus(): Promise<{ has_payment_method: boolean 
  * @returns Object with job_id and status="queued" on success.
  * @throws Error with message "payment_required" when the user has no payment method.
  */
-export async function launchJob(jobId: string): Promise<{ job_id: string; status: string }> {
+export async function launchJob(jobId: string, jobName?: string): Promise<{ job_id: string; status: string }> {
   const csrf = getCsrfToken();
   const response = await fetch(`${API_BASE}/jobs/launch`, {
     method: "POST",
@@ -312,7 +312,7 @@ export async function launchJob(jobId: string): Promise<{ job_id: string; status
       "Content-Type": "application/json",
       ...(csrf ? { "X-CSRFToken": csrf } : {}),
     },
-    body: JSON.stringify({ job_id: jobId }),
+    body: JSON.stringify({ job_id: jobId, ...(jobName ? { job_name: jobName } : {}) }),
   });
   if (response.status === 402) {
     throw new Error("payment_required");

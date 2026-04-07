@@ -33,6 +33,40 @@ from pathlib import Path
 import requests
 import runpod
 
+# ---------------------------------------------------------------------------
+# Startup diagnostics — log what's available so RunPod logs show failures
+# ---------------------------------------------------------------------------
+def _startup_check():
+    """Run basic checks at import time and log results."""
+    checks = {}
+    try:
+        import torch
+        checks["torch"] = torch.__version__
+        checks["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            checks["gpu"] = torch.cuda.get_device_name(0)
+    except Exception as exc:
+        checks["torch_error"] = str(exc)
+
+    try:
+        from Bio.PDB import PDBParser
+        checks["biopython"] = "ok"
+    except Exception as exc:
+        checks["biopython_error"] = str(exc)
+
+    for path_label, path in [
+        ("rfdiffusion_script", "/opt/rfdiffusion/scripts/run_inference.py"),
+        ("rfdiffusion_weights", "/opt/rfdiffusion/models/Complex_base_ckpt.pt"),
+        ("proteinmpnn_script", "/opt/ProteinMPNN/protein_mpnn_run.py"),
+        ("proteinmpnn_weights", "/opt/ProteinMPNN/vanilla_model_weights/v_48_020.pt"),
+    ]:
+        checks[path_label] = os.path.exists(path)
+
+    print(f"[STARTUP] Diagnostics: {json.dumps(checks, indent=2)}", file=sys.stderr)
+    return checks
+
+_startup_check()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",

@@ -24,6 +24,33 @@ interface ValidationCardProps {
   acknowledged: boolean;
 }
 
+/** Map raw check_name to human-readable label */
+function humanizeCheckName(name: string): string {
+  const map: Record<string, string> = {
+    hotspot_accessibility: "Hotspot accessibility",
+    param_num_designs: "Number of designs",
+    param_mode: "Filter mode",
+    param_generator: "Design generator",
+    param_binder_length: "Binder length",
+    param_noise_scale: "Noise scale",
+    param_design_cycles: "Design cycles",
+    param_mpnn_sampling_temp: "MPNN temperature",
+    param_filter_score_threshold: "Confidence threshold",
+    param_antibody_type: "Antibody type",
+    param_cdr_loops: "CDR loops",
+    param_num_samples: "Number of samples",
+    param_temperature: "Sampling temperature",
+    param_num_steps: "Integration steps",
+    param_budget: "Candidate budget",
+    param_protocol: "Design protocol",
+  };
+  // Also handle hotspot_123 patterns
+  if (name.startsWith("hotspot_") && name !== "hotspot_accessibility") {
+    return `Hotspot ${name.replace("hotspot_", "")}`;
+  }
+  return map[name] || name.replace(/_/g, " ").replace(/\bparam\b/g, "").trim();
+}
+
 /** Icon and color for each validation status */
 function StatusIcon({ status }: { status: ValidationCheck["status"] }) {
   if (status === "pass") {
@@ -41,9 +68,9 @@ export function ValidationCard({ data, onAcknowledge, acknowledged }: Validation
   const failMessages = validation_results.filter((r) => r.status === "fail");
 
   return (
-    <Card className="my-2 border-border/50">
+    <Card className="my-2 border-border/50 font-body">
       <CardHeader className="px-4 pb-2 pt-4">
-        <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wide">
+        <span className="font-display text-xs font-semibold text-muted-foreground uppercase tracking-[0.15em]">
           Pre-flight checks
         </span>
       </CardHeader>
@@ -54,7 +81,7 @@ export function ValidationCard({ data, onAcknowledge, acknowledged }: Validation
             <div key={index} className="flex items-start gap-2">
               <StatusIcon status={check.status} />
               <div className="min-w-0">
-                <span className="text-sm font-medium text-foreground">{check.check_name}</span>
+                <span className="text-sm font-semibold text-foreground">{humanizeCheckName(check.check_name)}</span>
                 <p className="text-sm text-muted-foreground">{check.message}</p>
               </div>
             </div>

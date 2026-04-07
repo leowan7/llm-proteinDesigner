@@ -26,3 +26,4 @@ minio_data/
 
 # Supabase
 supabase/.temp/
+.gstack/

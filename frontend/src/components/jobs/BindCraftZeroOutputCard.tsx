@@ -66,7 +66,7 @@ export function BindCraftZeroOutputCard({ agentGuidance }: BindCraftZeroOutputCa
   return (
     <Card className="border-border/50">
       <CardHeader className="px-4 pb-2 pt-4">
-        <h2 className="text-xl font-semibold text-foreground">No designs passed filters</h2>
+        <h2 className="font-display text-xl font-semibold text-foreground">No designs passed filters</h2>
       </CardHeader>
       <CardContent className="px-4 pb-4 space-y-3">
         {/* Exact copy from UI-SPEC — do not modify */}

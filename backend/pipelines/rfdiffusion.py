@@ -42,7 +42,10 @@ class RFdiffusionPipeline(ToolPipeline):
 
         # Build contig string: [ChainResRange/0 BinderLenRange]
         # The /0 gap means "break chain here" — target on left, binder on right.
-        contig_str = f"[{chain}1-150/0 {binder_min}-{binder_max}]"
+        # Note: the container's run_pipeline.py overrides this with the actual
+        # residue range from the PDB file. This placeholder is kept for config
+        # serialization but is not used directly by RFdiffusion.
+        contig_str = f"[{chain}1-999/0 {binder_min}-{binder_max}]"
 
         hydra_args = [
             f"inference.input_pdb={target_local_path}",

@@ -18,6 +18,32 @@ from pdb_utils.models import HotspotCheck, StructureSummary
 from agent.jobspec import ValidationResult
 
 
+def _clean_structure_for_sasa(structure):
+    """Remove non-standard residues, water, and heteroatoms before SASA computation.
+
+    Biopython's ShrakeRupley can choke on non-standard residues (metal ions,
+    ligands, modified residues like europium). Stripping them first avoids
+    parser errors while preserving the protein backbone geometry.
+    """
+    residues_to_remove = []
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                hetflag = residue.get_id()[0]
+                # Keep standard amino acids (hetflag=' ') only
+                # Remove water (W/HOH), heteroatoms (H_xxx), and non-standard residues
+                if hetflag != " " or not is_aa(residue, standard=True):
+                    residues_to_remove.append((chain.get_id(), residue.get_id()))
+
+    for chain_id, res_id in residues_to_remove:
+        try:
+            structure[0][chain_id].detach_child(res_id)
+        except Exception:
+            pass
+
+    return structure
+
+
 def check_hotspot_accessibility(
     pdb_path: str,
     chain_id: str,
@@ -27,11 +53,11 @@ def check_hotspot_accessibility(
     """Check whether hotspot residues are surface-accessible via SASA.
 
     Computes per-residue solvent-accessible surface area (SASA) using the
-    Shrake-Rupley rolling probe algorithm. Residues below the threshold are
-    flagged as buried with an explanatory warning message.
+    Shrake-Rupley rolling probe algorithm. Non-standard residues, water, and
+    heteroatoms are stripped before computation to avoid parser errors.
 
     Args:
-        pdb_path: Path to a normalized PDB file.
+        pdb_path: Path to a PDB file.
         chain_id: Single-letter chain identifier containing the hotspot residues.
         residue_numbers: List of residue sequence numbers to check.
         sasa_threshold: Minimum per-residue SASA (Angstrom^2) to be considered
@@ -45,13 +71,27 @@ def check_hotspot_accessibility(
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("target", pdb_path)
 
+    # Strip non-protein atoms before SASA computation
+    structure = _clean_structure_for_sasa(structure)
+
     sr = ShrakeRupley()
     sr.compute(structure, level="R")
+
+    if chain_id not in [c.id for c in structure[0]]:
+        return [
+            HotspotCheck(
+                residue_number=r,
+                residue_name="UNKNOWN",
+                sasa=0.0,
+                accessible=False,
+                warning=f"Chain {chain_id} not found in structure",
+            )
+            for r in residue_numbers
+        ]
 
     chain = structure[0][chain_id]
 
     # Build residue lookup: resseq (int) -> residue object
-    # Only standard amino acids; insertion-code residues use the base resseq
     residue_map: dict[int, object] = {}
     for residue in chain:
         if is_aa(residue, standard=True):

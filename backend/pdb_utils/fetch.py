@@ -12,6 +12,102 @@ import httpx
 from config import settings
 
 
+async def fetch_pdb_metadata(pdb_id: str, client: httpx.AsyncClient) -> dict:
+    """Fetch entry metadata from RCSB REST API for a PDB accession.
+
+    Returns a dict with protein_name, resolution, method, and per-chain
+    details (chain ID, protein name, residue count) for every polymer entity.
+
+    Args:
+        pdb_id: 4-character PDB accession (case-insensitive).
+        client: An open httpx.AsyncClient instance.
+
+    Returns:
+        Dict with keys: protein_name, resolution, method, chain_count,
+        chains (list of {id, name, residue_count}), deposited_residue_count.
+    """
+    pdb_id = pdb_id.upper()
+    result: dict = {
+        "protein_name": "Unknown protein",
+        "resolution": None,
+        "method": "",
+        "chain_count": 0,
+        "chains": [],
+        "deposited_residue_count": 0,
+    }
+
+    try:
+        # Entry-level metadata (resolution, method, title)
+        entry_url = f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}"
+        entry_resp = await client.get(entry_url, timeout=10.0)
+        entry_resp.raise_for_status()
+        entry = entry_resp.json()
+
+        # Resolution
+        res_list = entry.get("rcsb_entry_info", {}).get("resolution_combined", [None])
+        result["resolution"] = res_list[0] if res_list else None
+
+        # Experimental method
+        methods = entry.get("exptl", [])
+        if methods:
+            result["method"] = methods[0].get("method", "")
+
+        # Title as fallback
+        title = entry.get("struct", {}).get("title", "")
+        result["deposited_residue_count"] = entry.get(
+            "rcsb_entry_info", {}
+        ).get("deposited_polymer_monomer_count", 0)
+
+        # Iterate over polymer entities to get per-chain info
+        chains = []
+        first_entity_name = ""
+        polymer_entity_ids = entry.get(
+            "rcsb_entry_container_identifiers", {}
+        ).get("polymer_entity_ids", [])
+
+        for eid in polymer_entity_ids:
+            ent_url = f"https://data.rcsb.org/rest/v1/core/polymer_entity/{pdb_id}/{eid}"
+            ent_resp = await client.get(ent_url, timeout=10.0)
+            if ent_resp.status_code != 200:
+                continue
+
+            ent = ent_resp.json()
+            entity_desc = ent.get("rcsb_polymer_entity", {}).get("pdbx_description", "")
+            if not first_entity_name and entity_desc:
+                first_entity_name = entity_desc
+
+            # Extract organism/species from source organism annotation
+            source_organisms = ent.get("rcsb_entity_source_organism", [])
+            organism_name = ""
+            if source_organisms:
+                organism_name = source_organisms[0].get("ncbi_scientific_name", "")
+
+            # Get auth chain IDs for this entity
+            auth_chains = ent.get(
+                "rcsb_polymer_entity_container_identifiers", {}
+            ).get("auth_asym_ids", [])
+
+            # Get residue count from entity sequence length
+            seq_length = ent.get("entity_poly", {}).get("rcsb_sample_sequence_length", 0)
+
+            for chain_id in auth_chains:
+                chains.append({
+                    "id": chain_id,
+                    "name": entity_desc or "Unknown",
+                    "residue_count": seq_length,
+                    "organism": organism_name,
+                })
+
+        result["chains"] = chains
+        result["chain_count"] = len(chains)
+        result["protein_name"] = first_entity_name or title or "Unknown protein"
+
+    except Exception:
+        pass
+
+    return result
+
+
 async def fetch_pdb_file(pdb_id: str, client: httpx.AsyncClient) -> bytes:
     """Download an mmCIF structure file from RCSB by PDB accession.
 

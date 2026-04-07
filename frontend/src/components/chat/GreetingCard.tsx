@@ -27,12 +27,14 @@ interface GreetingCardProps {
 export function GreetingCard({ onPromptClick }: GreetingCardProps) {
   return (
     <div className="flex justify-center px-4 py-6">
-      <Card className="w-full max-w-2xl bg-card border-border/50">
+      <Card className="w-full max-w-2xl bg-card border-border/50 font-body">
         <CardContent className="px-6 py-6 text-center">
           <div className="flex justify-center mb-4">
-            <img src="/logo.svg" alt="Kendrew.AI" className="size-10" />
+            <div className="size-10 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-base">
+              K
+            </div>
           </div>
-          <h2 className="text-xl font-semibold text-foreground mb-3">
+          <h2 className="font-display text-xl font-semibold text-foreground mb-3">
             What are you designing today?
           </h2>
           <p className="text-base text-muted-foreground leading-relaxed">

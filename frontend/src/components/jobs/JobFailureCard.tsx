@@ -71,7 +71,7 @@ export function JobFailureCard({ errorCategory, agentGuidance }: JobFailureCardP
   return (
     <Card className="border-destructive/40">
       <CardHeader className="px-4 pb-2 pt-4">
-        <h2 className="text-xl font-semibold text-foreground">Job failed</h2>
+        <h2 className="font-display text-xl font-semibold text-foreground">Job failed</h2>
         {errorCategory && (
           <p className="text-sm text-muted-foreground">{errorCategory}</p>
         )}

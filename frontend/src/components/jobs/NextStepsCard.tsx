@@ -67,7 +67,7 @@ export function NextStepsCard({ nextSteps }: NextStepsCardProps) {
   return (
     <Card className="border-border/50">
       <CardHeader className="px-4 pb-2 pt-4">
-        <h2 className="text-xl font-semibold text-foreground">Recommended next steps</h2>
+        <h2 className="font-display text-xl font-semibold text-foreground">Recommended next steps</h2>
       </CardHeader>
       <CardContent className="px-4 pb-4">
         <div className="text-base text-foreground space-y-2">{renderMarkdown(nextSteps)}</div>

@@ -31,6 +31,14 @@ export type AgentEvent =
   | { type: "done" }
   | { type: "error"; text: string };
 
+/** Per-chain metadata from RCSB */
+export interface ChainInfo {
+  id: string;
+  name: string;
+  residue_count: number;
+  organism?: string;
+}
+
 /** Structure summary returned by resolve_structure tool */
 export interface StructureSummary {
   pdb_id: string;
@@ -40,6 +48,7 @@ export interface StructureSummary {
   chain_count: number;
   selected_chain: string;
   residue_count: number;
+  chains: ChainInfo[];
   normalization_changes: string[];
 }
 
@@ -72,7 +81,6 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   cards?: ChatCard[];
-  actions?: ActionButton[];
 }
 
 export type ChatCard =
@@ -87,11 +95,6 @@ export type ChatCard =
         summary: string;
       };
     };
-
-export interface ActionButton {
-  label: string;
-  value: string;
-}
 
 /**
  * Create a new agent session.
@@ -155,6 +158,7 @@ export async function sendMessage(
   sessionId: string,
   message: string,
   onEvent: (event: AgentEvent) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const csrf = getCsrfToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -164,6 +168,7 @@ export async function sendMessage(
     headers,
     body: JSON.stringify({ session_id: sessionId, message }),
     credentials: "include",
+    signal,
   });
 
   if (!response.ok) {

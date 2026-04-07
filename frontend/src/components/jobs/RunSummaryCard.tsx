@@ -83,7 +83,7 @@ export function RunSummaryCard({
     <Card className="border-border/50">
       <CardHeader className="px-4 pb-2 pt-4">
         <div className="flex items-baseline gap-3">
-          <span className="text-xl font-semibold text-foreground">{tool}</span>
+          <span className="font-display text-xl font-semibold text-foreground">{tool}</span>
           <span className="text-sm text-muted-foreground">{formatDate(completedAt)}</span>
         </div>
       </CardHeader>

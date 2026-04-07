@@ -1,18 +1,21 @@
 /**
  * StructurePreviewCard — displays metadata for a resolved protein structure.
  *
- * Shown inline in the chat thread after a structure is resolved from a PDB ID,
- * UniProt accession, or uploaded file. Includes a collapsible normalization
- * summary and an override action to switch structures.
+ * Shows all chains with their protein names, resolution, method, and residue
+ * counts. Users can select which chain to target for design.
  */
 
+import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import type { StructureSummary } from "@/lib/agent";
+import type { StructureSummary, ChainInfo } from "@/lib/agent";
 
 interface StructurePreviewCardProps {
   data: Partial<StructureSummary> & Record<string, unknown>;
   onUseDifferent?: () => void;
+  onChainSelected?: (chainId: string) => void;
+  /** Controlled selected chain — when provided, overrides internal state */
+  selectedChainOverride?: string;
 }
 
 /**
@@ -27,40 +30,109 @@ function formatResolution(resolution: number | null | undefined, method: string 
   return `${resolution.toFixed(2)} Å`;
 }
 
-export function StructurePreviewCard({ data, onUseDifferent }: StructurePreviewCardProps) {
-  // Data may come from raw tool results with missing fields — default everything
-  const pdb_id = data.pdb_id ?? (data as Record<string, unknown>).pdb_id as string ?? "Unknown";
+export function StructurePreviewCard({ data, onUseDifferent, onChainSelected, selectedChainOverride }: StructurePreviewCardProps) {
+  const pdb_id = data.pdb_id ?? "Unknown";
   const protein_name = data.protein_name ?? "Unknown protein";
   const resolution = data.resolution ?? null;
   const method = data.method ?? "";
-  const chain_count = data.chain_count ?? 0;
-  const selected_chain = data.selected_chain ?? "—";
-  const residue_count = data.residue_count ?? 0;
+  const chains = (data.chains as ChainInfo[] | undefined) ?? [];
   const normalization_changes = data.normalization_changes ?? [];
+  const defaultChain = data.selected_chain ?? (chains[0]?.id || "A");
+
+  const [internalChain, setInternalChain] = useState(defaultChain);
+  const selectedChain = selectedChainOverride ?? internalChain;
+
+  function handleChainSelect(chainId: string) {
+    setInternalChain(chainId);
+    onChainSelected?.(chainId);
+  }
+
+  // Total residues across all chains
+  const totalResidues = chains.length > 0
+    ? chains.reduce((sum, c) => sum + (c.residue_count || 0), 0)
+    : (data.residue_count as number) ?? 0;
+
+  // Organism — take from first chain that has it, or from top-level data
+  const organism = chains.find((c) => c.organism)?.organism
+    || (data.organism as string | undefined)
+    || "";
 
   return (
-    <Card className="my-2 border-border/50">
-      <CardContent className="px-4 py-4 space-y-2">
+    <Card className="my-2 border-border/50 font-body">
+      <CardContent className="px-4 py-4 space-y-3">
         {/* PDB ID and protein name */}
         <div className="flex items-baseline gap-3">
           <span className="font-mono text-sm text-foreground font-semibold">{pdb_id}</span>
           <span className="text-base text-foreground">{protein_name}</span>
         </div>
 
-        {/* Metadata grid */}
+        {/* Entry metadata */}
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
           <span>Resolution</span>
           <span className="text-foreground">{formatResolution(resolution, method)}</span>
           <span>Method</span>
-          <span className="text-foreground">{method}</span>
-          <span>Chains</span>
-          <span className="text-foreground">
-            {chain_count} {chain_count === 1 ? "chain" : "chains"} — using chain{" "}
-            <span className="font-mono">{selected_chain}</span>
-          </span>
-          <span>Residues</span>
-          <span className="text-foreground">{residue_count}</span>
+          <span className="text-foreground">{method || "—"}</span>
+          {organism && (
+            <>
+              <span>Organism</span>
+              <span className="text-foreground italic">{organism}</span>
+            </>
+          )}
+          <span>Total residues</span>
+          <span className="text-foreground">{totalResidues}</span>
         </div>
+
+        {/* Chain list with selection */}
+        {chains.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-sm text-muted-foreground">
+              Chains ({chains.length})
+            </p>
+            <div className="space-y-1">
+              {chains.map((chain) => {
+                const isSelected = chain.id === selectedChain;
+                return (
+                  <button
+                    key={chain.id}
+                    onClick={() => handleChainSelect(chain.id)}
+                    className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors ${
+                      isSelected
+                        ? "bg-primary/15 border border-primary/40"
+                        : "bg-secondary/50 border border-transparent hover:bg-secondary"
+                    }`}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <div className="flex items-baseline gap-2 min-w-0">
+                        <span className={`font-mono font-semibold shrink-0 ${isSelected ? "text-primary" : "text-foreground"}`}>
+                          {chain.id}
+                        </span>
+                        <span className="text-muted-foreground truncate">
+                          {chain.name}
+                        </span>
+                      </div>
+                      <span className="text-muted-foreground shrink-0 tabular-nums">
+                        {chain.residue_count} res
+                      </span>
+                    </div>
+                    {isSelected && (
+                      <span className="text-xs text-primary mt-0.5 block">
+                        Target chain
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Fallback: no per-chain data */}
+        {chains.length === 0 && (
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm text-muted-foreground">
+            <span>Chain</span>
+            <span className="text-foreground font-mono">{selectedChain}</span>
+          </div>
+        )}
 
         {/* Normalization changes — collapsible, closed by default */}
         {normalization_changes.length > 0 && (

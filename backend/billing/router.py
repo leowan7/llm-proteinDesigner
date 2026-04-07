@@ -115,8 +115,11 @@ async def payment_status(user_id: str = Depends(get_current_user)):
     the user to add a payment method.
 
     Returns:
-        JSON with `has_payment_method` bool.
+        JSON with `has_payment_method` bool. Returns True if Stripe is not
+        configured (dev mode — skip payment gate).
     """
+    if not settings.stripe_secret_key:
+        return {"has_payment_method": True}
     stripe_customer_id = await _resolve_stripe_customer(user_id)
     has_method = check_payment_method(stripe_customer_id)
     return {"has_payment_method": has_method}
