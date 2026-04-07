@@ -112,7 +112,13 @@ Plans:
   3. User A cannot access User B's PDB files or job results via presigned URL manipulation or direct DB queries
   4. Stripe usage events reconcile against the RunPod provider invoice within acceptable tolerance across 10 test jobs
   5. Rate limiting, input validation, and OWASP top 10 protections in place
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 05-01-PLAN.md — Rate limiting, health check hardening, Sentry backend, structured logging
+- [ ] 05-02-PLAN.md — Billing idempotency key, webhook replay protection, terminal-state guard
+- [ ] 05-03-PLAN.md — Container heartbeat endpoint, stale job watchdog, live progress SSE
+- [ ] 05-04-PLAN.md — On-demand upload URLs with job token auth, presigned URL security
+- [ ] 05-05-PLAN.md — Sentry frontend, GPU spend alerting, SSE limiter, input validation
 
 ### Phase 6: UI Improvements
 **Goal**: The platform feels like a polished SaaS product — persistent sessions, navigable history, user settings, and WCAG 2.2 AA accessibility for biopharma procurement
@@ -227,32 +233,54 @@ Plans:
 
 ## Progress
 
-**Execution Order:**
+**Execution Order (two parallel tracks):**
 
 ```
-Phase 1 -> 2 -> 3 --> 4 -> 5 --> 9 -> 10 -> 11 (launch) -> 12, 13
-                       |
-                       |-> 8 (after real data)
-                       |
-                  6 (parallel after 3)
-                  7 (parallel after 3)
+Track A — GPU/Docker (long-running, background):
+  4-02 RFdiffusion → 4-03 BindCraft → 4-04 RFantibody → 4-05 BoltzGen → 4-06 PXDesign → 4-07 Result wiring
+  Then: 8 Post-Run Analysis (needs real GPU output data)
+
+Track B — Ship the app (no GPU dependency):
+  5 Production Hardening → 6 UI Improvements → 9 Testing & CI/CD → 10 Legal → 11 Deployment (launch)
+  Then: 7 Admin Dashboard (post-launch, not blocking)
+
+Post-launch growth: 12 Teams, 13 Public API
 ```
 
-Critical path to launch: 1 -> 2 -> 3 -> 4 -> 5 -> 9 -> 10 -> 11
-Post-launch growth: 12 (Teams), 13 (API)
+Track A and Track B run in parallel. The app can launch (Track B) with GPU jobs
+showing "queued" — the moment Docker images work (Track A), jobs light up with
+no code changes. Phase 8 (Post-Run Analysis) is the only feature that requires
+real GPU output and cannot be mocked.
 
-| Phase | Description | Plans | Status | Completed |
-|-------|-------------|-------|--------|-----------|
-| 1. Foundation | Auth, DB, dev env | 3/4 | In Progress | |
-| 2. Agent + Structure Input | Agent, PDB pipeline | 5/5 | Complete | 2026-03-19 |
-| 3. Jobs, Frontend, Billing | Job dispatch, UI, Stripe | 4/5 | In Progress | |
-| 4. Pipeline Validation | Real GPU runs for all 5 tools | 1/7 | In Progress | - |
-| 5. Production Hardening | Security, monitoring, billing | 0/TBD | Not started | - |
-| 6. UI Improvements | Sidebar, sessions, settings | 0/TBD | Not started | - |
-| 7. Admin Dashboard | User/job/revenue monitoring | 0/TBD | Not started | - |
-| 8. Post-Run Analysis Agent | Result analysis, candidate ranking | 0/TBD | Not started | - |
-| 9. Testing & CI/CD | Automated tests, CI pipeline | 0/TBD | Not started | - |
-| 10. Legal & Compliance | ToS, privacy, GDPR, procurement | 0/TBD | Not started | - |
-| 11. Deployment | Production infra, monitoring | 0/TBD | Not started | - |
-| 12. Teams & Organizations | Multi-user, org billing, RBAC | 0/TBD | Not started | - |
-| 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | - |
+**Track A — GPU/Docker pipeline:**
+
+| Phase | Description | Plans | Status | Depends on |
+|-------|-------------|-------|--------|------------|
+| 4. Pipeline Validation | Docker images + real GPU runs | 2/7 | In Progress | Track A only |
+| 8. Post-Run Analysis | AI result analysis, candidate ranking | 0/TBD | Blocked | Phase 4 (needs real data) |
+
+**Track B — Ship the app (critical path to launch):**
+
+| Phase | Description | Plans | Status | Depends on |
+|-------|-------------|-------|--------|------------|
+| 5. Production Hardening | Security, idempotency, billing | 0/5 | Planned | Phase 3 (done) |
+| 6. UI Improvements | Sidebar, sessions, settings | 0/TBD | Not started | Phase 3 (done) |
+| 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/TBD | Not started | Phase 5 |
+| 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 |
+| 11. Deployment | Vercel, Railway, Supabase Cloud | 0/TBD | Not started | Phases 9, 10 |
+
+**Post-launch:**
+
+| Phase | Description | Plans | Status | Depends on |
+|-------|-------------|-------|--------|------------|
+| 7. Admin Dashboard | User/job/revenue monitoring | 0/TBD | Not started | Phase 11 (post-launch) |
+| 12. Teams & Organizations | Multi-user, org billing, RBAC | 0/TBD | Not started | Phase 11 |
+| 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | Phase 11 |
+
+**Completed:**
+
+| Phase | Description | Plans | Completed |
+|-------|-------------|-------|-----------|
+| 1. Foundation | Auth, DB, dev env | 4/4 | Done |
+| 2. Agent + Structure Input | Agent, PDB pipeline | 5/5 | 2026-03-19 |
+| 3. Jobs, Frontend, Billing | Job dispatch, UI, Stripe | 5/5 | Done (cost estimate deferred) |
