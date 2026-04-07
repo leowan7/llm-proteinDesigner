@@ -714,8 +714,22 @@ def main():
             IPTM_THRESHOLD, PLDDT_THRESHOLD, IPAE_THRESHOLD,
         )
 
-        # ----- Upload outputs -----
+        # ----- Upload outputs (on-demand URLs) -----
         candidates = []
+        filenames_to_upload = []
+        for rank_idx, r in enumerate(passing):
+            filenames_to_upload.append(f"design_{rank_idx + 1:03d}.pdb")
+        if filenames_to_upload:
+            filenames_to_upload.append("metrics.csv")
+
+        # Request fresh presigned upload URLs from the backend
+        upload_urls = {}
+        if upload_endpoint and job_token and filenames_to_upload:
+            try:
+                upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
+            except RuntimeError as exc:
+                logger.error("Failed to get upload URLs: %s", exc)
+
         for rank_idx, r in enumerate(passing):
             rank = rank_idx + 1
             design_name = r["design_name"]
@@ -735,20 +749,22 @@ def main():
             }
             candidates.append(candidate)
 
-            if rank_idx < len(output_urls) and os.path.exists(backbone_pdb):
+            upload_filename = f"design_{rank_idx + 1:03d}.pdb"
+            if upload_filename in upload_urls and os.path.exists(backbone_pdb):
                 try:
-                    upload_output(output_urls[rank_idx], backbone_pdb)
+                    upload_output(upload_urls[upload_filename], backbone_pdb)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
 
         # ----- Upload metrics CSV -----
-        if report_url and candidates:
+        if candidates:
             csv_path = os.path.join(work_dir, "metrics.csv")
             write_metrics_csv(csv_path, candidates)
-            try:
-                upload_output(report_url, csv_path)
-            except RuntimeError as exc:
-                logger.warning("Failed to upload metrics CSV: %s", exc)
+            if "metrics.csv" in upload_urls:
+                try:
+                    upload_output(upload_urls["metrics.csv"], csv_path)
+                except RuntimeError as exc:
+                    logger.warning("Failed to upload metrics CSV: %s", exc)
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
