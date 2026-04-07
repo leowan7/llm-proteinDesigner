@@ -123,7 +123,7 @@ Plans:
 ### Phase 6: UI Improvements
 **Goal**: The platform feels like a polished SaaS product — persistent sessions, navigable history, user settings, and WCAG 2.2 AA accessibility for biopharma procurement
 **Depends on**: Phase 3
-**Requirements**: (new — derived from UI-FEATURES.md research)
+**Requirements**: UI-01, UI-02, UI-03, UI-04, UI-05, UI-06
 **Success Criteria** (what must be TRUE):
   1. User conversations persist across page refreshes and browser sessions; user can resume any previous conversation from the sidebar
   2. Collapsible left sidebar provides navigation between chat, job history, and settings
@@ -133,7 +133,13 @@ Plans:
   6. All interactive components pass WCAG 2.2 AA audit (keyboard navigation, aria-live for SSE updates, color contrast)
   7. Help/docs page (/docs) with tool descriptions, parameter explanations, result interpretation guide, and FAQ — written for the target audience (biopharma scientists), not generic
   8. Resources page (/resources) with links to original publications for each tool, benchmark data, example use cases, and video walkthroughs
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 06-01-PLAN.md — Session persistence backend (DB migration, session CRUD, agent router migration)
+- [ ] 06-02-PLAN.md — Supporting backend APIs (jobs list, user usage, payment method, notification prefs)
+- [ ] 06-03-PLAN.md — App shell restructure (sidebar, header, layout, routing, ChatPage refactor)
+- [ ] 06-04-PLAN.md — Job history page and enhanced GreetingCard onboarding
+- [ ] 06-05-PLAN.md — Settings page and WCAG 2.2 AA accessibility audit
 **Research**: .planning/research/UI-FEATURES.md
 
 ### Phase 7: Admin Dashboard
@@ -263,8 +269,8 @@ real GPU output and cannot be mocked.
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 5. Production Hardening | Security, idempotency, billing | 4/5 | In Progress|  |
-| 6. UI Improvements | Sidebar, sessions, settings | 0/TBD | Not started | Phase 3 (done) |
+| 5. Production Hardening | Security, idempotency, billing | 5/5 | Done |  |
+| 6. UI Improvements | Sidebar, sessions, settings | 0/5 | Next | Phase 3 (done) |
 | 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/TBD | Not started | Phase 5 |
 | 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 |
 | 11. Deployment | Vercel, Railway, Supabase Cloud | 0/TBD | Not started | Phases 9, 10 |
