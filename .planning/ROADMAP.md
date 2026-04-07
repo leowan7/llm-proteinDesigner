@@ -114,7 +114,7 @@ Plans:
   5. Rate limiting, input validation, and OWASP top 10 protections in place
 **Plans**: 5 plans
 Plans:
-- [ ] 05-01-PLAN.md — Rate limiting, health check hardening, Sentry backend, structured logging
+- [x] 05-01-PLAN.md — Rate limiting, health check hardening, Sentry backend, structured logging
 - [x] 05-02-PLAN.md — Billing idempotency key, webhook replay protection, terminal-state guard
 - [ ] 05-03-PLAN.md — Container heartbeat endpoint, stale job watchdog, live progress SSE
 - [ ] 05-04-PLAN.md — On-demand upload URLs with job token auth, presigned URL security
