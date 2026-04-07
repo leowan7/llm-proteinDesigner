@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to execute
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-04-07T03:17:13.213Z"
+stopped_at: Completed 05-04-PLAN.md
+last_updated: "2026-04-07T03:23:39.819Z"
 progress:
   total_phases: 13
   completed_phases: 2
   total_plans: 26
-  completed_plans: 16
+  completed_plans: 18
 ---
 
 # Project State
@@ -24,7 +24,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 04 (pipeline-validation) — EXECUTING
-Plan: 3 of 7
+Plan: 5 of 7
 
 ## Performance Metrics
 
@@ -60,6 +60,8 @@ Plan: 3 of 7
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
 | Phase 05-production-hardening P02 | 3min | 1 tasks | 4 files |
 | Phase 05 P01 | 6min | 2 tasks | 9 files |
+| Phase 05 P03 | 4min | 2 tasks | 5 files |
+| Phase 05 P04 | 4min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -111,6 +113,8 @@ Recent decisions affecting current work:
 - [Phase 05-production-hardening]: Malformed webhook timestamps skip replay check rather than rejecting -- backward compatibility
 - [Phase 05]: Rate limit key extracts user_id from access_token cookie (decode without verify) for per-user limits, falls back to client IP
 - [Phase 05]: Sentry APM disabled (traces_sample_rate=0.0) for v1 -- error tracking only
+- [Phase 05]: Heartbeat URL derived from webhook URL via string replace; stale billing capped at threshold
+- [Phase 05]: On-demand upload URLs replace pre-generated URLs; job token (token_urlsafe(32)) authenticates container-to-backend uploads
 
 ### Pending Todos
 
@@ -124,6 +128,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-07T03:17:13.207Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-04-07T03:23:39.812Z
+Stopped at: Completed 05-04-PLAN.md
 Resume file: None

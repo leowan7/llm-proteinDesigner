@@ -116,8 +116,8 @@ Plans:
 Plans:
 - [x] 05-01-PLAN.md — Rate limiting, health check hardening, Sentry backend, structured logging
 - [x] 05-02-PLAN.md — Billing idempotency key, webhook replay protection, terminal-state guard
-- [ ] 05-03-PLAN.md — Container heartbeat endpoint, stale job watchdog, live progress SSE
-- [ ] 05-04-PLAN.md — On-demand upload URLs with job token auth, presigned URL security
+- [x] 05-03-PLAN.md — Container heartbeat endpoint, stale job watchdog, live progress SSE
+- [x] 05-04-PLAN.md — On-demand upload URLs with job token auth, presigned URL security
 - [ ] 05-05-PLAN.md — Sentry frontend, GPU spend alerting, SSE limiter, input validation
 
 ### Phase 6: UI Improvements
