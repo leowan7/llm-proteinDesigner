@@ -122,14 +122,21 @@ def check_payment_method(stripe_customer_id: str) -> bool:
     return bool(customer.invoice_settings.default_payment_method)
 
 
-def record_gpu_usage(stripe_customer_id: str, gpu_seconds: int) -> None:
+def record_gpu_usage(stripe_customer_id: str, job_id: str, gpu_seconds: int) -> None:
     """Record GPU usage as a Stripe Billing Meter event.
 
     Uses the Stripe Billing Meters API (not the legacy Usage Records API).
     The 'value' field MUST be a string — Stripe rejects integer values.
 
+    Idempotency: Uses ``gpu_usage_{job_id}`` as the idempotency key. Stripe
+    ignores duplicate meter events with the same key within 24 hours, so a job
+    dispatched or webhooks received multiple times will produce exactly one
+    billing event.
+
     Args:
         stripe_customer_id: Stripe customer to charge for the usage.
+        job_id: Kendrew job UUID — used as the idempotency key to prevent
+                double-billing from retry storms or duplicate webhooks.
         gpu_seconds: Number of GPU-seconds consumed by the job.
     """
     stripe.billing.MeterEvent.create(
@@ -138,4 +145,5 @@ def record_gpu_usage(stripe_customer_id: str, gpu_seconds: int) -> None:
             "stripe_customer_id": stripe_customer_id,
             "value": str(gpu_seconds),  # Must be string, not int
         },
+        idempotency_key=f"gpu_usage_{job_id}",
     )

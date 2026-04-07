@@ -47,6 +47,7 @@ class LaunchRequest(BaseModel):
     """Request body for POST /jobs/launch."""
 
     job_id: str
+    job_name: str | None = None
 
 
 @router.post("/launch")
@@ -83,27 +84,37 @@ async def launch_job_endpoint(
     if not row:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    # Resolve Stripe customer and check payment method.
-    async with pool.acquire() as conn:
-        user_row = await conn.fetchrow(
-            "SELECT email, stripe_customer_id FROM public.users WHERE id = $1",
-            user_id,
-        )
-    if not user_row:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found")
+    # Resolve Stripe customer and check payment method (skip if Stripe not configured).
+    if settings.stripe_secret_key:
+        async with pool.acquire() as conn:
+            user_row = await conn.fetchrow(
+                "SELECT email, stripe_customer_id FROM public.users WHERE id = $1",
+                user_id,
+            )
+        if not user_row:
+            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    stripe_customer_id = await get_or_create_customer(
-        email=user_row["email"],
-        user_id=user_id,
-        pool=pool,
-    )
-
-    has_payment = check_payment_method(stripe_customer_id)
-    if not has_payment:
-        raise HTTPException(
-            status_code=http_status.HTTP_402_PAYMENT_REQUIRED,
-            detail="payment_required",
+        stripe_customer_id = await get_or_create_customer(
+            email=user_row["email"],
+            user_id=user_id,
+            pool=pool,
         )
+
+        has_payment = check_payment_method(stripe_customer_id)
+        if not has_payment:
+            raise HTTPException(
+                status_code=http_status.HTTP_402_PAYMENT_REQUIRED,
+                detail="payment_required",
+            )
+
+    # Save user-provided job name if given.
+    if body.job_name:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE public.jobs SET name = $1 WHERE id = $2",
+                body.job_name,
+                body.job_id,
+            )
 
     # Parse job_spec and dispatch.
     spec_data = json.loads(row["job_spec"] or "{}")
@@ -335,7 +346,7 @@ async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
                 "SELECT stripe_customer_id FROM public.users WHERE id = $1", user_id
             )
         if cust_row and cust_row["stripe_customer_id"]:
-            record_gpu_usage(cust_row["stripe_customer_id"], gpu_seconds)
+            record_gpu_usage(cust_row["stripe_customer_id"], job_id, gpu_seconds)
 
     return {"status": "cancelled", "gpu_seconds": gpu_seconds, "gpu_cost_usd": gpu_cost_usd}
 
