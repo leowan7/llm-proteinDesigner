@@ -5,9 +5,10 @@ runs the 3-stage RFdiffusion pipeline, uploads results via presigned URLs,
 POSTs results to the Kendrew webhook, then exits.
 
 Environment variables:
-    JOB_PAYLOAD     JSON string with job_spec, presigned URLs, and webhook config
+    JOB_PAYLOAD     JSON string with job_spec, upload endpoint, and webhook config
     WEBHOOK_URL     URL to POST results to (Kendrew backend)
     JOB_ID          Kendrew job UUID (for webhook identification)
+    JOB_TOKEN       Job-specific auth token for requesting upload URLs on-demand
     POD_ID          RunPod pod ID (so backend can terminate after completion)
 
 Pipeline stages:
@@ -127,6 +128,39 @@ def startup_check():
 # Helper functions
 # ===========================================================================
 
+def send_heartbeat(
+    webhook_url: str,
+    job_id: str,
+    stage: str,
+    designs_completed: int = 0,
+    designs_total: int = 0,
+) -> None:
+    """Send a heartbeat to the Kendrew backend.
+
+    Derives the heartbeat URL from the main webhook URL by replacing
+    the /webhooks/runpod path with /webhooks/heartbeat.
+
+    Args:
+        webhook_url: The main RunPod webhook URL.
+        job_id: Kendrew job UUID.
+        stage: Current pipeline stage description.
+        designs_completed: Number of designs finished so far.
+        designs_total: Total designs requested.
+    """
+    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    body = {
+        "job_id": job_id,
+        "stage": stage,
+        "designs_completed": designs_completed,
+        "designs_total": designs_total,
+    }
+    try:
+        resp = requests.post(heartbeat_url, json=body, timeout=10)
+        logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
+    except Exception as exc:
+        logger.warning("Heartbeat failed: %s", exc)
+
+
 def download_input(url: str, dest_path: str) -> None:
     """Download a file from a presigned GET URL."""
     logger.info("Downloading input PDB -> %s", dest_path)
@@ -136,6 +170,28 @@ def download_input(url: str, dest_path: str) -> None:
     Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
     Path(dest_path).write_bytes(resp.content)
     logger.info("Downloaded %d bytes", len(resp.content))
+
+
+def request_upload_urls(upload_endpoint: str, job_token: str, filenames: list[str]) -> dict[str, str]:
+    """Request fresh presigned PUT URLs from the Kendrew backend.
+
+    Args:
+        upload_endpoint: URL of the /jobs/{job_id}/upload-urls endpoint.
+        job_token: Job-specific Bearer token for authentication.
+        filenames: List of filenames to upload.
+
+    Returns:
+        Dict mapping filename to presigned PUT URL.
+    """
+    resp = requests.post(
+        upload_endpoint,
+        json={"filenames": filenames},
+        headers={"Authorization": f"Bearer {job_token}"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to get upload URLs: HTTP {resp.status_code} {resp.text[:200]}")
+    return resp.json()["urls"]
 
 
 def upload_output(url: str, file_path: str) -> None:
@@ -321,9 +377,18 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     return hydra_args
 
 
-def stage_rfdiffusion(target_pdb: str, job_spec: dict, output_dir: str) -> list[str]:
+def stage_rfdiffusion(
+    target_pdb: str,
+    job_spec: dict,
+    output_dir: str,
+    webhook_url: str = "",
+    job_id: str = "",
+) -> list[str]:
     """Stage 1: Run RFdiffusion backbone generation."""
     logger.info("=== Stage 1: RFdiffusion backbone generation ===")
+    num_designs = job_spec.get("parameters", {}).get("num_designs", 10)
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "Running RFdiffusion", 0, num_designs)
     hydra_args = build_hydra_args(job_spec, target_pdb)
 
     cmd = [
@@ -341,11 +406,17 @@ def stage_rfdiffusion(target_pdb: str, job_spec: dict, output_dir: str) -> list[
 
 
 def stage_proteinmpnn(
-    backbone_pdbs: list[str], target_chain: str, output_dir: str
+    backbone_pdbs: list[str],
+    target_chain: str,
+    output_dir: str,
+    webhook_url: str = "",
+    job_id: str = "",
 ) -> list[str]:
     """Stage 2: Run ProteinMPNN sequence design on each backbone."""
     logger.info("=== Stage 2: ProteinMPNN sequence design ===")
     os.makedirs(output_dir, exist_ok=True)
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, len(backbone_pdbs))
 
     designed_fastas = []
     binder_chain = "B" if target_chain == "A" else "A"
@@ -370,7 +441,7 @@ def stage_proteinmpnn(
     run_command(assign_cmd, timeout=120)
 
     # Step 3: Run ProteinMPNN on each backbone with the chain assignments
-    for pdb_path in backbone_pdbs:
+    for idx, pdb_path in enumerate(backbone_pdbs):
         design_name = Path(pdb_path).stem
         per_design_out = os.path.join(output_dir, design_name)
         os.makedirs(per_design_out, exist_ok=True)
@@ -393,6 +464,8 @@ def stage_proteinmpnn(
             if fasta_files:
                 designed_fastas.extend(fasta_files)
                 logger.info("ProteinMPNN designed sequence for %s", design_name)
+                if webhook_url and job_id:
+                    send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", idx + 1, len(backbone_pdbs))
             else:
                 logger.warning("No FASTA output for %s", design_name)
         except RuntimeError as exc:
@@ -460,10 +533,14 @@ def stage_af2_validation(
     target_pdb: str,
     target_chain: str,
     output_dir: str,
+    webhook_url: str = "",
+    job_id: str = "",
 ) -> list[dict]:
     """Stage 3: AF2 multimer validation of designed binder-target complexes."""
     logger.info("=== Stage 3: AF2 multimer validation ===")
     os.makedirs(output_dir, exist_ok=True)
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "Running AF2 validation", 0, len(designed_fastas))
 
     target_sequence = _extract_target_sequence(target_pdb, target_chain)
     if not target_sequence:
@@ -472,7 +549,7 @@ def stage_af2_validation(
         )
 
     results = []
-    for fasta_path in designed_fastas:
+    for idx, fasta_path in enumerate(designed_fastas):
         design_name = Path(fasta_path).stem
         sequences = _extract_sequences_from_fasta(fasta_path)
         if not sequences:
@@ -513,6 +590,8 @@ def stage_af2_validation(
                     "AF2 scores for %s: ipTM=%.3f pLDDT=%.1f i_pAE=%.1f",
                     design_name, scores["ipTM"], scores["pLDDT"], scores["i_pAE"],
                 )
+            if webhook_url and job_id:
+                send_heartbeat(webhook_url, job_id, "Running AF2 validation", idx + 1, len(designed_fastas))
         except RuntimeError as exc:
             logger.warning("AF2 validation failed for %s: %s", design_name, exc)
             continue
@@ -558,8 +637,8 @@ def main():
     job_payload = json.loads(job_payload_str)
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
-    output_urls = job_payload.get("output_presigned_urls", [])
-    report_url = job_payload.get("report_presigned_url")
+    upload_endpoint = job_payload.get("upload_urls_endpoint", "")
+    job_token = os.environ.get("JOB_TOKEN", "")
 
     target_chain = job_spec.get("target_chain", "A")
     pipeline_start = time.time()
@@ -576,7 +655,10 @@ def main():
         os.makedirs(rfdiff_output, exist_ok=True)
 
         try:
-            backbone_pdbs = stage_rfdiffusion(target_pdb, job_spec, rfdiff_output)
+            backbone_pdbs = stage_rfdiffusion(
+                target_pdb, job_spec, rfdiff_output,
+                webhook_url=webhook_url, job_id=job_id,
+            )
         except RuntimeError as exc:
             logger.error("RFdiffusion failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {"error": f"RFdiffusion failed: {exc}"})
@@ -585,7 +667,10 @@ def main():
         # ----- Stage 2: ProteinMPNN -----
         mpnn_output = os.path.join(work_dir, "mpnn_output")
         try:
-            designed_fastas = stage_proteinmpnn(backbone_pdbs, target_chain, mpnn_output)
+            designed_fastas = stage_proteinmpnn(
+                backbone_pdbs, target_chain, mpnn_output,
+                webhook_url=webhook_url, job_id=job_id,
+            )
         except RuntimeError as exc:
             logger.error("ProteinMPNN failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
@@ -599,7 +684,8 @@ def main():
         af2_output = os.path.join(work_dir, "af2_output")
         try:
             af2_results = stage_af2_validation(
-                designed_fastas, target_pdb, target_chain, af2_output
+                designed_fastas, target_pdb, target_chain, af2_output,
+                webhook_url=webhook_url, job_id=job_id,
             )
         except RuntimeError as exc:
             logger.error("AF2 validation failed: %s", exc)
