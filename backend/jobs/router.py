@@ -2,7 +2,7 @@
 
 Provides:
 - POST /jobs/launch           — payment gate check then dispatch a job
-- GET  /jobs/              — list jobs for current user
+- GET  /jobs/              — list jobs for current user (paginated, filterable)
 - GET  /jobs/{job_id}      — get single job with candidates
 - GET  /jobs/{job_id}/status   — SSE stream of status events
 - POST /jobs/{job_id}/cancel   — cancel a running job
@@ -13,9 +13,8 @@ import datetime
 import io
 import json
 import zipfile
-
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status as http_status
+from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -160,34 +159,97 @@ async def _sse_event_generator(job_id: str, current_status: str, current_stage: 
 # Endpoints
 # ---------------------------------------------------------------------------
 
+# Status values accepted by the list endpoint (per D-17: All, Running, Complete, Failed).
+# 'cancelled' and 'queued' are intentionally excluded.
+ALLOWED_STATUS_FILTERS = {"running", "complete", "failed"}
+
+
 @router.get("/")
-async def list_jobs(user_id: str = Depends(get_current_user)):
-    """Return the 50 most recent jobs for the current user.
+async def list_jobs(
+    limit: int = Query(default=25, ge=1, le=100),
+    status: str | None = Query(default=None),
+    before: str | None = Query(default=None),
+    user_id: str = Depends(get_current_user),
+):
+    """Return paginated job history for the current user.
+
+    Supports keyset pagination via the ``before`` cursor (ISO timestamp) and
+    optional status filtering. Results are ordered by created_at descending so
+    the newest jobs appear first.
 
     Args:
+        limit: Maximum number of jobs to return (1–100, default 25).
+        status: Optional status filter. Accepted values: ``running``,
+            ``complete``, ``failed``. Omit for all statuses. Returns 400
+            for any other value.
+        before: ISO 8601 timestamp cursor. Only jobs created before this
+            timestamp are returned, enabling keyset pagination. Returns 400
+            if the value cannot be parsed as a timestamp.
         user_id: Injected by the auth dependency.
 
     Returns:
-        List of job summary dicts ordered by created_at descending.
+        Dict with ``jobs`` list and ``has_more`` bool.
+
+    Raises:
+        HTTPException 400: If ``status`` is not in ALLOWED_STATUS_FILTERS or
+            ``before`` is not a valid ISO timestamp.
     """
+    # Validate status filter.
+    if status is not None and status not in ALLOWED_STATUS_FILTERS:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid status filter '{status}'. Allowed values: {sorted(ALLOWED_STATUS_FILTERS)}",
+        )
+
+    # Validate and parse the pagination cursor.
+    before_dt: datetime.datetime | None = None
+    if before is not None:
+        try:
+            before_dt = datetime.datetime.fromisoformat(before)
+            # Ensure timezone-aware for comparison with timestamptz column.
+            if before_dt.tzinfo is None:
+                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid 'before' cursor '{before}'. Expected ISO 8601 timestamp.",
+            )
+
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, status, stage, job_spec, created_at, completed_at, gpu_cost_usd
-               FROM public.jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50""",
+            """SELECT id, tool, status, name, created_at, completed_at,
+                      gpu_cost_usd, results->>'candidate_count' AS candidate_count,
+                      session_id
+               FROM public.jobs
+               WHERE user_id = $1
+                 AND ($2::text IS NULL OR status = $2)
+                 AND ($3::timestamptz IS NULL OR created_at < $3)
+               ORDER BY created_at DESC
+               LIMIT $4""",
             user_id,
+            status,
+            before_dt,
+            limit,
         )
-    return [
+
+    jobs = [
         {
             "id": str(r["id"]),
+            "tool": r["tool"] or "",
             "status": r["status"],
-            "tool": json.loads(r["job_spec"] or "{}").get("tool", ""),
+            "name": r["name"] or "",
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
             "gpu_cost_usd": float(r["gpu_cost_usd"]) if r["gpu_cost_usd"] else None,
+            "candidate_count": int(r["candidate_count"]) if r["candidate_count"] else None,
+            "session_id": str(r["session_id"]) if r["session_id"] else None,
         }
         for r in rows
     ]
+
+    # has_more is true when exactly `limit` rows were returned — there may be more.
+    return {"jobs": jobs, "has_more": len(rows) == limit}
 
 
 @router.get("/{job_id}/status")
