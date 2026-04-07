@@ -29,6 +29,12 @@ interface MessageListProps {
   onEditParams: () => void;
   onAcknowledgeWarnings: () => void;
   onUseDifferentStructure: () => void;
+  /**
+   * Announcement text for screen readers. Updates only when a NEW assistant
+   * message completes (after the SSE `done` event) — not on initial load.
+   * Passed as a truncated excerpt of the completed message text.
+   */
+  lastAnnouncedMessage?: string;
 }
 
 /** Determines if any card in a message is a ReviewCard (controls isValidating state) */
@@ -46,6 +52,7 @@ export function MessageList({
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
+  lastAnnouncedMessage,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -125,6 +132,21 @@ export function MessageList({
             <p className="text-sm text-muted-foreground">{statusText}</p>
           </div>
         )}
+
+        {/* Screen reader announcement for new messages only.
+            aria-live="polite" announces after the current interaction completes.
+            aria-atomic="true" reads the whole announcement as one unit.
+            Does NOT announce the full message history on initial load —
+            only the lastAnnouncedMessage prop, which is set by ChatPage
+            after the SSE `done` event. */}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
+          {lastAnnouncedMessage}
+        </div>
 
         {/* Scroll anchor */}
         <div ref={bottomRef} />
