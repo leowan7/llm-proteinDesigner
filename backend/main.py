@@ -2,12 +2,14 @@
 
 from contextlib import asynccontextmanager
 
+import redis.asyncio as aioredis
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from config import settings
 from auth.router import router as auth_router
-from db.connection import close_db_pool
+from db.connection import close_db_pool, get_db_pool
 
 
 @asynccontextmanager
@@ -47,6 +49,11 @@ if not settings.testing:
         cookie_secure=settings.cookie_secure,
     )
 
+# Rate limiting — after CORS, before routers
+if settings.rate_limit_enabled:
+    from middleware.rate_limit import setup_rate_limiting
+    setup_rate_limiting(app)
+
 # Routers
 app.include_router(auth_router)
 
@@ -70,5 +77,30 @@ app.include_router(jobs_router)
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "ok"}
+    """Deep health check — verifies API, database, and Redis connectivity.
+
+    Returns 200 with all checks "ok" when healthy, 503 with error details
+    when any dependency is unreachable.
+    """
+    checks = {"api": "ok"}
+
+    # Check database connectivity.
+    try:
+        pool = await get_db_pool()
+        await pool.fetchval("SELECT 1")
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {str(exc)[:100]}"
+
+    # Check Redis connectivity.
+    try:
+        r = aioredis.from_url(settings.redis_url)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {str(exc)[:100]}"
+
+    healthy = all(v == "ok" for v in checks.values())
+    status_code = 200 if healthy else 503
+    return JSONResponse(content=checks, status_code=status_code)

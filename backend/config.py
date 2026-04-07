@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     debug: bool = True
     testing: bool = False
 
+    # Sentry
+    sentry_dsn: str = ""
+
+    # Rate limiting
+    rate_limit_enabled: bool = True
+    rate_limit_default: str = "60/minute"
+
     # Anthropic (Claude agent)
     anthropic_api_key: str = ""
 
@@ -57,11 +64,19 @@ class Settings(BaseSettings):
     # RunPod
     runpod_api_key: str = ""
     runpod_webhook_secret: str = ""
-    runpod_endpoint_rfdiffusion: str = ""
-    runpod_endpoint_rfantibody: str = ""
-    runpod_endpoint_bindcraft: str = ""
-    runpod_endpoint_boltzgen: str = ""
-    runpod_endpoint_pxdesign: str = ""
+
+    # RunPod Pod configuration (replaces per-tool serverless endpoint IDs)
+    runpod_gpu_type_ids: list[str] = ["NVIDIA RTX A6000"]  # Priority-ordered fallbacks
+    runpod_container_disk_gb: int = 20
+    runpod_network_volume_id: str = ""  # Optional — weights baked into images by default
+    runpod_container_registry_auth_id: str = ""  # GHCR auth credential ID on RunPod
+
+    # Docker images per tool (pulled by RunPod pods)
+    runpod_image_rfdiffusion: str = "ghcr.io/leowan7/kendrew-rfdiffusion:v6"
+    runpod_image_rfantibody: str = ""
+    runpod_image_bindcraft: str = ""
+    runpod_image_boltzgen: str = ""
+    runpod_image_pxdesign: str = ""
 
     # Resend (for job notifications)
     resend_api_key: str = ""
@@ -70,8 +85,8 @@ class Settings(BaseSettings):
     # App base URL (used in email links and Stripe return URLs)
     app_base_url: str = "http://localhost:8000"
 
-    # GPU pricing (dollars per second on A100 80GB)
-    gpu_price_per_second: float = 0.0012
+    # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec)
+    gpu_price_per_second: float = 0.0000917
     gpu_markup_percent: float = 30.0
 
     class Config:

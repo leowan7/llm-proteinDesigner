@@ -16,7 +16,7 @@ SSE event types streamed by POST /agent/message:
 import json
 
 import anthropic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -25,6 +25,7 @@ from agent.system_prompt import AGENT_SYSTEM_PROMPT
 from agent.tools import TOOL_DEFINITIONS, dispatch_tool
 from auth.dependencies import get_current_user
 from config import settings
+from middleware.rate_limit import limiter
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -43,7 +44,9 @@ class NewSessionResponse(BaseModel):
 
 
 @router.post("/session")
+@limiter.limit("20/minute")
 async def create_session(
+    request: Request,
     user_id: str = Depends(get_current_user),
 ) -> NewSessionResponse:
     """Create a new agent session, replacing any existing active session.
@@ -57,7 +60,9 @@ async def create_session(
 
 
 @router.post("/message")
+@limiter.limit("20/minute")
 async def agent_message(
+    request: Request,
     req: MessageRequest,
     user_id: str = Depends(get_current_user),
 ):
@@ -87,13 +92,23 @@ async def agent_message(
 
         try:
             while True:
-                response = client.messages.create(
-                    model=settings.agent_model,
-                    max_tokens=settings.agent_max_tokens,
-                    system=AGENT_SYSTEM_PROMPT,
-                    tools=TOOL_DEFINITIONS,
-                    messages=messages,
-                )
+                # Retry with backoff on overload (529)
+                for attempt in range(3):
+                    try:
+                        response = client.messages.create(
+                            model=settings.agent_model,
+                            max_tokens=settings.agent_max_tokens,
+                            system=AGENT_SYSTEM_PROMPT,
+                            tools=TOOL_DEFINITIONS,
+                            messages=messages,
+                        )
+                        break
+                    except anthropic.APIStatusError as retry_exc:
+                        if retry_exc.status_code == 529 and attempt < 2:
+                            import asyncio
+                            await asyncio.sleep(2 ** attempt)  # 1s, 2s
+                            continue
+                        raise
 
                 # Serialize ContentBlock objects to dicts before storing in history.
                 # The Anthropic SDK returns response.content as a list of TextBlock/
@@ -129,7 +144,7 @@ async def agent_message(
                             yield f"data: {json.dumps({'type': 'status', 'text': status_text})}\n\n"
 
                             # Execute the tool server-side
-                            result_json = await dispatch_tool(block.name, block.input)
+                            result_json = await dispatch_tool(block.name, block.input, user_id=user_id)
                             result_data = json.loads(result_json)
 
                             # Emit structured tool result for frontend card rendering
@@ -180,9 +195,78 @@ def _tool_status_text(tool_name: str) -> str:
         Human-readable status string for the SSE status event.
     """
     status_map = {
-        "resolve_structure": "Fetching structure...",
-        "classify_intent": "Analyzing your design goal...",
-        "collect_parameters": "Preparing parameters...",
-        "validate_preflight": "Running pre-flight checks...",
+        "resolve_structure": "Searching RCSB for structure",
+        "classify_intent": "Selecting design tool",
+        "collect_parameters": "Setting parameters",
+        "validate_preflight": "Running pre-flight checks",
+        "extract_interface": "Analyzing binding interface",
     }
-    return status_map.get(tool_name, "Processing...")
+    return status_map.get(tool_name, "Processing")
+
+
+import asyncio
+
+
+async def _mock_event_generator(user_message: str, user_id: str):
+    """Scripted SSE responses for UI testing without Anthropic API credits.
+
+    Simulates the full agent flow: resolve_structure → classify_intent →
+    collect_parameters → validate_preflight → review card. Includes realistic
+    delays to mimic network/processing time.
+    """
+    msg = user_message.lower()
+
+    # Step 1: Acknowledge and resolve structure
+    yield f"data: {json.dumps({'type': 'status', 'text': 'Fetching structure...'})}\n\n"
+    await asyncio.sleep(0.8)
+
+    # Resolve structure tool result
+    structure_result = {
+        "status": "success",
+        "pdb_id": "5FXS",
+        "pdb_path": "/tmp/structures/5FXS.pdb",
+        "protein_name": "INSULIN-LIKE GROWTH FACTOR 1 RECEPTOR",
+        "resolution": 1.90,
+        "method": "X-RAY DIFFRACTION",
+        "chain_count": 1,
+        "selected_chain": "A",
+        "residue_count": 308,
+        "chains": [
+            {"id": "A", "name": "Insulin-like growth factor 1 receptor", "residue_count": 308, "organism": "Homo sapiens"},
+        ],
+        "normalization_changes": [],
+        "file_size_bytes": 245000,
+        "message": "Structure 5FXS fetched from RCSB (245000 bytes).",
+    }
+    yield f"data: {json.dumps({'type': 'tool_result', 'tool_name': 'resolve_structure', 'result': structure_result})}\n\n"
+    await asyncio.sleep(0.3)
+
+    # Agent text explaining the structure
+    yield f"data: {json.dumps({'type': 'text', 'text': 'I found IGF1R extracellular domain at 1.90 A resolution (PDB 5FXS, Homo sapiens). This is the ligand-binding L1 domain — a good target for blocking IGF1/IGF2 binding.'})}\n\n"
+    await asyncio.sleep(0.5)
+
+    # Check if user already specified enough to skip questions
+    if "minibinder" in msg or "miniprotein" in msg or "binder" in msg:
+        # Skip design type question — recommend tool directly
+        yield f"data: {json.dumps({'type': 'text', 'text': 'BindCraft is the best fit here — it uses induced-fit interface design through AF2 hallucination, which handles the flexible surfaces common in receptor extracellular domains. It produces ready-to-express sequences without a separate sequence design step.'})}\n\n"
+        await asyncio.sleep(0.3)
+    else:
+        yield f"data: {json.dumps({'type': 'text', 'text': 'What type of molecule would you like to design against this target? Options: miniprotein binder, VHH/nanobody, cyclic peptide, or full antibody.'})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        return
+
+    # classify_intent
+    yield f"data: {json.dumps({'type': 'status', 'text': 'Analyzing your design goal...'})}\n\n"
+    await asyncio.sleep(0.5)
+
+    intent_result = {
+        "design_type": "minibinder",
+        "recommended_tool": "bindcraft",
+        "rationale": "BindCraft uses induced-fit AF2 hallucination, ideal for targeting receptor ligand-binding domains with flexible surfaces.",
+    }
+    yield f"data: {json.dumps({'type': 'tool_result', 'tool_name': 'classify_intent', 'result': intent_result})}\n\n"
+    await asyncio.sleep(0.3)
+
+    # Pilot vs production question
+    yield f"data: {json.dumps({'type': 'text', 'text': 'Would you like to start with a **pilot run** (10 designs) to validate the setup, or go straight to **production scale** (100-500 designs)?'})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"

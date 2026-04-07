@@ -1,11 +1,12 @@
 """Auth endpoints. All authentication routes through FastAPI -- frontend never calls Supabase directly."""
 
 import jwt
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 
 from config import settings
 from auth.dependencies import get_current_user
+from middleware.rate_limit import limiter
 
 from supabase import create_client
 
@@ -69,7 +70,8 @@ def _clear_auth_cookies(response: Response) -> None:
 
 
 @router.post("/signup")
-async def signup(body: SignUpRequest, response: Response):
+@limiter.limit("3/minute;10/hour")
+async def signup(request: Request, body: SignUpRequest, response: Response):
     """AUTH-01: Create account with email and password via Supabase Auth."""
     try:
         supabase = _get_supabase()
@@ -86,7 +88,8 @@ async def signup(body: SignUpRequest, response: Response):
 
 
 @router.post("/login")
-async def login(body: LoginRequest, response: Response):
+@limiter.limit("5/minute")
+async def login(request: Request, body: LoginRequest, response: Response):
     """AUTH-04: Authenticate and set HTTP-only cookies."""
     try:
         supabase = _get_supabase()
@@ -141,7 +144,8 @@ async def refresh(response: Response, refresh_token: str | None = Cookie(default
 
 
 @router.post("/reset-password")
-async def reset_password(body: ResetPasswordRequest):
+@limiter.limit("3/minute")
+async def reset_password(request: Request, body: ResetPasswordRequest):
     """AUTH-03: Send password reset email via Supabase Auth."""
     try:
         supabase = _get_supabase()
@@ -208,6 +212,13 @@ async def update_password(
 
 
 @router.get("/me")
-async def get_me(user_id: str = Depends(get_current_user)):
-    """Return current user's ID. Validates JWT from cookie."""
-    return {"user_id": user_id}
+async def get_me(user_id: str = Depends(get_current_user), access_token: str | None = Cookie(default=None)):
+    """Return current user's ID and email. Validates JWT from cookie."""
+    email = None
+    if access_token:
+        try:
+            payload = jwt.decode(access_token, options={"verify_signature": False})
+            email = payload.get("email")
+        except Exception:
+            pass
+    return {"user_id": user_id, "email": email}

@@ -15,12 +15,13 @@ import json
 import zipfile
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status as http_status
+from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
+from middleware.rate_limit import limiter
 from billing.stripe_client import check_payment_method, get_or_create_customer, record_gpu_usage
 from config import settings
 from db.connection import get_db_pool
@@ -51,7 +52,9 @@ class LaunchRequest(BaseModel):
 
 
 @router.post("/launch")
+@limiter.limit("5/minute")
 async def launch_job_endpoint(
+    request: Request,
     body: LaunchRequest,
     user_id: str = Depends(get_current_user),
 ):
@@ -233,7 +236,8 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
 
 
 @router.get("/{job_id}/download")
-async def download_all_designs(job_id: str, user_id: str = Depends(get_current_user)):
+@limiter.limit("10/minute")
+async def download_all_designs(request: Request, job_id: str, user_id: str = Depends(get_current_user)):
     """Download all design outputs for a completed job as a ZIP archive.
 
     Fetches all objects under ``users/{user_id}/jobs/{job_id}/outputs/`` from
