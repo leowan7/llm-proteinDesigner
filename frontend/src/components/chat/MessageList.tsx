@@ -31,6 +31,8 @@ interface MessageListProps {
   onUseDifferentStructure: () => void;
   /** Called when an example prompt is clicked in GreetingCard (D-21). */
   onPromptClick?: (prompt: string) => void;
+  /** Screen reader announcement for new assistant messages only (WCAG). */
+  lastAnnouncedMessage?: string;
 }
 
 /** Determines if any card in a message is a ReviewCard (controls isValidating state) */
@@ -49,6 +51,7 @@ export function MessageList({
   onAcknowledgeWarnings,
   onUseDifferentStructure,
   onPromptClick,
+  lastAnnouncedMessage,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -128,6 +131,21 @@ export function MessageList({
             <p className="text-sm text-muted-foreground">{statusText}</p>
           </div>
         )}
+
+        {/* Screen reader announcement for new messages only.
+            aria-live="polite" announces after the current interaction completes.
+            aria-atomic="true" reads the whole announcement as one unit.
+            Does NOT announce the full message history on initial load —
+            only the lastAnnouncedMessage prop, which is set by ChatPage
+            after the SSE `done` event. */}
+        <div
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          className="sr-only"
+        >
+          {lastAnnouncedMessage}
+        </div>
 
         {/* Scroll anchor */}
         <div ref={bottomRef} />

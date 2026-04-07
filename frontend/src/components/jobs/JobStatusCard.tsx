@@ -98,6 +98,12 @@ export function JobStatusCard({
 
   const stages = getStages(tool);
 
+  // Human-readable status announcement for screen readers.
+  // Updates whenever the status prop changes — assertive so it interrupts
+  // the current reading and immediately informs the user of state changes.
+  const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+  const stageLabel = stage ? ` — ${stage}` : "";
+
   async function handleConfirmCancel() {
     setCancelling(true);
     try {
@@ -110,6 +116,12 @@ export function JobStatusCard({
 
   return (
     <Card className="border-border/50">
+      {/* Screen reader: assertive announcement on job status changes.
+          aria-live="assertive" interrupts current reading for critical updates
+          (status changes to running, complete, failed). */}
+      <div aria-live="assertive" aria-atomic="true" className="sr-only">
+        {`Job status changed to ${statusLabel}${stageLabel}`}
+      </div>
       <CardHeader className="px-4 pb-2 pt-4 flex flex-row items-start justify-between gap-4">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-h-[44px]">
           {stages.map((stageName, index) => {
