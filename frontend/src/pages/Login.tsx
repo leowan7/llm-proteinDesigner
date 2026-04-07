@@ -6,6 +6,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 
 import { AuthLayout } from "@/components/auth/AuthLayout";
+import { setSentryUser } from "@/lib/sentry";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -44,11 +45,12 @@ export function Login() {
     setApiError(null);
     setUnverifiedEmail(null);
     try {
-      await api("/auth/login", {
+      const result = await api<{ user_id: string }>("/auth/login", {
         method: "POST",
         body: { email: values.email, password: values.password },
       });
-      navigate("/");
+      setSentryUser(result.user_id, values.email);
+      navigate("/chat");
     } catch (error) {
       if (error instanceof ApiError) {
         if (error.status === 401) {
