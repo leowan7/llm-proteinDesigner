@@ -555,53 +555,15 @@ def stage_af2_validation(
         # Index 1 is the first designed sequence from ProteinMPNN.
         full_designed_seq = seq_list[1]
 
-        # Vanilla ProteinMPNN does NOT insert '/' between chains.
-        # We must split the continuous string using the exact chain lengths
-        # from the parsed PDB JSONL file produced in Stage 2.
-        jsonl_path = os.path.join(
-            os.path.dirname(os.path.dirname(fasta_path)), "parsed_pdbs.jsonl"
-        )
-
-        target_len = 0
-        binder_len = 0
-        binder_chain = "B" if target_chain == "A" else "A"
-
-        try:
-            with open(jsonl_path) as f:
-                for line in f:
-                    data = json.loads(line)
-                    if data.get("name") == design_name:
-                        # parse_multiple_chains.py uses "seq_chain_X" keys,
-                        # but some versions use bare chain ID. Try both.
-                        target_len = len(
-                            data.get(f"seq_chain_{target_chain}",
-                                     data.get(target_chain, ""))
-                        )
-                        binder_len = len(
-                            data.get(f"seq_chain_{binder_chain}",
-                                     data.get(binder_chain, ""))
-                        )
-                        break
-        except Exception as exc:
-            logger.warning("Could not read JSONL for chain lengths: %s", exc)
-            continue
-
-        if target_len == 0 or binder_len == 0:
-            logger.warning("Could not determine chain lengths for %s", design_name)
-            continue
-
-        logger.info(
-            "Chain lengths for %s: target(%s)=%d, binder(%s)=%d, designed_seq=%d",
-            design_name, target_chain, target_len, binder_chain, binder_len,
-            len(full_designed_seq),
-        )
-
-        # Extract just the binder sequence.
-        # RFdiffusion outputs chains alphabetically (A then B).
-        if target_chain == "A":
-            binder_sequence = full_designed_seq[target_len:target_len + binder_len]
+        # Extract binder sequence.
+        # With assign_fixed_chains, vanilla ProteinMPNN outputs ONLY the
+        # designed chain (binder). Some forks output the full complex with
+        # chains joined by '/'. Handle both.
+        if "/" in full_designed_seq:
+            chain_seqs = full_designed_seq.split("/")
+            binder_sequence = chain_seqs[1] if target_chain == "A" else chain_seqs[0]
         else:
-            binder_sequence = full_designed_seq[:binder_len]
+            binder_sequence = full_designed_seq
 
         combined_fasta = os.path.join(output_dir, f"{design_name}.fasta")
         with open(combined_fasta, "w") as fh:
