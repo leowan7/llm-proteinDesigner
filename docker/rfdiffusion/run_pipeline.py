@@ -608,6 +608,11 @@ def stage_af2_validation(
             fh.write(f">{design_name}\n")
             fh.write(f"{target_sequence}:{binder_sequence}\n")
 
+        logger.info(
+            "AF2 input for %s: target_len=%d, binder_len=%d, fasta=%s",
+            design_name, len(target_sequence), len(binder_sequence), combined_fasta,
+        )
+
         per_design_out = os.path.join(output_dir, design_name)
         os.makedirs(per_design_out, exist_ok=True)
 
@@ -622,7 +627,12 @@ def stage_af2_validation(
                 "--num-models", "1",
                 "--rank", "iptm",
             ]
-            run_command(cmd, timeout=600)
+            af2_output_text = run_command(cmd, timeout=600)
+            logger.info("ColabFold output for %s:\n%s", design_name, af2_output_text[-2000:])
+
+            # List what ColabFold actually produced
+            af2_files = os.listdir(per_design_out) if os.path.isdir(per_design_out) else []
+            logger.info("AF2 output files for %s: %s", design_name, af2_files)
 
             scores = parse_af2_scores(per_design_out, design_name)
             if scores:
