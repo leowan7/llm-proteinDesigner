@@ -355,3 +355,245 @@ async def cancel_admin_job(
         pass
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/revenue — revenue summary with period filtering (D-17 through D-20)
+# ---------------------------------------------------------------------------
+
+ALLOWED_REVENUE_PERIODS = {"this_month", "last_30_days", "all_time"}
+
+
+@router.get("/revenue")
+async def get_revenue(
+    period: str = Query(default="this_month"),
+    admin_id: str = Depends(get_current_admin),
+):
+    """Return revenue summary with period filtering and cost-of-goods/margin.
+
+    Revenue is sourced from the jobs table (gpu_cost_usd), not Stripe MRR —
+    Kendrew uses metered billing which Stripe does not report as MRR (D-17).
+
+    Cost-of-goods is reverse-calculated from the markup percent: the jobs table
+    stores the billed amount (with markup), not the raw RunPod cost (D-18, SC-3).
+
+    Args:
+        period: Time period — "this_month" (default), "last_30_days", "all_time".
+        admin_id: Injected by get_current_admin.
+
+    Returns:
+        Revenue summary dict with totals, by-tool breakdown, cost_of_goods_usd,
+        and margin_usd. cost_of_goods_usd and margin_usd are null when
+        gpu_markup_percent is 0 (markup not configured).
+    """
+    if period not in ALLOWED_REVENUE_PERIODS:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid period '{period}'. Allowed: {sorted(ALLOWED_REVENUE_PERIODS)}",
+        )
+
+    # Calculate period_start from the period label.
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    if period == "this_month":
+        period_start: datetime.datetime | None = now_utc.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+    elif period == "last_30_days":
+        period_start = now_utc - datetime.timedelta(days=30)
+    else:
+        period_start = None  # all_time — no date filter
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        summary = await conn.fetchrow(
+            """SELECT
+                   COALESCE(SUM(gpu_cost_usd) FILTER (WHERE status = 'complete'), 0) AS total_revenue,
+                   COUNT(*) FILTER (WHERE status = 'complete') AS completed_jobs,
+                   COUNT(*) FILTER (WHERE status = 'running') AS running_jobs,
+                   COUNT(*) FILTER (WHERE status = 'failed') AS failed_jobs
+               FROM public.jobs
+               WHERE ($1::timestamptz IS NULL OR created_at >= $1)""",
+            period_start,
+        )
+
+        by_tool_rows = await conn.fetch(
+            """SELECT tool,
+                      COALESCE(SUM(gpu_cost_usd), 0) AS revenue,
+                      COUNT(*) AS job_count
+               FROM public.jobs
+               WHERE status = 'complete'
+                 AND ($1::timestamptz IS NULL OR created_at >= $1)
+               GROUP BY tool
+               ORDER BY revenue DESC""",
+            period_start,
+        )
+
+    total_revenue = float(summary["total_revenue"])
+    completed_jobs = int(summary["completed_jobs"])
+    avg_revenue_per_job = round(total_revenue / completed_jobs, 4) if completed_jobs > 0 else 0.0
+
+    # Cost-of-goods: reverse-calculate from markup percent (D-18, SC-3).
+    # If markup_percent is 0, we cannot derive a meaningful cost figure.
+    markup_pct = settings.gpu_markup_percent
+    if markup_pct > 0:
+        cost_of_goods_usd: float | None = round(total_revenue / (1 + markup_pct / 100), 4)
+        margin_usd: float | None = round(total_revenue - cost_of_goods_usd, 4)
+    else:
+        cost_of_goods_usd = None
+        margin_usd = None
+
+    by_tool = [
+        {
+            "tool": r["tool"] or "unknown",
+            "revenue": float(r["revenue"]),
+            "job_count": int(r["job_count"]),
+        }
+        for r in by_tool_rows
+    ]
+
+    await write_audit(admin_id, "view_revenue", None, {"period": period})
+
+    return {
+        "total_revenue": total_revenue,
+        "completed_jobs": completed_jobs,
+        "running_jobs": int(summary["running_jobs"]),
+        "failed_jobs": int(summary["failed_jobs"]),
+        "avg_revenue_per_job": avg_revenue_per_job,
+        "cost_of_goods_usd": cost_of_goods_usd,
+        "margin_usd": margin_usd,
+        "by_tool": by_tool,
+        "period": period,
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/system — API, DB, Redis health + GPU queue counts (D-22 through D-25)
+# ---------------------------------------------------------------------------
+
+@router.get("/system")
+async def get_system_health(
+    admin_id: str = Depends(get_current_admin),
+):
+    """Return a snapshot of system health: API, DB, Redis, and GPU queue counts.
+
+    This is a manual-refresh snapshot dashboard (D-25) — not real-time monitoring.
+    Storage (R2) is deferred (D-24) and returned as null.
+
+    Args:
+        admin_id: Injected by get_current_admin.
+
+    Returns:
+        Dict with api, db, redis status strings, running_jobs, queued_jobs, storage.
+    """
+    checks: dict[str, str | None] = {"api": "ok"}
+
+    # Check database connectivity.
+    try:
+        pool = await get_db_pool()
+        await pool.fetchval("SELECT 1")
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {str(exc)[:100]}"
+
+    # Check Redis connectivity.
+    try:
+        r = aioredis.from_url(settings.redis_url)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {str(exc)[:100]}"
+
+    # GPU queue counts.
+    running_jobs = 0
+    queued_jobs = 0
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            queue_row = await conn.fetchrow(
+                """SELECT
+                       COUNT(*) FILTER (WHERE status = 'running') AS running,
+                       COUNT(*) FILTER (WHERE status = 'queued') AS queued
+                   FROM public.jobs"""
+            )
+        running_jobs = int(queue_row["running"])
+        queued_jobs = int(queue_row["queued"])
+    except Exception:
+        pass  # Queue counts are informational; don't fail the endpoint
+
+    await write_audit(admin_id, "view_system", None, {})
+
+    return {
+        "api": checks["api"],
+        "db": checks["db"],
+        "redis": checks["redis"],
+        "running_jobs": running_jobs,
+        "queued_jobs": queued_jobs,
+        "storage": None,  # R2 API deferred (D-24)
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /admin/audit — paginated audit log (D-28, D-29)
+# ---------------------------------------------------------------------------
+
+@router.get("/audit")
+async def get_audit_log(
+    before: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    admin_id: str = Depends(get_current_admin),
+):
+    """Return paginated audit log entries in reverse-chronological order.
+
+    Includes admin email, action, target, and timestamp for each entry (D-28).
+    No retention policy for v1 — returns all entries (D-29).
+
+    Args:
+        before: ISO 8601 cursor for keyset pagination (created_at).
+        limit: Page size (1–200, default 50).
+        admin_id: Injected by get_current_admin.
+
+    Returns:
+        Dict with "entries" list and "has_more" bool.
+    """
+    before_dt: datetime.datetime | None = None
+    if before is not None:
+        try:
+            before_dt = datetime.datetime.fromisoformat(before)
+            if before_dt.tzinfo is None:
+                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid 'before' cursor '{before}'. Expected ISO 8601 timestamp.",
+            )
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT a.id, a.action, a.target_id, a.metadata, a.created_at,
+                      u.email AS admin_email
+               FROM public.audit_log a
+               JOIN public.users u ON u.id = a.admin_user_id
+               WHERE ($1::timestamptz IS NULL OR a.created_at < $1)
+               ORDER BY a.created_at DESC
+               LIMIT $2""",
+            before_dt,
+            limit,
+        )
+
+    entries = [
+        {
+            "id": str(r["id"]),
+            "admin_email": r["admin_email"],
+            "action": r["action"],
+            "target_id": r["target_id"],
+            "metadata": dict(r["metadata"]) if r["metadata"] else {},
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+    await write_audit(admin_id, "view_audit", None, {})
+
+    return {"entries": entries, "has_more": len(rows) == limit}
