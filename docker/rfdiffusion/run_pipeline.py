@@ -541,22 +541,67 @@ def stage_af2_validation(
         design_name = Path(fasta_path).stem
         sequences = _extract_sequences_from_fasta(fasta_path)
         seq_list = list(sequences.values())
+
+        logger.info(
+            "FASTA %s: %d entries, lengths=%s",
+            fasta_path, len(seq_list),
+            [len(s) for s in seq_list],
+        )
         if len(seq_list) < 2:
             logger.warning("No designed sequences in %s, skipping", fasta_path)
             continue
 
-        # Index 0 is the input poly-Glycine backbone — skip it.
+        # Index 0 is the input poly-Gly backbone — skip it.
         # Index 1 is the first designed sequence from ProteinMPNN.
         full_designed_seq = seq_list[1]
 
-        # ProteinMPNN outputs all chains joined by '/': TargetSeq/BinderSeq
-        # Extract only the binder chain for AF2 multimer input.
-        chain_seqs = full_designed_seq.split("/")
-        if len(chain_seqs) < 2:
-            logger.warning("Unexpected chain format in ProteinMPNN output: %s", fasta_path)
+        # Vanilla ProteinMPNN does NOT insert '/' between chains.
+        # We must split the continuous string using the exact chain lengths
+        # from the parsed PDB JSONL file produced in Stage 2.
+        jsonl_path = os.path.join(
+            os.path.dirname(os.path.dirname(fasta_path)), "parsed_pdbs.jsonl"
+        )
+
+        target_len = 0
+        binder_len = 0
+        binder_chain = "B" if target_chain == "A" else "A"
+
+        try:
+            with open(jsonl_path) as f:
+                for line in f:
+                    data = json.loads(line)
+                    if data.get("name") == design_name:
+                        # parse_multiple_chains.py uses "seq_chain_X" keys,
+                        # but some versions use bare chain ID. Try both.
+                        target_len = len(
+                            data.get(f"seq_chain_{target_chain}",
+                                     data.get(target_chain, ""))
+                        )
+                        binder_len = len(
+                            data.get(f"seq_chain_{binder_chain}",
+                                     data.get(binder_chain, ""))
+                        )
+                        break
+        except Exception as exc:
+            logger.warning("Could not read JSONL for chain lengths: %s", exc)
             continue
 
-        binder_sequence = chain_seqs[1] if target_chain == "A" else chain_seqs[0]
+        if target_len == 0 or binder_len == 0:
+            logger.warning("Could not determine chain lengths for %s", design_name)
+            continue
+
+        logger.info(
+            "Chain lengths for %s: target(%s)=%d, binder(%s)=%d, designed_seq=%d",
+            design_name, target_chain, target_len, binder_chain, binder_len,
+            len(full_designed_seq),
+        )
+
+        # Extract just the binder sequence.
+        # RFdiffusion outputs chains alphabetically (A then B).
+        if target_chain == "A":
+            binder_sequence = full_designed_seq[target_len:target_len + binder_len]
+        else:
+            binder_sequence = full_designed_seq[:binder_len]
 
         combined_fasta = os.path.join(output_dir, f"{design_name}.fasta")
         with open(combined_fasta, "w") as fh:
