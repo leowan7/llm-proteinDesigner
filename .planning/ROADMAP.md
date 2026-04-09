@@ -135,11 +135,11 @@ Plans:
   8. Resources page (/resources) with links to original publications for each tool, benchmark data, example use cases, and video walkthroughs
 **Plans**: 5 plans
 Plans:
-- [ ] 06-01-PLAN.md — Session persistence backend (DB migration, session CRUD, agent router migration)
-- [ ] 06-02-PLAN.md — Supporting backend APIs (jobs list, user usage, payment method, notification prefs)
-- [ ] 06-03-PLAN.md — App shell restructure (sidebar, header, layout, routing, ChatPage refactor)
-- [ ] 06-04-PLAN.md — Job history page and enhanced GreetingCard onboarding
-- [ ] 06-05-PLAN.md — Settings page and WCAG 2.2 AA accessibility audit
+- [x] 06-01-PLAN.md — Session persistence backend (DB migration, session CRUD, agent router migration)
+- [x] 06-02-PLAN.md — Supporting backend APIs (jobs list, user usage, payment method, notification prefs)
+- [x] 06-03-PLAN.md — App shell restructure (sidebar, header, layout, routing, ChatPage refactor)
+- [x] 06-04-PLAN.md — Job history page and enhanced GreetingCard onboarding
+- [x] 06-05-PLAN.md — Settings page and WCAG 2.2 AA accessibility audit
 **Research**: .planning/research/UI-FEATURES.md
 
 ### Phase 7: Admin Dashboard
