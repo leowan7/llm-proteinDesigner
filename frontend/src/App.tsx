@@ -12,6 +12,12 @@ import { HomePage } from "./pages/HomePage";
 import { JobHistoryPage } from "./pages/JobHistoryPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AuthenticatedLayout } from "./components/layout/AuthenticatedLayout";
+import { AdminLayout } from "./components/layout/AdminLayout";
+import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
+import { AdminJobsPage } from "./pages/admin/AdminJobsPage";
+import { AdminRevenuePage } from "./pages/admin/AdminRevenuePage";
+import { AdminSystemPage } from "./pages/admin/AdminSystemPage";
+import { AdminAuditPage } from "./pages/admin/AdminAuditPage";
 
 /**
  * Detects Supabase auth redirects with tokens in the URL hash fragment
@@ -62,6 +68,16 @@ function App() {
           <Route path="/email-confirmed" element={<EmailConfirmed />} />
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/reset-password/confirm" element={<ResetPasswordConfirm />} />
+
+          {/* Admin routes — separate layout, admin auth guard */}
+          <Route element={<AdminLayout />}>
+            <Route path="/admin" element={<AdminUsersPage />} />
+            <Route path="/admin/users" element={<AdminUsersPage />} />
+            <Route path="/admin/jobs" element={<AdminJobsPage />} />
+            <Route path="/admin/revenue" element={<AdminRevenuePage />} />
+            <Route path="/admin/system" element={<AdminSystemPage />} />
+            <Route path="/admin/audit" element={<AdminAuditPage />} />
+          </Route>
 
           {/* Authenticated routes — wrapped in sidebar layout */}
           <Route element={<AuthenticatedLayout />}>
