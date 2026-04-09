@@ -617,6 +617,7 @@ def stage_af2_validation(
                 combined_fasta,
                 per_design_out,
                 "--model-type", "alphafold2_multimer_v3",
+                "--msa-mode", "single_sequence",
                 "--num-recycle", "3",
                 "--num-models", "1",
                 "--rank", "iptm",
