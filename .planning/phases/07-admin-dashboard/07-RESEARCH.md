@@ -487,22 +487,25 @@ import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Production DB connection role**
    - What we know: Local dev uses `postgresql://postgres:postgres@127.0.0.1:54322/postgres` (superuser, bypasses RLS)
    - What's unclear: Prod Supabase connection string — does it use the `service_role` key (bypasses RLS) or `anon` key (enforces RLS)?
    - Recommendation: Check `config.py` `database_url` in `.env.production`. If using anon/authenticated role, admin queries need `SET LOCAL role TO service_role` or a separate pool initialized with service-role credentials. For v1 with a single operator, this is unlikely to be an issue, but verify before deploying.
+   - **RESOLVED: Local dev verified (postgres superuser, bypasses RLS). Production assumed to use service-role Postgres URL — full verification deferred to Phase 11 deployment.**
 
 2. **auth.users column names**
    - What we know: Supabase exposes an `auth.users` table but the schema is internal
    - What's unclear: Exact column name for last login — likely `last_sign_in_at` but not confirmed
    - Recommendation: Run `SELECT column_name FROM information_schema.columns WHERE table_schema = 'auth' AND table_name = 'users' ORDER BY ordinal_position` against local Supabase before writing the admin users query.
+   - **RESOLVED: Plan 05 Task 1 Step 3 includes a runtime verification step that queries `information_schema.columns` for `auth.users` columns matching `%sign_in%` and patches `backend/admin/router.py` if the column name differs. Assumed name `last_sign_in_at` will be confirmed or corrected at migration-apply time.**
 
 3. **is_admin in /user/settings response**
    - What we know: Frontend admin guard (D-04) needs to check `is_admin`; existing `/user/settings` endpoint does not return it
    - What's unclear: Whether to add `is_admin` to `/user/settings` response or create a separate `/user/me` endpoint
    - Recommendation: Add `is_admin` to the existing `GET /user/settings` response — one additional `SELECT` field, zero new endpoint complexity. The planner should include a task to update both the backend query and the TypeScript type.
+   - **RESOLVED: Plan 01 Task 2 updates `GET /user/settings` to include `is_admin` in both the SQL SELECT and the response dict. No new endpoint needed.**
 
 ---
 
