@@ -22,11 +22,11 @@ from pydantic import BaseModel
 from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
 from middleware.rate_limit import limiter
-from billing.stripe_client import check_payment_method, get_or_create_customer, record_gpu_usage
+from billing.stripe_client import check_payment_method, get_or_create_customer
 from config import settings
 from db.connection import get_db_pool
-from gpu.runpod import RunPodProvider
 from jobs.dispatch import launch_job
+from jobs.service import cancel_job_by_id, TOOL_IMAGES
 from storage.client import generate_presigned_get_url, generate_presigned_put_url, get_s3_client
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -60,12 +60,8 @@ async def _release_sse_slot(user_id: str) -> None:
 
 
 # Map tool name to RunPod image from settings (pod-based deployment).
-_TOOL_IMAGES: dict[str, str] = {
-    "rfdiffusion": settings.runpod_image_rfdiffusion,
-    "rfantibody": settings.runpod_image_rfantibody,
-    "bindcraft": settings.runpod_image_bindcraft,
-    "boltzgen": settings.runpod_image_boltzgen,
-}
+# Imported from jobs.service so admin/router.py can share the same dict.
+_TOOL_IMAGES = TOOL_IMAGES
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +391,9 @@ async def download_all_designs(request: Request, job_id: str, user_id: str = Dep
 async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
     """Cancel a running job.
 
-    Calls RunPod to stop the GPU job, calculates partial billing, updates the
-    DB, publishes an SSE event, and records the Stripe meter event.
+    Verifies ownership (user must own the job), then delegates to the shared
+    cancel_job_by_id service which handles RunPod cancellation, partial billing,
+    DB update, and SSE event publication.
 
     Args:
         job_id: Job UUID string.
@@ -406,62 +403,25 @@ async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
         Dict with status, gpu_seconds consumed, and gpu_cost_usd charged.
 
     Raises:
-        HTTPException 404: If no running job is found for this user.
+        HTTPException 404: If no running or queued job is found for this user.
     """
     pool = await get_db_pool()
+
+    # Ownership check — user can only cancel their own jobs.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT runpod_job_id, job_spec, started_at
-               FROM public.jobs
-               WHERE id = $1 AND user_id = $2 AND status = 'running'""",
+            """SELECT id FROM public.jobs
+               WHERE id = $1 AND user_id = $2 AND status IN ('running', 'queued')""",
             job_id,
             user_id,
         )
     if not row:
         raise HTTPException(status_code=404, detail="No running job found")
 
-    # Cancel on the GPU provider.
-    if row["runpod_job_id"]:
-        provider = RunPodProvider(api_key=settings.runpod_api_key)
-        spec = json.loads(row["job_spec"] or "{}")
-        tool = spec.get("tool", "")
-        endpoint_id = _TOOL_IMAGES.get(tool, "")
-        await provider.cancel_job(endpoint_id, row["runpod_job_id"])
+    # Delegate business logic (RunPod cancel + billing + DB + SSE) to shared service.
+    result = await cancel_job_by_id(job_id, pool)
 
-    # Calculate partial GPU seconds from started_at.
-    gpu_seconds = 0
-    if row["started_at"]:
-        elapsed = datetime.datetime.now(datetime.timezone.utc) - row["started_at"]
-        gpu_seconds = int(elapsed.total_seconds())
-
-    gpu_cost_usd = round(
-        gpu_seconds * settings.gpu_price_per_second * (1 + settings.gpu_markup_percent / 100),
-        4,
-    )
-
-    # Update DB status.
-    from worker.tasks import publish_status, update_job_status
-    await update_job_status(job_id, "cancelled", stage="Cancelled", gpu_seconds=gpu_seconds)
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2",
-            gpu_cost_usd,
-            job_id,
-        )
-
-    # Publish SSE terminal event.
-    await publish_status(job_id, "cancelled", "Cancelled")
-
-    # Record partial billing.
-    if gpu_seconds > 0:
-        async with pool.acquire() as conn:
-            cust_row = await conn.fetchrow(
-                "SELECT stripe_customer_id FROM public.users WHERE id = $1", user_id
-            )
-        if cust_row and cust_row["stripe_customer_id"]:
-            record_gpu_usage(cust_row["stripe_customer_id"], job_id, gpu_seconds)
-
-    return {"status": "cancelled", "gpu_seconds": gpu_seconds, "gpu_cost_usd": gpu_cost_usd}
+    return {"status": result["status"], "gpu_seconds": result["gpu_seconds"], "gpu_cost_usd": result["gpu_cost_usd"]}
 
 
 # ---------------------------------------------------------------------------

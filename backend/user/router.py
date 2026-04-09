@@ -127,7 +127,7 @@ async def get_settings(user_id: str = Depends(get_current_user)):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT email, display_name, notification_preferences
+            """SELECT email, display_name, notification_preferences, is_admin
                FROM public.users
                WHERE id = $1""",
             user_id,
@@ -154,6 +154,7 @@ async def get_settings(user_id: str = Depends(get_current_user)):
         "email": row["email"],
         "display_name": row["display_name"] or "",
         "notification_preferences": notification_preferences,
+        "is_admin": bool(row["is_admin"]),
     }
 
 

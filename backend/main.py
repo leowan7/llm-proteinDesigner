@@ -103,6 +103,9 @@ app.include_router(sessions_router)
 from user.router import router as user_router
 app.include_router(user_router)
 
+from admin.router import router as admin_router
+app.include_router(admin_router)
+
 
 @app.get("/health")
 async def health():
