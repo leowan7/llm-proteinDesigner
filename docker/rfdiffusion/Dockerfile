@@ -51,10 +51,13 @@ RUN git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /opt/Protein
     find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
 # ---------- ColabFold + AF2 weights ----------
-# Install ColabFold first, then overwrite JAX with CUDA-enabled 0.4.23.
-# Newer JAX removes jax.linear_util which breaks dm-haiku (used by AF2).
-RUN python3 -m pip install --no-cache-dir "colabfold[alphafold]==1.5.5" && \
-    python3 -m pip install --no-cache-dir "jax[cuda11_pip]==0.4.23" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
+# Pin nvidia-cudnn-cu11<9.0 so JAX 0.4.23 finds libcudnn.so.8 (not 9.0).
+# Without this, JAX falls back to CPU and AF2 takes ~3 min vs ~4 sec per design.
+RUN python3 -m pip install --no-cache-dir \
+    "nvidia-cudnn-cu11<9.0" \
+    "colabfold[alphafold]==1.5.5" \
+    "jax[cuda11_pip]==0.4.23" \
+    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
     python3 -c "from colabfold.download import download_alphafold_params; download_alphafold_params('alphafold2_multimer_v3')" && \
     find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
