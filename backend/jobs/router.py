@@ -59,12 +59,12 @@ async def _release_sse_slot(user_id: str) -> None:
     await r.aclose()
 
 
-# Map tool name to RunPod endpoint ID from settings.
-_ENDPOINT_IDS: dict[str, str] = {
-    "rfdiffusion": settings.runpod_endpoint_rfdiffusion,
-    "rfantibody": settings.runpod_endpoint_rfantibody,
-    "bindcraft": settings.runpod_endpoint_bindcraft,
-    "boltzgen": settings.runpod_endpoint_boltzgen,
+# Map tool name to RunPod image from settings (pod-based deployment).
+_TOOL_IMAGES: dict[str, str] = {
+    "rfdiffusion": settings.runpod_image_rfdiffusion,
+    "rfantibody": settings.runpod_image_rfantibody,
+    "bindcraft": settings.runpod_image_bindcraft,
+    "boltzgen": settings.runpod_image_boltzgen,
 }
 
 
@@ -425,7 +425,7 @@ async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
         provider = RunPodProvider(api_key=settings.runpod_api_key)
         spec = json.loads(row["job_spec"] or "{}")
         tool = spec.get("tool", "")
-        endpoint_id = _ENDPOINT_IDS.get(tool, "")
+        endpoint_id = _TOOL_IMAGES.get(tool, "")
         await provider.cancel_job(endpoint_id, row["runpod_job_id"])
 
     # Calculate partial GPU seconds from started_at.

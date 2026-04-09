@@ -1,0 +1,582 @@
+"""Standalone pipeline script for RunPod GPU Pods — BindCraft binder design.
+
+Reads job configuration from the JOB_PAYLOAD environment variable,
+runs the BindCraft binder design pipeline, uploads results via presigned URLs,
+POSTs results to the Kendrew webhook, then exits.
+
+Environment variables:
+    JOB_PAYLOAD     JSON string with job_spec, upload endpoint, and webhook config
+    WEBHOOK_URL     URL to POST results to (Kendrew backend)
+    JOB_ID          Kendrew job UUID (for webhook identification)
+    JOB_TOKEN       Job-specific auth token for requesting upload URLs on-demand
+    RUNPOD_POD_ID   RunPod pod ID (so backend can terminate after completion)
+
+Pipeline:
+  1. Download target PDB from presigned URL
+  2. Write BindCraft settings JSON to disk
+  3. Run BindCraft (generates, filters, and AF2-validates binders internally)
+  4. Parse output CSV for ranked candidates
+  5. Upload passing PDBs + metrics CSV via on-demand presigned URLs
+  6. POST results to webhook
+"""
+
+import csv
+import datetime
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from glob import glob
+from pathlib import Path
+
+import requests
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("bindcraft_pipeline")
+
+# ---------------------------------------------------------------------------
+# Paths inside the container (all weights baked into the Docker image)
+# ---------------------------------------------------------------------------
+BINDCRAFT_DIR = os.environ.get("BINDCRAFT_DIR", "/opt/BindCraft")
+BINDCRAFT_SCRIPT = f"{BINDCRAFT_DIR}/bindcraft.py"
+BINDCRAFT_FILTERS = f"{BINDCRAFT_DIR}/default_filters.json"
+BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/default_4stage_multimer.json"
+
+
+# ===========================================================================
+# Startup diagnostics
+# ===========================================================================
+
+def startup_check():
+    """Verify GPU, dependencies, and critical files at boot. Crash if GPU unavailable."""
+    checks = {}
+
+    # --- Torch + CUDA ---
+    try:
+        import torch
+        checks["torch"] = torch.__version__
+        checks["cuda_available"] = torch.cuda.is_available()
+        if torch.cuda.is_available():
+            checks["gpu"] = torch.cuda.get_device_name(0)
+        else:
+            logger.error("CUDA is not available — BindCraft requires a GPU")
+            sys.exit(1)
+    except Exception as exc:
+        logger.error("PyTorch import failed: %s", exc)
+        sys.exit(1)
+
+    # --- JAX ---
+    try:
+        import jax
+        checks["jax"] = jax.__version__
+        checks["jax_devices"] = [str(d) for d in jax.devices()]
+    except Exception as exc:
+        checks["jax_error"] = str(exc)
+
+    # --- Biopython ---
+    try:
+        from Bio.PDB import PDBParser
+        checks["biopython"] = "ok"
+    except Exception as exc:
+        checks["biopython_error"] = str(exc)
+
+    # --- BindCraft files ---
+    for label, path in [
+        ("bindcraft_script", BINDCRAFT_SCRIPT),
+        ("bindcraft_filters", BINDCRAFT_FILTERS),
+        ("bindcraft_advanced", BINDCRAFT_ADVANCED),
+        ("bindcraft_dir", BINDCRAFT_DIR),
+    ]:
+        checks[label] = os.path.exists(path)
+
+    logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
+
+    # --- Validate required env vars ---
+    missing = []
+    for var in ["JOB_PAYLOAD", "WEBHOOK_URL", "JOB_ID"]:
+        if not os.environ.get(var):
+            missing.append(var)
+    if missing:
+        logger.error("Missing required environment variables: %s", missing)
+        sys.exit(1)
+
+    return checks
+
+
+# ===========================================================================
+# Helper functions
+# ===========================================================================
+
+def send_heartbeat(
+    webhook_url: str,
+    job_id: str,
+    stage: str,
+    designs_completed: int = 0,
+    designs_total: int = 0,
+) -> None:
+    """Send a heartbeat to the Kendrew backend.
+
+    Derives the heartbeat URL from the main webhook URL by replacing
+    the /webhooks/runpod path with /webhooks/heartbeat.
+
+    Args:
+        webhook_url: The main RunPod webhook URL.
+        job_id: Kendrew job UUID.
+        stage: Current pipeline stage description.
+        designs_completed: Number of designs finished so far.
+        designs_total: Total designs requested.
+    """
+    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    body = {
+        "job_id": job_id,
+        "stage": stage,
+        "designs_completed": designs_completed,
+        "designs_total": designs_total,
+    }
+    try:
+        resp = requests.post(heartbeat_url, json=body, timeout=10)
+        logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
+    except Exception as exc:
+        logger.warning("Heartbeat failed: %s", exc)
+
+
+def download_input(url: str, dest_path: str) -> None:
+    """Download a file from a presigned GET URL."""
+    logger.info("Downloading input PDB -> %s", dest_path)
+    resp = requests.get(url, timeout=120)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to download input PDB: HTTP {resp.status_code}")
+    Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(dest_path).write_bytes(resp.content)
+    logger.info("Downloaded %d bytes", len(resp.content))
+
+
+def request_upload_urls(upload_endpoint: str, job_token: str, filenames: list[str]) -> dict[str, str]:
+    """Request fresh presigned PUT URLs from the Kendrew backend.
+
+    Args:
+        upload_endpoint: URL of the /jobs/{job_id}/upload-urls endpoint.
+        job_token: Job-specific Bearer token for authentication.
+        filenames: List of filenames to upload.
+
+    Returns:
+        Dict mapping filename to presigned PUT URL.
+    """
+    resp = requests.post(
+        upload_endpoint,
+        json={"filenames": filenames},
+        headers={"Authorization": f"Bearer {job_token}"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Failed to get upload URLs: HTTP {resp.status_code} {resp.text[:200]}")
+    return resp.json()["urls"]
+
+
+def upload_output(url: str, file_path: str) -> None:
+    """Upload a file to R2/S3 via a presigned PUT URL."""
+    data = Path(file_path).read_bytes()
+    content_type = "text/csv" if file_path.endswith(".csv") else "chemical/x-pdb"
+    resp = requests.put(
+        url, data=data, headers={"Content-Type": content_type}, timeout=120,
+    )
+    if resp.status_code not in (200, 201, 204):
+        raise RuntimeError(f"Upload failed for {file_path}: HTTP {resp.status_code}")
+    logger.info("Uploaded %s (%d bytes)", file_path, len(data))
+
+
+def run_command(cmd: list[str], timeout: int = 14400, cwd: str | None = None) -> str:
+    """Run a subprocess command with timeout and logging.
+
+    Always logs last 2000 chars of stdout/stderr, even on success.
+
+    Args:
+        cmd: Command and arguments list.
+        timeout: Max seconds to wait (default 4 hours for BindCraft).
+        cwd: Working directory for the subprocess.
+
+    Returns:
+        Combined stdout + stderr output.
+    """
+    logger.info("Running: %s", " ".join(cmd[:8]) + ("..." if len(cmd) > 8 else ""))
+    start = time.time()
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    elapsed = time.time() - start
+    combined_output = (result.stdout or "") + (result.stderr or "")
+
+    # Always log last 2000 chars, even on success
+    logger.info(
+        "Command finished in %.1fs (exit code %d). Output tail:\n%s",
+        elapsed, result.returncode, combined_output[-2000:],
+    )
+
+    if result.returncode != 0:
+        error_tail = combined_output[-2000:]
+        raise RuntimeError(f"Command failed (exit {result.returncode}): {error_tail}")
+    return combined_output
+
+
+def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> None:
+    """POST results to the Kendrew backend webhook.
+
+    Args:
+        webhook_url: Backend webhook endpoint URL.
+        job_id: Kendrew job UUID.
+        pod_id: RunPod pod ID (for backend to terminate).
+        payload: Results dict (candidates, counts, etc.).
+    """
+    body = {
+        "id": job_id,
+        "pod_id": pod_id,
+        "status": "COMPLETED" if "error" not in payload else "FAILED",
+        "output": payload,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    if "error" in payload:
+        body["error"] = {"category": "Pipeline error", "message": payload["error"]}
+
+    logger.info("Posting webhook to %s", webhook_url)
+    try:
+        resp = requests.post(webhook_url, json=body, timeout=30)
+        logger.info("Webhook response: %d", resp.status_code)
+    except Exception as exc:
+        logger.error("Webhook POST failed: %s", exc)
+
+
+# ===========================================================================
+# BindCraft config and output parsing
+# ===========================================================================
+
+def write_bindcraft_settings(job_spec: dict, target_pdb_path: str, output_dir: str) -> str:
+    """Write the BindCraft settings JSON file to disk.
+
+    Args:
+        job_spec: Deserialized JobSpec dict from the backend.
+        target_pdb_path: Path to the target PDB inside the container.
+        output_dir: Directory where BindCraft should write its outputs.
+
+    Returns:
+        Path to the written settings JSON file.
+    """
+    params = job_spec.get("parameters", {})
+    chain = job_spec.get("target_chain", "A")
+    hotspots = job_spec.get("hotspot_residues", [])
+
+    binder_length = params.get("binder_length", {"min": 50, "max": 100})
+    if isinstance(binder_length, dict):
+        min_len = binder_length.get("min", 50)
+        max_len = binder_length.get("max", 100)
+    else:
+        min_len, max_len = 50, 100
+
+    num_designs = params.get("num_designs", 10)
+    hotspot_str = ",".join(str(res) for res in hotspots) if hotspots else ""
+
+    settings = {
+        "starting_pdb": target_pdb_path,
+        "chains": chain,
+        "target_hotspot_residues": hotspot_str,
+        "lengths": [min_len, max_len],
+        "number_of_final_designs": num_designs,
+        "binder_name": "design",
+        "design_path": output_dir,
+    }
+
+    settings_path = os.path.join(output_dir, "target_settings.json")
+    os.makedirs(output_dir, exist_ok=True)
+    with open(settings_path, "w") as fh:
+        json.dump(settings, fh, indent=2)
+
+    logger.info("Wrote BindCraft settings to %s: %s", settings_path, json.dumps(settings))
+    return settings_path
+
+
+def parse_bindcraft_results(output_dir: str) -> list[dict]:
+    """Parse BindCraft output directory for ranked candidates and metrics.
+
+    BindCraft writes:
+      - {output_dir}/design/design_1.pdb, design_2.pdb, ... (ranked)
+      - {output_dir}/design/design_results.csv with per-design metrics
+
+    Args:
+        output_dir: The design_path passed to BindCraft settings.
+
+    Returns:
+        List of candidate dicts with rank, pdb_path, and scores.
+        May be empty if BindCraft filtered all candidates.
+    """
+    design_dir = os.path.join(output_dir, "design")
+    csv_path = os.path.join(design_dir, "design_results.csv")
+
+    # List everything BindCraft produced for debugging
+    if os.path.isdir(design_dir):
+        all_files = os.listdir(design_dir)
+        logger.info("BindCraft output files in %s: %s", design_dir, all_files)
+    else:
+        logger.warning("BindCraft design directory does not exist: %s", design_dir)
+        return []
+
+    # Collect PDB files (ranked by BindCraft's internal scoring)
+    pdb_files = sorted(glob(os.path.join(design_dir, "design_*.pdb")))
+    logger.info("Found %d candidate PDB files", len(pdb_files))
+
+    if not pdb_files:
+        logger.info("BindCraft returned zero passing candidates (expected behavior)")
+        return []
+
+    # Parse metrics CSV if available
+    metrics_by_name = {}
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path) as fh:
+                reader = csv.DictReader(fh)
+                for row in reader:
+                    # BindCraft CSV uses the design name (without .pdb) as key
+                    name = row.get("design_name", row.get("name", ""))
+                    if not name:
+                        # Try to extract from the first column
+                        first_val = list(row.values())[0] if row else ""
+                        name = first_val
+                    metrics_by_name[name] = row
+            logger.info("Parsed metrics for %d designs from CSV", len(metrics_by_name))
+        except Exception as exc:
+            logger.warning("Failed to parse results CSV: %s", exc)
+    else:
+        logger.warning("No design_results.csv found at %s", csv_path)
+
+    candidates = []
+    for rank_idx, pdb_path in enumerate(pdb_files):
+        pdb_name = Path(pdb_path).stem  # e.g. "design_1"
+        rank = rank_idx + 1
+
+        # Extract scores from CSV metrics
+        row = metrics_by_name.get(pdb_name, {})
+        scores = {}
+        for metric_key in ["ipTM", "iptm", "pLDDT", "plddt", "RMSD", "rmsd",
+                           "shape_complementarity", "SAP", "sap",
+                           "i_pAE", "ipae", "i_pae"]:
+            if metric_key in row:
+                try:
+                    scores[metric_key] = float(row[metric_key])
+                except (ValueError, TypeError):
+                    scores[metric_key] = row[metric_key]
+
+        # Normalize metric key casing for consistency
+        normalized_scores = {}
+        for key, val in scores.items():
+            if key.lower() == "iptm":
+                normalized_scores["ipTM"] = val
+            elif key.lower() == "plddt":
+                normalized_scores["pLDDT"] = val
+            elif key.lower() == "rmsd":
+                normalized_scores["RMSD"] = val
+            elif key.lower() in ("i_pae", "ipae"):
+                normalized_scores["i_pAE"] = val
+            else:
+                normalized_scores[key] = val
+
+        candidates.append({
+            "rank": rank,
+            "pdb_path": pdb_path,
+            "pdb_name": pdb_name,
+            "scores": normalized_scores,
+        })
+
+    logger.info("Parsed %d BindCraft candidates", len(candidates))
+    return candidates
+
+
+# ===========================================================================
+# Main pipeline
+# ===========================================================================
+
+def main():
+    """Run the full pipeline: diagnostics -> download -> BindCraft -> upload -> webhook."""
+    startup_check()
+
+    # Read configuration from environment
+    job_payload_str = os.environ.get("JOB_PAYLOAD")
+    webhook_url = os.environ.get("WEBHOOK_URL", "")
+    job_id = os.environ.get("JOB_ID", "unknown")
+    pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
+    job_token = os.environ.get("JOB_TOKEN", "")
+
+    job_payload = json.loads(job_payload_str)
+    job_spec = job_payload["job_spec"]
+    input_url = job_payload["input_presigned_url"]
+    upload_endpoint = job_payload.get("upload_urls_endpoint", "")
+
+    num_designs = job_spec.get("parameters", {}).get("num_designs", 10)
+    pipeline_start = time.time()
+
+    work_dir = tempfile.mkdtemp(prefix="bindcraft_job_")
+    target_pdb = os.path.join(work_dir, "target.pdb")
+    output_dir = os.path.join(work_dir, "outputs")
+
+    try:
+        # ----- Download input PDB -----
+        download_input(input_url, target_pdb)
+        send_heartbeat(webhook_url, job_id, "Input downloaded", 0, num_designs)
+
+        # ----- Write BindCraft settings -----
+        settings_path = write_bindcraft_settings(job_spec, target_pdb, output_dir)
+        send_heartbeat(webhook_url, job_id, "Running BindCraft", 0, num_designs)
+
+        # ----- Run BindCraft -----
+        # BindCraft handles the full pipeline internally:
+        #   1. Diffusion-based binder backbone generation
+        #   2. Sequence design
+        #   3. AF2 multimer validation (4-stage protocol)
+        #   4. Filtering and ranking
+        # Cannot be parallelized on single GPU — one trajectory at a time.
+        cmd = [
+            "python", BINDCRAFT_SCRIPT,
+            "--settings", settings_path,
+            "--filters", BINDCRAFT_FILTERS,
+            "--advanced", BINDCRAFT_ADVANCED,
+            "--no-pyrosetta",
+            "--no-plots",
+            "--no-animations",
+        ]
+
+        try:
+            run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
+        except RuntimeError as exc:
+            logger.error("BindCraft failed: %s", exc)
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": f"BindCraft failed: {exc}",
+            })
+            return
+
+        send_heartbeat(webhook_url, job_id, "BindCraft complete, parsing results", 0, num_designs)
+
+        # ----- Parse results -----
+        candidates = parse_bindcraft_results(output_dir)
+
+        logger.info(
+            "BindCraft produced %d passing candidates (requested %d)",
+            len(candidates), num_designs,
+        )
+
+        # ----- Upload outputs (on-demand URLs) -----
+        filenames_to_upload = []
+        for candidate in candidates:
+            filenames_to_upload.append(f"design_{candidate['rank']:03d}.pdb")
+        if candidates:
+            filenames_to_upload.append("metrics.csv")
+
+        # Also upload the BindCraft results CSV if it exists
+        bindcraft_csv = os.path.join(output_dir, "design", "design_results.csv")
+        if os.path.exists(bindcraft_csv) and candidates:
+            filenames_to_upload.append("bindcraft_results.csv")
+
+        upload_urls = {}
+        if upload_endpoint and job_token and filenames_to_upload:
+            try:
+                upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
+            except RuntimeError as exc:
+                logger.error("Failed to get upload URLs: %s", exc)
+
+        # Upload PDB files
+        webhook_candidates = []
+        for candidate in candidates:
+            rank = candidate["rank"]
+            pdb_path = candidate["pdb_path"]
+            upload_filename = f"design_{rank:03d}.pdb"
+
+            pdb_key = f"designs/{candidate['pdb_name']}.pdb"
+            webhook_candidate = {
+                "rank": rank,
+                "pdb_key": pdb_key,
+                "scores": candidate["scores"],
+            }
+            webhook_candidates.append(webhook_candidate)
+
+            if upload_filename in upload_urls and os.path.exists(pdb_path):
+                try:
+                    upload_output(upload_urls[upload_filename], pdb_path)
+                except RuntimeError as exc:
+                    logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
+
+        # Upload Kendrew-formatted metrics CSV
+        if webhook_candidates:
+            csv_path = os.path.join(work_dir, "metrics.csv")
+            _write_metrics_csv(csv_path, webhook_candidates)
+            if "metrics.csv" in upload_urls:
+                try:
+                    upload_output(upload_urls["metrics.csv"], csv_path)
+                except RuntimeError as exc:
+                    logger.warning("Failed to upload metrics CSV: %s", exc)
+
+        # Upload raw BindCraft results CSV
+        if "bindcraft_results.csv" in upload_urls and os.path.exists(bindcraft_csv):
+            try:
+                upload_output(upload_urls["bindcraft_results.csv"], bindcraft_csv)
+            except RuntimeError as exc:
+                logger.warning("Failed to upload BindCraft results CSV: %s", exc)
+
+        elapsed_minutes = (time.time() - pipeline_start) / 60.0
+        logger.info(
+            "Pipeline complete: %d candidates in %.1f minutes",
+            len(webhook_candidates), elapsed_minutes,
+        )
+
+        # ----- POST results to webhook -----
+        result_payload = {
+            "candidates": [
+                {"rank": c["rank"], "pdb_key": c["pdb_key"], "scores": c["scores"]}
+                for c in webhook_candidates
+            ],
+            "candidate_count": len(webhook_candidates),
+            "total_designs_requested": num_designs,
+            "runtime_minutes": round(elapsed_minutes, 1),
+            "next_steps": (
+                "Recommend experimental validation: SPR or BLI binding assay "
+                "for top candidates, followed by counter-screen for specificity. "
+                "Consider yeast display library construction for affinity maturation "
+                "of the best hits."
+            ),
+        }
+        post_webhook(webhook_url, job_id, pod_id, result_payload)
+
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
+    """Write a metrics CSV summarizing all passing candidates.
+
+    Args:
+        csv_path: Path to write the CSV file.
+        candidates: List of candidate dicts with rank, pdb_key, and scores.
+    """
+    # Collect all score keys across candidates for CSV header
+    all_score_keys = set()
+    for candidate in candidates:
+        all_score_keys.update(candidate.get("scores", {}).keys())
+    score_columns = sorted(all_score_keys)
+
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["rank", "design_name"] + score_columns)
+        for candidate in candidates:
+            design_name = Path(candidate["pdb_key"]).stem
+            scores = candidate.get("scores", {})
+            row = [candidate["rank"], design_name]
+            for col in score_columns:
+                row.append(scores.get(col, ""))
+            writer.writerow(row)
+
+    logger.info("Wrote metrics CSV with %d candidates to %s", len(candidates), csv_path)
+
+
+if __name__ == "__main__":
+    main()
