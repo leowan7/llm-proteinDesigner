@@ -17,7 +17,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 3: Job Execution, Frontend, and Billing** - Async job dispatch, SSE monitoring, results delivery, frontend, and Stripe billing
 - [ ] **Phase 4: Pipeline Validation** - End-to-end GPU validation of all 5 design tools with real targets
 - [ ] **Phase 5: Production Hardening** - Security, idempotency, billing reconciliation, monitoring, observability
-- [ ] **Phase 6: UI Improvements** - Sidebar navigation, session persistence, job history, user settings, onboarding, accessibility
+- [x] **Phase 6: UI Improvements** - Sidebar navigation, session persistence, job history, user settings, onboarding, accessibility (completed 2026-04-09)
 - [ ] **Phase 7: Admin Dashboard** - Admin auth, user management, job monitoring, revenue overview, system health, audit log
 - [ ] **Phase 8: Post-Run Analysis Agent** - Agent-assisted result analysis, candidate ranking, shortlisting, and report generation
 - [ ] **Phase 9: Testing & CI/CD** - Automated test suite (unit, integration, E2E), CI pipeline, pre-deploy gates
@@ -145,15 +145,21 @@ Plans:
 ### Phase 7: Admin Dashboard
 **Goal**: Platform operator has full visibility into users, jobs, revenue, and system health through a custom admin dashboard at /admin
 **Depends on**: Phase 3
-**Requirements**: (new — derived from ADMIN-DASHBOARD.md research)
+**Requirements**: SC-1, SC-2, SC-3, SC-4, SC-5, SC-6
 **Success Criteria** (what must be TRUE):
   1. Admin can view all users with signup date, last login, payment status, and job count
   2. Admin can view all jobs across all users with status, tool, GPU time, cost, and error details; can cancel stuck jobs
   3. Revenue overview shows total GPU revenue, cost-of-goods (GPU spend), and margin — sourced from jobs table (Stripe excludes metered billing from MRR)
   4. System health page shows GPU queue depth, worker status, API error rates, and storage usage
-  5. Admin auth uses Supabase custom claims (role in raw_app_meta_data); separate from user auth
+  5. Admin auth uses is_admin column on users table with get_current_admin dependency; separate from user auth
   6. All admin actions are recorded in an audit log table
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 07-01-PLAN.md — Admin backend: DB migration, auth dependency, admin router (all endpoints), audit logging, shared cancel service
+- [ ] 07-02-PLAN.md — Admin backend tests: dependency tests, router endpoint tests, cancel service tests
+- [ ] 07-03-PLAN.md — Admin frontend foundation: AdminLayout, API client, AdminUsersPage, AdminJobsPage
+- [ ] 07-04-PLAN.md — Admin frontend completion: AdminRevenuePage (Recharts), AdminSystemPage, AdminAuditPage
+- [ ] 07-05-PLAN.md — Schema push, admin bootstrap, and end-to-end human verification
 **Research**: .planning/research/ADMIN-DASHBOARD.md
 
 ### Phase 8: Post-Run Analysis Agent
@@ -270,7 +276,8 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 5. Production Hardening | Security, idempotency, billing | 5/5 | Done |  |
-| 6. UI Improvements | Sidebar, sessions, settings | 0/5 | Next | Phase 3 (done) |
+| 6. UI Improvements | Sidebar, sessions, settings | 5/5 | Done | Phase 3 (done) |
+| 7. Admin Dashboard | User/job/revenue monitoring | 0/5 | Next | Phase 3 (done) |
 | 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/TBD | Not started | Phase 5 |
 | 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 |
 | 11. Deployment | Vercel, Railway, Supabase Cloud | 0/TBD | Not started | Phases 9, 10 |
@@ -279,7 +286,6 @@ real GPU output and cannot be mocked.
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 7. Admin Dashboard | User/job/revenue monitoring | 0/TBD | Not started | Phase 11 (post-launch) |
 | 12. Teams & Organizations | Multi-user, org billing, RBAC | 0/TBD | Not started | Phase 11 |
 | 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | Phase 11 |
 
