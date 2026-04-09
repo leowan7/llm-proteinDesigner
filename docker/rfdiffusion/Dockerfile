@@ -15,12 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- PyTorch + DGL ----------
-# (PyTorch and DGL wheels are notorious for carrying UID 995210)
+# PyTorch 2.2.2+cu118 uses cuDNN 8, matching JAX 0.4.23 requirements.
+# Both frameworks share libcudnn.so.8 — no version conflict.
 RUN python3 -m pip install --no-cache-dir \
-    torch==2.4.1 torchvision==0.19.1 \
+    torch==2.2.2 torchvision==0.17.2 \
     --index-url https://download.pytorch.org/whl/cu118 && \
-    python3 -m pip install --no-cache-dir torchdata==0.9.0 && \
-    python3 -m pip install --no-cache-dir dgl -f https://data.dgl.ai/wheels/torch-2.4/cu118/repo.html && \
+    python3 -m pip install --no-cache-dir torchdata==0.7.1 && \
+    python3 -m pip install --no-cache-dir dgl -f https://data.dgl.ai/wheels/torch-2.2/cu118/repo.html && \
     find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
 # ---------- RFdiffusion + SE3Transformer ----------
