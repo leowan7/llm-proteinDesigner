@@ -51,15 +51,10 @@ RUN git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /opt/Protein
     find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
 # ---------- ColabFold + AF2 weights ----------
-# Pin jax/jaxlib BEFORE colabfold to avoid version conflicts.
-# ColabFold 1.5.5 needs jax<=0.4.23; newer jax removes jax.linear_util (breaks dm-haiku).
-# jaxlib must be CUDA-enabled so AF2 runs on GPU, not CPU.
-RUN python3 -m pip install --no-cache-dir \
-    "jax[cuda11_local]==0.4.23" \
-    "jaxlib==0.4.23+cuda11.cudnn86" \
-    -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
-    python3 -m pip install --no-cache-dir "colabfold[alphafold]==1.5.5" && \
-    python3 -m pip install --no-cache-dir "dm-haiku==0.0.12" && \
+# Install ColabFold first, then overwrite JAX with CUDA-enabled 0.4.23.
+# Newer JAX removes jax.linear_util which breaks dm-haiku (used by AF2).
+RUN python3 -m pip install --no-cache-dir "colabfold[alphafold]==1.5.5" && \
+    python3 -m pip install --no-cache-dir "jax[cuda11_pip]==0.4.23" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html && \
     python3 -c "from colabfold.download import download_alphafold_params; download_alphafold_params('alphafold2_multimer_v3')" && \
     find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
