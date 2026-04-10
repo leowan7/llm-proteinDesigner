@@ -28,7 +28,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { MessageList } from "./MessageList";
@@ -76,6 +76,7 @@ function clearSetupParam() {
 export function ChatPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { refreshSessions } = useLayoutContext();
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -85,10 +86,20 @@ export function ChatPage() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
 
-  // Input value injected by example prompt clicks in GreetingCard
+  // Input value injected by example prompt clicks in GreetingCard or via URL query param
   const [injectedInputValue, setInjectedInputValue] = useState("");
   // Ref forwarded to the ChatInput's textarea for programmatic focus
   const chatInputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Consume ?prompt= query parameter from navigation (e.g. Export Report button on JobPage)
+  useEffect(() => {
+    const promptParam = searchParams.get("prompt");
+    if (promptParam) {
+      setInjectedInputValue(promptParam);
+      // Clear the query param so it does not re-inject on re-render
+      setSearchParams({}, { replace: true });
+    }
+  }, []);
 
   // Job tracking state after launch
   const [activeJobId, setActiveJobId] = useState<string | null>(null);

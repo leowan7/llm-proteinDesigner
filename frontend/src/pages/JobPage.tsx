@@ -15,8 +15,9 @@
  */
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, useNavigate } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { JobStatusCard } from "@/components/jobs/JobStatusCard";
 import { RunSummaryCard } from "@/components/jobs/RunSummaryCard";
 import { CandidateCard } from "@/components/jobs/CandidateCard";
@@ -39,6 +40,7 @@ const TERMINAL_STATUSES = new Set(["complete", "failed", "cancelled"]);
 
 export function JobPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
 
   const [job, setJob] = useState<JobData | null>(null);
   const [jobList, setJobList] = useState<JobListItem[]>([]);
@@ -180,7 +182,20 @@ export function JobPage() {
       {/* 4. Design candidates section */}
       {isComplete && (
         <div className="space-y-4">
-          <h2 className="font-display text-xl font-semibold text-foreground">Design candidates</h2>
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-xl font-semibold text-foreground">Design candidates</h2>
+            {job.candidates.length > 0 && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const prompt = `Generate a full analysis report for job ${id} with shortlisted candidates, metric explanations, and next steps.`;
+                  navigate(`/chat?prompt=${encodeURIComponent(prompt)}`);
+                }}
+              >
+                Export Report
+              </Button>
+            )}
+          </div>
 
           {isBindCraftZero ? (
             <BindCraftZeroOutputCard agentGuidance={job.results?.next_steps} />
