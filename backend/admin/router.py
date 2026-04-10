@@ -16,6 +16,7 @@ Provides:
 import datetime
 import json
 import logging
+import uuid as uuid_mod
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -274,8 +275,17 @@ async def get_job_detail(
         Full job detail dict.
 
     Raises:
+        HTTPException 400: If job_id is not a valid UUID.
         HTTPException 404: If the job does not exist.
     """
+    try:
+        uuid_mod.UUID(job_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Invalid job_id — must be a valid UUID",
+        )
+
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -339,8 +349,17 @@ async def cancel_admin_job(
         Dict with status, gpu_seconds, gpu_cost_usd.
 
     Raises:
+        HTTPException 400: If job_id is not a valid UUID.
         HTTPException 404: If no running/queued job is found with the given ID.
     """
+    try:
+        uuid_mod.UUID(job_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Invalid job_id — must be a valid UUID",
+        )
+
     pool = await get_db_pool()
 
     result = await cancel_job_by_id(job_id, pool)
