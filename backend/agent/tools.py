@@ -134,6 +134,77 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "load_job_results",
+        "description": (
+            "Load completed job results (candidates, scores, metrics) for analysis. "
+            "Call this first when the user asks about job results. "
+            "Returns top candidates with distribution statistics. "
+            "For jobs with zero output, returns diagnostic information."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "UUID of the completed job to load results for.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "analyze_candidates",
+        "description": (
+            "Rank and filter job candidates by specific metrics. "
+            "Requires load_job_results to have been called first for this job. "
+            "Returns ranked candidates with threshold annotations (strong/passable/red_flag) "
+            "and percentile positions."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "UUID of the job (must have been loaded via load_job_results).",
+                },
+                "sort_by": {
+                    "type": "string",
+                    "description": "Metric name to rank candidates by (e.g. 'ipTM', 'dG', 'pLDDT').",
+                },
+                "filters": {
+                    "type": "object",
+                    "description": (
+                        "Optional filter criteria as metric:operator:value pairs. "
+                        "Example: {\"pLDDT\": {\">\":  0.85}, \"Relaxed_Clashes\": {\"<\": 1}}. "
+                        "Supported operators: >, <, >=, <=, between (value is [low, high])."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of ranked candidates to return. Default 10.",
+                },
+            },
+            "required": ["job_id", "sort_by"],
+        },
+    },
+    {
+        "name": "flag_red_flags",
+        "description": (
+            "Scan all candidates from a loaded job for known problematic metric combinations. "
+            "Call proactively after load_job_results to surface issues early."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "UUID of the job (must have been loaded via load_job_results).",
+                },
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
         "name": "validate_preflight",
         "description": (
             "Run pre-flight validation checks on the design inputs. "
@@ -191,6 +262,15 @@ async def dispatch_tool(tool_name: str, tool_input: dict, user_id: str = "") -> 
         return await _handle_extract_interface(tool_input)
     elif tool_name == "validate_preflight":
         return await _handle_validate_preflight(tool_input, user_id=user_id)
+    elif tool_name == "load_job_results":
+        from agent.analysis.tools import handle_load_job_results
+        return await handle_load_job_results(tool_input, user_id=user_id)
+    elif tool_name == "analyze_candidates":
+        from agent.analysis.tools import handle_analyze_candidates
+        return await handle_analyze_candidates(tool_input, user_id=user_id)
+    elif tool_name == "flag_red_flags":
+        from agent.analysis.tools import handle_flag_red_flags
+        return await handle_flag_red_flags(tool_input, user_id=user_id)
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
