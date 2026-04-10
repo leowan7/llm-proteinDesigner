@@ -1,0 +1,67 @@
+name: Post-Deploy Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment URL (e.g., https://kendrew.app)"
+        required: true
+        type: string
+
+jobs:
+  smoke:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Check 1: Health endpoint returns 200"
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ inputs.environment }}/health")
+          if [ "$STATUS" != "200" ]; then
+            echo "FAIL: Health endpoint returned $STATUS"
+            exit 1
+          fi
+          echo "PASS: Health endpoint returned 200"
+
+      - name: "Check 2: Health endpoint response time < 2s"
+        run: |
+          TIME=$(curl -s -o /dev/null -w "%{time_total}" "${{ inputs.environment }}/health")
+          echo "Response time: ${TIME}s"
+          if (( $(echo "$TIME > 2.0" | bc -l) )); then
+            echo "FAIL: Response time ${TIME}s exceeds 2s threshold"
+            exit 1
+          fi
+          echo "PASS: Response time within threshold"
+
+      - name: "Check 3: Auth flow works (login with test account)"
+        run: |
+          RESP=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ inputs.environment }}/auth/login" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@example.com","password":"Password123!"}')
+          STATUS=$(echo "$RESP" | tail -1)
+          if [ "$STATUS" != "200" ]; then
+            echo "FAIL: Login returned $STATUS"
+            exit 1
+          fi
+          echo "PASS: Auth login returned 200"
+
+      - name: "Check 4: Frontend loads (Playwright smoke test)"
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: cd frontend && npm ci && npx playwright install --with-deps chromium
+
+      - name: Run frontend smoke spec
+        run: cd frontend && npx playwright test e2e/smoke.spec.ts
+        env:
+          SMOKE_TARGET_URL: ${{ inputs.environment }}
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          echo "::error::Smoke test failed for ${{ inputs.environment }}. Manual rollback may be needed via Railway/Vercel deploy history."
+          echo "Check Sentry for error details."
