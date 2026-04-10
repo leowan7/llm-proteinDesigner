@@ -41,14 +41,15 @@ async def _check_sse_limit(user_id: str) -> None:
     Raises HTTPException 429 if limit exceeded.
     """
     r = aioredis.from_url(settings.redis_url)
-    key = f"sse_count:{user_id}"
-    count = await r.incr(key)
-    await r.expire(key, 300)  # Auto-expire after 5 min (safety net)
-    if count > MAX_SSE_PER_USER:
-        await r.decr(key)
+    try:
+        key = f"sse_count:{user_id}"
+        count = await r.incr(key)
+        await r.expire(key, 300)  # Auto-expire after 5 min (safety net)
+        if count > MAX_SSE_PER_USER:
+            await r.decr(key)
+            raise HTTPException(status_code=429, detail="Too many active connections")
+    finally:
         await r.aclose()
-        raise HTTPException(status_code=429, detail="Too many active connections")
-    await r.aclose()
 
 
 async def _release_sse_slot(user_id: str) -> None:
