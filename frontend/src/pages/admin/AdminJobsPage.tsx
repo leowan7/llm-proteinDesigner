@@ -103,6 +103,7 @@ export function AdminJobsPage() {
   // Cancel dialog state
   const [cancelDialogJobId, setCancelDialogJobId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
 
   // Debounce email input: 300ms delay before triggering fetch
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -214,13 +215,14 @@ export function AdminJobsPage() {
   const handleCancelConfirm = async () => {
     if (!cancelDialogJobId) return;
     setCancelling(true);
+    setCancelError(null);
     try {
       await cancelAdminJob(cancelDialogJobId);
       setCancelDialogJobId(null);
       // Refetch the current page to reflect the updated status
       void fetchJobs(currentCursor, statusFilter, toolFilter, debouncedEmail);
     } catch {
-      // Surface failure silently — operator can retry
+      setCancelError("Cancel failed. The job may have already completed. Refresh to check.");
     } finally {
       setCancelling(false);
     }
@@ -504,7 +506,10 @@ export function AdminJobsPage() {
       <Dialog
         open={cancelDialogJobId !== null}
         onOpenChange={(open) => {
-          if (!open && !cancelling) setCancelDialogJobId(null);
+          if (!open && !cancelling) {
+            setCancelDialogJobId(null);
+            setCancelError(null);
+          }
         }}
       >
         <DialogContent>
@@ -515,6 +520,9 @@ export function AdminJobsPage() {
               This cannot be undone.
             </DialogDescription>
           </DialogHeader>
+          {cancelError && (
+            <p className="text-destructive text-sm">{cancelError}</p>
+          )}
           <DialogFooter>
             <Button
               variant="secondary"
