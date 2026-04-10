@@ -72,6 +72,16 @@
 - **PLAT-V2-01**: REST API access for power users to submit jobs programmatically
 - **PLAT-V2-02**: Shared workspaces / team accounts
 
+### Testing & CI/CD
+
+- **TEST-01**: Backend unit test coverage >80% line coverage across all modules
+- **TEST-02**: Backend integration tests with real Supabase test instance
+- **TEST-03**: Frontend unit tests (Vitest) for API client, utility functions, and page component smoke tests
+- **TEST-04**: Frontend E2E tests (Playwright) covering auth, chat, jobs, and settings flows
+- **TEST-05**: CI pipeline (GitHub Actions) with 4 gates on every PR: backend tests, frontend tests, E2E, lint+typecheck
+- **TEST-06**: Docker image CI builds on merge to main via GitHub Actions
+- **TEST-07**: Post-deploy smoke test workflow verifying health, auth, frontend load, and response time
+
 ## Out of Scope
 
 | Feature | Reason |
@@ -115,10 +125,17 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BILL-02 | Phase 3 | Complete |
 | BILL-03 | Phase 3 | Complete |
 | BILL-04 | Phase 3 | Complete |
+| TEST-01 | Phase 9 | Planned |
+| TEST-02 | Phase 9 | Planned |
+| TEST-03 | Phase 9 | Planned |
+| TEST-04 | Phase 9 | Planned |
+| TEST-05 | Phase 9 | Planned |
+| TEST-06 | Phase 9 | Planned |
+| TEST-07 | Phase 9 | Planned |
 
 **Coverage:**
-- v1 requirements: 24 total
-- Mapped to phases: 24
+- v1 requirements: 24 total (+7 testing)
+- Mapped to phases: 31
 - Unmapped: 0 ✓
 
 ---

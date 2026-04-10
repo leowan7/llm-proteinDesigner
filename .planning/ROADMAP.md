@@ -185,14 +185,19 @@ Plans:
 ### Phase 9: Testing & CI/CD
 **Goal**: Automated test coverage and a CI pipeline that prevents regressions from reaching production.
 **Depends on**: Phase 5
-**Requirements**: (new)
+**Requirements**: TEST-01, TEST-02, TEST-03, TEST-04, TEST-05, TEST-06, TEST-07
 **Success Criteria** (what must be TRUE):
   1. Unit tests cover all backend modules (agent tools, billing, job dispatch, PDB utils, auth) with >80% line coverage
   2. Integration tests verify the full agent conversation flow (resolve -> classify -> collect -> validate -> launch) against a test database
   3. Frontend E2E tests (Playwright) cover: login, chat flow, structure card interaction, job launch, job status page
   4. CI pipeline (GitHub Actions) runs all tests on every PR; blocks merge on failure
   5. Pre-deploy smoke test hits production health endpoint after deploy and rolls back automatically on failure
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+- [ ] 09-01-PLAN.md — Backend test gap coverage (sessions, user, webhooks, middleware, worker) + pytest-cov
+- [ ] 09-02-PLAN.md — Frontend unit tests (Vitest config, API client, utils, page smoke tests)
+- [ ] 09-03-PLAN.md — Playwright E2E setup + 4 core flow specs (auth, chat, jobs, settings)
+- [ ] 09-04-PLAN.md — CI pipeline (test.yml with 4 gates) + post-deploy smoke test (smoke.yml)
 
 ### Phase 10: Legal & Compliance
 **Goal**: Platform meets legal requirements for commercial operation and biopharma procurement. Scientists at regulated companies can get internal approval to use the platform.
@@ -275,17 +280,13 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 4. Pipeline Validation | Docker images + real GPU runs | 2/7 | In Progress | Track A only |
-| 8. Post-Run Analysis | AI result analysis, candidate ranking | 0/4 | Planned | Phase 4 (needs real data) |
 
 **Track B — Ship the app (critical path to launch):**
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 5. Production Hardening | Security, idempotency, billing | 5/5 | Done |  |
-| 6. UI Improvements | Sidebar, sessions, settings | 5/5 | Done | Phase 3 (done) |
-| 7. Admin Dashboard | User/job/revenue monitoring | 0/5 | Next | Phase 3 (done) |
-| 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/TBD | Not started | Phase 5 |
-| 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 |
+| 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/4 | In Progress | Phase 5 (done) |
+| 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 (done) |
 | 11. Deployment | Vercel, Railway, Supabase Cloud | 0/TBD | Not started | Phases 9, 10 |
 
 **Post-launch:**
@@ -302,6 +303,10 @@ real GPU output and cannot be mocked.
 | 1. Foundation | Auth, DB, dev env | 4/4 | Done |
 | 2. Agent + Structure Input | Agent, PDB pipeline | 5/5 | 2026-03-19 |
 | 3. Jobs, Frontend, Billing | Job dispatch, UI, Stripe | 5/5 | Done (cost estimate deferred) |
+| 5. Production Hardening | Security, idempotency, billing | 5/5 | Done |
+| 6. UI Improvements | Sidebar, sessions, settings | 5/5 | Done |
+| 7. Admin Dashboard | User/job/revenue monitoring | 5/5 | Done |
+| 8. Post-Run Analysis Agent | AI result analysis, ranking, reports | 4/4 | 2026-04-10 |
 
 ---
 
