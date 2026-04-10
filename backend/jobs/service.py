@@ -11,6 +11,7 @@ Exports:
 
 import datetime
 import json
+import logging
 
 import asyncpg
 from fastapi import HTTPException
@@ -27,6 +28,8 @@ TOOL_IMAGES: dict[str, str] = {
     "bindcraft": settings.runpod_image_bindcraft,
     "boltzgen": settings.runpod_image_boltzgen,
 }
+
+_log = logging.getLogger(__name__)
 
 
 async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
@@ -92,9 +95,19 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # Update DB status and GPU cost.
     await update_job_status(job_id, "cancelled", stage="Cancelled", gpu_seconds=gpu_seconds)
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2",
+        update_result = await conn.execute(
+            "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2 AND status IN ('running', 'queued')",
             gpu_cost_usd,
+            job_id,
+        )
+    # update_result is "UPDATE N" — if N=0 the job transitioned to a terminal
+    # state (e.g. 'complete' via webhook) between our initial fetch and this
+    # write. Log a warning so operators can investigate if billing appears wrong.
+    rows_updated = int(update_result.split()[-1])
+    if rows_updated == 0:
+        _log.warning(
+            "cancel_job_by_id: gpu_cost_usd not written for job %s — "
+            "status transitioned before UPDATE (TOCTOU); verify billing.",
             job_id,
         )
 
