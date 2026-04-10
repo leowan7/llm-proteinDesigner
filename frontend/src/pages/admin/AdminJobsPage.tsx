@@ -250,8 +250,8 @@ export function AdminJobsPage() {
           </>
         ) : (
           <>
-            <AdminStatCard label="Running Jobs" value={String(runningCount)} />
-            <AdminStatCard label="Queued Jobs" value={String(queuedCount)} />
+            <AdminStatCard label="Running Jobs" value={String(runningCount)} subLabel="this page" />
+            <AdminStatCard label="Queued Jobs" value={String(queuedCount)} subLabel="this page" />
             <AdminStatCard label="Failed (24h)" value={String(failed24h)} subLabel="this page" />
             <AdminStatCard label="Total Jobs" value={String(totalOnPage)} subLabel="this page" />
           </>
