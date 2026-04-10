@@ -165,7 +165,7 @@ Plans:
 ### Phase 8: Post-Run Analysis Agent
 **Goal**: After a design job completes, the agent assists the scientist in analyzing results — ranking candidates, explaining metrics, identifying the best designs to order for experimental validation, and suggesting next steps.
 **Depends on**: Phase 4 (needs real output data to analyze)
-**Requirements**: (new)
+**Requirements**: ANA-01, ANA-02, ANA-03, ANA-04, ANA-05, ANA-06, ANA-07, ANA-08, ANA-09, ANA-10, ANA-11, ANA-12
 **Success Criteria** (what must be TRUE):
   1. Agent can load completed job results (candidate PDBs, scoring metrics CSV) into conversation context and answer questions about them.
   2. Agent can rank candidates by user-specified criteria (e.g., "show me the top 10 by ipTM", "which designs have the best shape complementarity?", "filter for pLDDT > 85 and SAP < 4").
@@ -174,7 +174,13 @@ Plans:
   5. Agent provides actionable next-step guidance: recommended expression system, purification strategy, binding assay (SPR vs BLI), counter-screen suggestions, and whether a yeast display library is warranted.
   6. Agent can identify red flags: designs that look good on ipTM but have high clash scores, low shape complementarity, or sequence similarity to known allergens/immunogens.
   7. Agent can generate a summary report (downloadable) with the shortlisted candidates, their metrics, and the rationale for selection.
-**Plans**: TBD
+**Plans**: 4 plans
+Plans:
+- [ ] 08-01-PLAN.md — Analysis tools (load_job_results, analyze_candidates, flag_red_flags), ranking engine, metric/guidance profiles, system prompt
+- [ ] 08-02-PLAN.md — BioPython PDB structural features (BSA, clash score, interface contacts)
+- [ ] 08-03-PLAN.md — Report generation (PDF/CSV/Markdown), refolding job submission tool
+- [ ] 08-04-PLAN.md — Router wiring, Export Report button, end-to-end verification
+**Research**: .planning/phases/08-post-run-analysis-agent/08-RESEARCH.md
 
 ### Phase 9: Testing & CI/CD
 **Goal**: Automated test coverage and a CI pipeline that prevents regressions from reaching production.
@@ -269,7 +275,7 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 4. Pipeline Validation | Docker images + real GPU runs | 2/7 | In Progress | Track A only |
-| 8. Post-Run Analysis | AI result analysis, candidate ranking | 0/TBD | Blocked | Phase 4 (needs real data) |
+| 8. Post-Run Analysis | AI result analysis, candidate ranking | 0/4 | Planned | Phase 4 (needs real data) |
 
 **Track B — Ship the app (critical path to launch):**
 
