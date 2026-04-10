@@ -176,10 +176,10 @@ Plans:
   7. Agent can generate a summary report (downloadable) with the shortlisted candidates, their metrics, and the rationale for selection.
 **Plans**: 4 plans
 Plans:
-- [ ] 08-01-PLAN.md — Analysis tools (load_job_results, analyze_candidates, flag_red_flags), ranking engine, metric/guidance profiles, system prompt
-- [ ] 08-02-PLAN.md — BioPython PDB structural features (BSA, clash score, interface contacts)
-- [ ] 08-03-PLAN.md — Report generation (PDF/CSV/Markdown), refolding job submission tool
-- [ ] 08-04-PLAN.md — Router wiring, Export Report button, end-to-end verification
+- [x] 08-01-PLAN.md — Analysis tools (load_job_results, analyze_candidates, flag_red_flags), ranking engine, metric/guidance profiles, system prompt
+- [x] 08-02-PLAN.md — BioPython PDB structural features (BSA, clash score, interface contacts)
+- [x] 08-03-PLAN.md — Report generation (PDF/CSV/Markdown), refolding job submission tool
+- [x] 08-04-PLAN.md — Router wiring, Export Report button, end-to-end verification
 **Research**: .planning/phases/08-post-run-analysis-agent/08-RESEARCH.md
 
 ### Phase 9: Testing & CI/CD
