@@ -336,9 +336,10 @@ async def handle_analyze_candidates(tool_input: dict, user_id: str) -> str:
             "message": "No candidates match the specified filters.",
         })
 
-    # Rank by specified metric
+    # Rank by specified metric (respect lower_is_better for dG, clashes, etc.)
+    ascending = METRIC_THRESHOLDS.get(sort_by, {}).get("lower_is_better", False)
     try:
-        ranked = rank_candidates(candidates, sort_by=sort_by)
+        ranked = rank_candidates(candidates, sort_by=sort_by, ascending=ascending)
     except KeyError as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 
