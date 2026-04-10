@@ -205,6 +205,62 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "generate_report",
+        "description": (
+            "Generate a downloadable analysis report (PDF, CSV, Markdown) for a completed job. "
+            "Includes shortlisted candidates with metric tables, red flags, metric interpretation, "
+            "experimental next steps, and PDB download links. "
+            "Call after analyzing candidates."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "UUID of the completed job to generate a report for.",
+                },
+                "shortlist_ranks": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": (
+                        "Specific candidate ranks to include in the shortlist. "
+                        "If omitted, uses top 10 by rank."
+                    ),
+                },
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
+        "name": "submit_refolding_job",
+        "description": (
+            "Create refolding validation jobs for selected candidates. "
+            "Submits AF2-multimer or Boltz2 refolding to validate designed structures independently. "
+            "Creates draft jobs that the user can launch. "
+            "Always recommend a shortlist and ask for user confirmation before calling this tool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "parent_job_id": {
+                    "type": "string",
+                    "description": "UUID of the completed design job whose candidates to refold.",
+                },
+                "candidate_ranks": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Ranks of the candidates to create refolding jobs for.",
+                },
+                "refolding_tool": {
+                    "type": "string",
+                    "enum": ["boltzgen", "alphafold2_multimer"],
+                    "description": "Refolding tool to use. Default: 'boltzgen'.",
+                },
+            },
+            "required": ["parent_job_id", "candidate_ranks"],
+        },
+    },
+    {
         "name": "validate_preflight",
         "description": (
             "Run pre-flight validation checks on the design inputs. "
@@ -271,6 +327,12 @@ async def dispatch_tool(tool_name: str, tool_input: dict, user_id: str = "") -> 
     elif tool_name == "flag_red_flags":
         from agent.analysis.tools import handle_flag_red_flags
         return await handle_flag_red_flags(tool_input, user_id=user_id)
+    elif tool_name == "generate_report":
+        from agent.analysis.report import handle_generate_report
+        return await handle_generate_report(tool_input, user_id=user_id)
+    elif tool_name == "submit_refolding_job":
+        from agent.analysis.refolding import handle_submit_refolding_job
+        return await handle_submit_refolding_job(tool_input, user_id=user_id)
     else:
         return json.dumps({"error": f"Unknown tool: {tool_name}"})
 
