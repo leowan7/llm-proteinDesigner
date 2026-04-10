@@ -289,7 +289,11 @@ async def get_job_detail(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT j.*, u.email AS user_email
+            """SELECT j.id, j.user_id, j.tool, j.status, j.stage, j.name,
+                      j.created_at, j.completed_at, j.started_at,
+                      j.gpu_seconds, j.gpu_cost_usd, j.error_category,
+                      j.results, j.job_spec, j.session_id,
+                      u.email AS user_email
                FROM public.jobs j
                JOIN public.users u ON u.id = j.user_id
                WHERE j.id = $1""",
