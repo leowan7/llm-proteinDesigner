@@ -138,7 +138,7 @@ async def agent_message(
                             yield f"data: {json.dumps({'type': 'status', 'text': status_text})}\n\n"
 
                             # Execute the tool server-side
-                            result_json = await dispatch_tool(block.name, block.input)
+                            result_json = await dispatch_tool(block.name, block.input, user_id=user_id)
                             result_data = json.loads(result_json)
 
                             # Accumulate card data for persisting with assistant message
@@ -251,5 +251,11 @@ def _tool_status_text(tool_name: str) -> str:
         "classify_intent": "Analyzing your design goal...",
         "collect_parameters": "Preparing parameters...",
         "validate_preflight": "Running pre-flight checks...",
+        "extract_interface": "Extracting interface residues...",
+        "load_job_results": "Loading job results...",
+        "analyze_candidates": "Analyzing candidates...",
+        "flag_red_flags": "Checking for red flags...",
+        "generate_report": "Generating report...",
+        "submit_refolding_job": "Setting up refolding job...",
     }
     return status_map.get(tool_name, "Processing...")
