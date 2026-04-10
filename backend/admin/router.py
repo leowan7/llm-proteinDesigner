@@ -588,7 +588,7 @@ async def get_audit_log(
             "admin_email": r["admin_email"],
             "action": r["action"],
             "target_id": r["target_id"],
-            "metadata": dict(r["metadata"]) if r["metadata"] else {},
+            "metadata": r["metadata"] if r["metadata"] else {},
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         }
         for r in rows
