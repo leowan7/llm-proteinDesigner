@@ -3,10 +3,10 @@ phase: 07-admin-dashboard
 fixed_at: 2026-04-10T01:36:34Z
 review_path: .planning/phases/07-admin-dashboard/07-REVIEW.md
 iteration: 1
-findings_in_scope: 6
-fixed: 6
-skipped: 0
-status: all_fixed
+findings_in_scope: 10
+fixed: 9
+skipped: 1
+status: partial
 ---
 
 # Phase 07: Code Review Fix Report
@@ -16,9 +16,9 @@ status: all_fixed
 **Iteration:** 1
 
 **Summary:**
-- Findings in scope: 6 (CR-01, WR-01 through WR-05)
-- Fixed: 6
-- Skipped: 0
+- Findings in scope: 10 (CR-01, WR-01 through WR-05, IN-01 through IN-04)
+- Fixed: 9
+- Skipped: 1 (IN-03 — already configured)
 
 ## Fixed Issues
 
@@ -67,6 +67,38 @@ status: all_fixed
 **Files modified:** `frontend/src/pages/admin/AdminJobsPage.tsx`
 **Commit:** 88d781c
 **Applied fix:** Added `cancelError` state (`useState<string | null>(null)`). Updated `handleCancelConfirm` to call `setCancelError(null)` on entry and set a descriptive error message in the `catch` block. Added `{cancelError && <p className="text-destructive text-sm">{cancelError}</p>}` inside `DialogContent` between the header and footer. Also updated `onOpenChange` to clear `cancelError` when the dialog is dismissed so stale errors do not persist on re-open.
+
+### IN-01: `get_job_detail` uses `j.*` SELECT returning all columns including sensitive ones
+
+**Files modified:** `backend/admin/router.py`
+**Commit:** 542778b
+**Applied fix:** Replaced `SELECT j.*, u.email AS user_email` with an explicit column list (`j.id, j.user_id, j.tool, j.status, j.stage, j.name, j.created_at, j.completed_at, j.started_at, j.gpu_seconds, j.gpu_cost_usd, j.error_category, j.results, j.job_spec, j.session_id, u.email AS user_email`), omitting `job_token` and `runpod_job_id`. The return dict already only used these columns; this makes the safety boundary explicit in the query rather than relying on the return dict to filter.
+
+---
+
+### IN-02: `relativeDate` helper duplicated in AdminUsersPage and AdminJobsPage
+
+**Files modified:** `frontend/src/lib/format.ts` (created), `frontend/src/pages/admin/AdminUsersPage.tsx`, `frontend/src/pages/admin/AdminJobsPage.tsx`
+**Commit:** 13b176f
+**Applied fix:** Created `frontend/src/lib/format.ts` with an exported `relativeDate` function (identical logic, now with JSDoc). Removed the local `relativeDate` function from both pages and replaced with `import { relativeDate } from "@/lib/format"`.
+
+---
+
+### IN-04: `audit_log` table has no explicit role grants/revokes
+
+**Files modified:** `supabase/migrations/20260409000001_admin.sql`
+**Commit:** 0d64744
+**Applied fix:** Added `REVOKE ALL ON public.audit_log FROM anon, authenticated;` and `GRANT SELECT, INSERT ON public.audit_log TO service_role;` after the index definitions. Added a comment clarifying the intent: PostgREST roles (`anon`, `authenticated`) are explicitly denied; only the backend service role has access.
+
+---
+
+## Skipped Issues
+
+### IN-03: Tests lack `@pytest.mark.asyncio` decorator
+
+**File:** `backend/tests/admin/test_dependencies.py`, `test_router.py`, `test_service.py`
+**Reason:** Already configured — `backend/pytest.ini` contains `asyncio_mode = auto`, which causes pytest-asyncio to automatically handle all `async def` test functions without requiring per-test decorators. No code change needed.
+**Original issue:** Tests are `async def` but lack `@pytest.mark.asyncio` decorator; without auto mode configured they would be silently skipped.
 
 ---
 
