@@ -15,6 +15,7 @@ Provides:
 
 import datetime
 import json
+import logging
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
@@ -24,6 +25,8 @@ from admin.dependencies import get_current_admin
 from config import settings
 from db.connection import get_db_pool
 from jobs.service import cancel_job_by_id
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -350,9 +353,10 @@ async def cancel_admin_job(
             job_id,
             {"gpu_seconds": result["gpu_seconds"], "gpu_cost_usd": result["gpu_cost_usd"]},
         )
-    except Exception:
-        # Audit failure must not hide the cancel result from the admin.
-        pass
+    except Exception as exc:
+        # Do not re-raise — cancel succeeded; audit is best-effort here.
+        # But always log so the operator sees this in Sentry/structured logs.
+        _log.error("audit write failed after cancel_job %s: %s", job_id, exc)
 
     return result
 
