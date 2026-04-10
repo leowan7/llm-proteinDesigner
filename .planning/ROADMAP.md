@@ -155,11 +155,11 @@ Plans:
   6. All admin actions are recorded in an audit log table
 **Plans**: 5 plans
 Plans:
-- [ ] 07-01-PLAN.md — Admin backend: DB migration, auth dependency, admin router (all endpoints), audit logging, shared cancel service
-- [ ] 07-02-PLAN.md — Admin backend tests: dependency tests, router endpoint tests, cancel service tests
-- [ ] 07-03-PLAN.md — Admin frontend foundation: AdminLayout, API client, AdminUsersPage, AdminJobsPage
-- [ ] 07-04-PLAN.md — Admin frontend completion: AdminRevenuePage (Recharts), AdminSystemPage, AdminAuditPage
-- [ ] 07-05-PLAN.md — Schema push, admin bootstrap, and end-to-end human verification
+- [x] 07-01-PLAN.md — Admin backend: DB migration, auth dependency, admin router (all endpoints), audit logging, shared cancel service
+- [x] 07-02-PLAN.md — Admin backend tests: dependency tests, router endpoint tests, cancel service tests
+- [x] 07-03-PLAN.md — Admin frontend foundation: AdminLayout, API client, AdminUsersPage, AdminJobsPage
+- [x] 07-04-PLAN.md — Admin frontend completion: AdminRevenuePage (Recharts), AdminSystemPage, AdminAuditPage
+- [x] 07-05-PLAN.md — Schema push, admin bootstrap, and end-to-end human verification
 **Research**: .planning/research/ADMIN-DASHBOARD.md
 
 ### Phase 8: Post-Run Analysis Agent
@@ -296,3 +296,13 @@ real GPU output and cannot be mocked.
 | 1. Foundation | Auth, DB, dev env | 4/4 | Done |
 | 2. Agent + Structure Input | Agent, PDB pipeline | 5/5 | 2026-03-19 |
 | 3. Jobs, Frontend, Billing | Job dispatch, UI, Stripe | 5/5 | Done (cost estimate deferred) |
+
+---
+
+## Backlog
+
+Items deferred from completed phases. Promote to a future phase when prioritized.
+
+| ID | Origin | Description | Priority |
+|----|--------|-------------|----------|
+| 999.1 | Phase 7 (SC-4) | API error rate tracking in admin System page — roadmap mentions "API error rates" but discuss-phase scoped to liveness checks only. Add error rate metrics (5xx count, p99 latency) to /admin/system endpoint and SystemPage. | Low |
