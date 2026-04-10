@@ -1,0 +1,9 @@
+[run]
+# Exclude integration test files from coverage — they require a live Supabase
+# instance and are skipped in unit test runs, so their lines are never executed.
+omit =
+    tests/integration/*
+
+[report]
+# Skip files with no executable statements.
+skip_empty = true
