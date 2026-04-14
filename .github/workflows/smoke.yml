@@ -39,15 +39,18 @@ jobs:
           RESP=$(curl -s -w "\n%{http_code}" -X POST \
             "${{ inputs.environment }}/auth/login" \
             -H "Content-Type: application/json" \
-            -d '{"email":"test@example.com","password":"Password123!"}')
+            -d "{\"email\":\"$SMOKE_TEST_EMAIL\",\"password\":\"$SMOKE_TEST_PASSWORD\"}")
           STATUS=$(echo "$RESP" | tail -1)
           if [ "$STATUS" != "200" ]; then
             echo "FAIL: Login returned $STATUS"
             exit 1
           fi
           echo "PASS: Auth login returned 200"
+        env:
+          SMOKE_TEST_EMAIL: ${{ secrets.SMOKE_TEST_EMAIL }}
+          SMOKE_TEST_PASSWORD: ${{ secrets.SMOKE_TEST_PASSWORD }}
 
-      - name: "Check 4: Frontend loads (Playwright smoke test)"
+      - name: Setup Node.js for Playwright
         uses: actions/setup-node@v4
         with:
           node-version: "20"

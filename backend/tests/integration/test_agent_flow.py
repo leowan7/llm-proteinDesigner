@@ -110,8 +110,9 @@ async def _delete_session(client: AsyncClient, session_id: str) -> None:
     """
     try:
         await client.delete(f"/sessions/{session_id}")
-    except Exception:
-        pass
+    except Exception as exc:
+        import warnings
+        warnings.warn(f"Session cleanup failed for {session_id}: {exc}")
 
 
 def _make_mock_anthropic_end_turn(text: str = "I can help you design a binder."):
@@ -167,7 +168,6 @@ def _make_mock_anthropic_tool_then_end(tool_name: str = "resolve_structure"):
     text_block = MagicMock()
     text_block.type = "text"
     text_block.text = "I found the structure. Let me help you design a binder."
-    text_block.hasattr = lambda attr: attr == "text"
 
     end_response = MagicMock()
     end_response.stop_reason = "end_turn"

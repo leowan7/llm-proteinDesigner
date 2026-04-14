@@ -41,7 +41,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests with coverage
-        run: python -m pytest tests/ --cov=. --cov-fail-under=80 --cov-report=xml --cov-report=term-missing
+        run: python -m pytest tests/ --ignore=tests/integration --cov=. --cov-fail-under=80 --cov-report=xml --cov-report=term-missing
         env:
           TESTING: "true"
           SUPABASE_URL: http://127.0.0.1:54321
@@ -127,7 +127,14 @@ jobs:
       - name: Start backend
         run: |
           cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
-          sleep 3
+          echo "Waiting for backend..."
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
+              echo "Backend ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
         env:
           TESTING: "true"
           SUPABASE_URL: http://127.0.0.1:54321

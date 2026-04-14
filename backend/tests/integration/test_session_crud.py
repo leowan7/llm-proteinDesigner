@@ -110,8 +110,10 @@ async def _delete_session(client: AsyncClient, session_id: str) -> None:
     """
     try:
         await client.delete(f"/sessions/{session_id}")
-    except Exception:
-        pass  # Cleanup failure should not fail the test
+    except Exception as exc:
+        # Cleanup failure should not fail the test, but log for visibility
+        import warnings
+        warnings.warn(f"Session cleanup failed for {session_id}: {exc}")
 
 
 # ---------------------------------------------------------------------------

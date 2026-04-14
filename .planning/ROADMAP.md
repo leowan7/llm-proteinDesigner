@@ -194,10 +194,10 @@ Plans:
   5. Pre-deploy smoke test hits production health endpoint after deploy and rolls back automatically on failure
 **Plans**: 4 plans
 Plans:
-- [ ] 09-01-PLAN.md — Backend test gap coverage (sessions, user, webhooks, middleware, worker) + pytest-cov
-- [ ] 09-02-PLAN.md — Frontend unit tests (Vitest config, API client, utils, page smoke tests)
-- [ ] 09-03-PLAN.md — Playwright E2E setup + 4 core flow specs (auth, chat, jobs, settings)
-- [ ] 09-04-PLAN.md — CI pipeline (test.yml with 4 gates) + post-deploy smoke test (smoke.yml)
+- [x] 09-01-PLAN.md — Backend test gap coverage (sessions, user, webhooks, middleware, worker) + pytest-cov
+- [x] 09-02-PLAN.md — Frontend unit tests (Vitest config, API client, utils, page smoke tests)
+- [x] 09-03-PLAN.md — Playwright E2E setup + 4 core flow specs (auth, chat, jobs, settings)
+- [x] 09-04-PLAN.md — CI pipeline (test.yml with 4 gates) + post-deploy smoke test (smoke.yml)
 
 ### Phase 10: Legal & Compliance
 **Goal**: Platform meets legal requirements for commercial operation and biopharma procurement. Scientists at regulated companies can get internal approval to use the platform.

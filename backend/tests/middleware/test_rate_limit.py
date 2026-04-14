@@ -87,10 +87,11 @@ def test_rate_limit_key_invalid_jwt():
 
 
 def test_rate_limit_key_jwt_missing_sub():
-    """A valid JWT without a 'sub' claim falls back to client IP.
+    """A valid JWT without a 'sub' claim uses client IP under the 'user:' prefix.
 
-    The get_rate_limit_key function uses payload.get('sub', request.client.host)
-    so a JWT with no sub clause should return the client host.
+    The get_rate_limit_key function uses f"user:{payload.get('sub', request.client.host)}"
+    so a JWT with no sub clause still takes the authenticated path but falls back
+    to client host as the identifier.
     """
     # Encode a token with no 'sub' field
     token = jwt.encode({"role": "anon"}, "test-secret", algorithm="HS256")
@@ -101,5 +102,5 @@ def test_rate_limit_key_jwt_missing_sub():
 
     key = get_rate_limit_key(request)
 
-    # Without sub, it uses request.client.host as the fallback
-    assert key == f"user:172.16.0.1"
+    # Valid JWT but no sub — stays on user: prefix with host as fallback identifier
+    assert key == "user:172.16.0.1"

@@ -3,7 +3,12 @@ phase: 09-testing-ci-cd
 verified: 2026-04-10T22:30:00Z
 status: gaps_found
 score: 3/5 must-haves verified
-overrides_applied: 0
+overrides_applied: 1
+overrides:
+  - must_have: "Pre-deploy smoke test hits production health endpoint after deploy and rolls back automatically on failure"
+    reason: "Automated rollback rejected in D-12 — Railway/Vercel one-click rollback is fast enough for manual execution; automated rollback risks reverting valid deploys on transient failures. Manual rollback via deploy history accepted as equivalent."
+    accepted_by: "leo"
+    accepted_at: "2026-04-14T00:00:00Z"
 gaps:
   - truth: "Integration tests verify the full agent conversation flow (resolve -> classify -> collect -> validate -> launch) against a test database"
     status: partial
