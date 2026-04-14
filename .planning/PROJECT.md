@@ -42,7 +42,7 @@ A scientist should be able to go from "I want to design a binder for IL-6 recept
 
 - Built and operated by Ranomics; target market is the broader biotech and biopharma community
 - All three supported tools (RFdiffusion, BindCraft, Boltzgen) require GPU; typical runtimes 30 min–2 hrs
-- GPU provider layer must be abstracted to support both Modal (serverless, Python-native) and RunPod (dedicated pods, cost-efficient for long runs)
+- GPU provider layer uses RunPod dedicated GPU pods via the Pod REST API (long runtimes make serverless unsuitable)
 - LLM layer is Claude via Anthropic API (tool use, structured outputs, scientific reasoning)
 - Ranomics team has deep domain expertise in all three design tools — the agent's parameter defaults and wizard questions should encode that expertise
 
