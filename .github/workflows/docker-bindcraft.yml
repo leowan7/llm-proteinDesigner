@@ -41,5 +41,5 @@ jobs:
         with:
           context: docker/bindcraft
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/kendrew-bindcraft:v5
+          tags: ghcr.io/${{ github.repository_owner }}/kendrew-bindcraft:v6
           no-cache: true

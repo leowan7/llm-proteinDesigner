@@ -1,63 +1,78 @@
-# Kendrew BindCraft Pipeline — v5 (FreeBindCraft, no PyRosetta)
+# Kendrew BindCraft Pipeline — v6 (based on official FreeBindCraft Dockerfile)
 # Uses FreeBindCraft fork which replaces PyRosetta with:
 #   - OpenMM for relaxation (GPU-accelerated, 2-4x faster)
 #   - sc-rs (Rust) for shape complementarity
 #   - FreeSASA + Biopython for SASA and interface analysis
 # Fully MIT licensed — no RosettaCommons license required.
-FROM runpod/base:0.6.2-cuda11.8.0
+#
+# Based on: https://github.com/cytokineking/FreeBindCraft/blob/master/Dockerfile
+# Adapted for RunPod pod deployment with Kendrew pipeline integration.
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# Use bash for all RUN commands (conda needs bash, not sh)
 SHELL ["/bin/bash", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
     PYTHONUNBUFFERED=1 \
-    BINDCRAFT_DIR=/opt/BindCraft
+    BINDCRAFT_DIR=/app
 
 # ---------- System deps ----------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget git cmake python3-pip python3-dev build-essential \
-    libxml2-dev libxslt1-dev zlib1g-dev libffi-dev libhdf5-dev \
-    cargo && \
-    ln -sf /usr/bin/python3 /usr/bin/python && \
+    bash ca-certificates curl git rsync libgfortran5 wget \
+    build-essential pkg-config procps unzip && \
     rm -rf /var/lib/apt/lists/*
-RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
-# ---------- Install Miniconda ----------
+# ---------- OpenCL (for OpenMM GPU acceleration) ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ocl-icd-libopencl1 clinfo && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /etc/OpenCL/vendors && \
+    echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
+
+# ---------- Install Miniforge (conda) ----------
 # FreeBindCraft's install script requires conda pre-installed.
-# It discovers the path via `conda info --base`.
-ENV CONDA_DIR=/opt/conda
-RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
-    bash /tmp/miniconda.sh -b -p $CONDA_DIR && \
-    rm /tmp/miniconda.sh
-# Put conda on PATH and initialize for bash
-ENV PATH="$CONDA_DIR/bin:$PATH"
-RUN conda init bash
+# Miniforge comes pre-configured with conda-forge channel.
+ENV CONDA_DIR=/miniforge3
+RUN wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh && \
+    bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
+    rm -f /tmp/miniforge.sh
+ENV PATH=${CONDA_DIR}/bin:${PATH}
+RUN conda config --set channel_priority strict && \
+    conda config --set always_yes yes && \
+    conda update -n base -c conda-forge conda && \
+    conda clean -afy
 
 # ---------- Clone FreeBindCraft ----------
-RUN git clone --depth 1 https://github.com/cytokineking/FreeBindCraft.git $BINDCRAFT_DIR
-RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+WORKDIR /app
+RUN git clone --depth 1 https://github.com/cytokineking/FreeBindCraft.git /app/src && \
+    mv /app/src/* /app/src/.* /app/ 2>/dev/null; rm -rf /app/src
 
-# ---------- FreeBindCraft install (conda env, no PyRosetta) ----------
-# install_bindcraft.sh creates a conda env named "BindCraft" containing:
-#   - Python 3.10, PyTorch, JAX 0.6.0 (CUDA 11.8), ColabDesign, AF2 weights
-#   - OpenMM, FreeSASA, sc-rs, Biopython, pandas, matplotlib, etc.
-# --no-pyrosetta skips PyRosetta install entirely.
-# Must source conda.sh so `conda info --base` works inside the script.
+# Ensure helper binaries are executable
+RUN chmod +x /app/functions/dssp || true && \
+    chmod +x /app/functions/sc || true
+
+# ---------- FreeBindCraft install (no PyRosetta) ----------
+# Creates conda env "BindCraft" with Python 3.10, JAX 0.6.0, PyTorch,
+# ColabDesign, AF2 weights, OpenMM, FreeSASA, sc-rs, etc.
+# Uses bash -lc (login shell) so conda shell functions are available.
 # NOTE: This layer is slow (20-30 min) due to conda env + weight downloads.
-RUN source $CONDA_DIR/etc/profile.d/conda.sh && \
-    cd $BINDCRAFT_DIR && \
-    bash install_bindcraft.sh --cuda '11.8' --no-pyrosetta
-RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+RUN bash -lc 'source ${CONDA_DIR}/etc/profile.d/conda.sh && \
+    bash /app/install_bindcraft.sh --pkg_manager conda --cuda 12.1 --no-pyrosetta'
 
 # ---------- Activate conda env for all subsequent commands ----------
-ENV PATH="$CONDA_DIR/envs/BindCraft/bin:$CONDA_DIR/bin:$PATH" \
-    CONDA_DEFAULT_ENV="BindCraft"
+ENV PATH=${CONDA_DIR}/envs/BindCraft/bin:${CONDA_DIR}/bin:${PATH} \
+    LD_LIBRARY_PATH=${CONDA_DIR}/envs/BindCraft/lib:${LD_LIBRARY_PATH} \
+    CONDA_DEFAULT_ENV="BindCraft" \
+    BINDCRAFT_HOME=/app
 
-# ---------- Pipeline utilities (install into conda env) ----------
-RUN $CONDA_DIR/envs/BindCraft/bin/pip install --no-cache-dir requests
+# Prefer OpenCL for OpenMM (fallback to CUDA)
+ENV OPENMM_PLATFORM_ORDER=OpenCL,CUDA \
+    OPENMM_DEFAULT_PLATFORM=OpenCL
 
-# ---------- Pipeline script (last for layer caching) ----------
+# ---------- Pipeline utilities ----------
+RUN ${CONDA_DIR}/envs/BindCraft/bin/pip install --no-cache-dir requests
+
+# ---------- Pipeline script ----------
 COPY run_pipeline.py /opt/run_pipeline.py
 
-WORKDIR /opt
 CMD ["python", "/opt/run_pipeline.py"]
