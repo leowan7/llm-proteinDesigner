@@ -72,9 +72,9 @@ class Settings(BaseSettings):
     runpod_container_registry_auth_id: str = ""  # GHCR auth credential ID on RunPod
 
     # Docker images per tool (pulled by RunPod pods)
-    runpod_image_rfdiffusion: str = "ghcr.io/leowan7/kendrew-rfdiffusion:v6"
+    runpod_image_rfdiffusion: str = "ghcr.io/leowan7/kendrew-rfdiffusion:v11"
     runpod_image_rfantibody: str = ""
-    runpod_image_bindcraft: str = ""
+    runpod_image_bindcraft: str = "ghcr.io/leowan7/kendrew-bindcraft:v4"
     runpod_image_boltzgen: str = ""
     runpod_image_pxdesign: str = ""
 
