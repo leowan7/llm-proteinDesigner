@@ -1,7 +1,11 @@
-"""Standalone pipeline script for RunPod GPU Pods — BindCraft binder design.
+"""Standalone pipeline script for RunPod GPU Pods — FreeBindCraft binder design.
+
+Uses FreeBindCraft (github.com/cytokineking/FreeBindCraft), the PyRosetta-free
+fork of BindCraft. Replaces Rosetta relaxation with OpenMM, shape complementarity
+with sc-rs, and SASA with FreeSASA/Biopython. Fully MIT licensed.
 
 Reads job configuration from the JOB_PAYLOAD environment variable,
-runs the BindCraft binder design pipeline, uploads results via presigned URLs,
+runs the FreeBindCraft binder design pipeline, uploads results via presigned URLs,
 POSTs results to the Kendrew webhook, then exits.
 
 Environment variables:
@@ -47,8 +51,8 @@ logger = logging.getLogger("bindcraft_pipeline")
 # ---------------------------------------------------------------------------
 BINDCRAFT_DIR = os.environ.get("BINDCRAFT_DIR", "/opt/BindCraft")
 BINDCRAFT_SCRIPT = f"{BINDCRAFT_DIR}/bindcraft.py"
-BINDCRAFT_FILTERS = f"{BINDCRAFT_DIR}/default_filters.json"
-BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/default_4stage_multimer.json"
+BINDCRAFT_FILTERS = f"{BINDCRAFT_DIR}/settings_filters/default_filters.json"
+BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/settings_advanced/default_4stage_multimer.json"
 
 
 # ===========================================================================
@@ -303,8 +307,8 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     """Parse BindCraft output directory for ranked candidates and metrics.
 
     BindCraft writes:
-      - {output_dir}/design/design_1.pdb, design_2.pdb, ... (ranked)
-      - {output_dir}/design/design_results.csv with per-design metrics
+      - {output_dir}/Accepted/*.pdb (final passing designs)
+      - {output_dir}/final_design_stats.csv with per-design metrics
 
     Args:
         output_dir: The design_path passed to BindCraft settings.
@@ -313,19 +317,28 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
         List of candidate dicts with rank, pdb_path, and scores.
         May be empty if BindCraft filtered all candidates.
     """
-    design_dir = os.path.join(output_dir, "design")
-    csv_path = os.path.join(design_dir, "design_results.csv")
+    accepted_dir = os.path.join(output_dir, "Accepted")
+    csv_path = os.path.join(output_dir, "final_design_stats.csv")
 
     # List everything BindCraft produced for debugging
-    if os.path.isdir(design_dir):
-        all_files = os.listdir(design_dir)
-        logger.info("BindCraft output files in %s: %s", design_dir, all_files)
+    if os.path.isdir(output_dir):
+        all_dirs = [d for d in os.listdir(output_dir) if os.path.isdir(os.path.join(output_dir, d))]
+        all_csvs = glob(os.path.join(output_dir, "*.csv"))
+        logger.info("BindCraft output dirs: %s", all_dirs)
+        logger.info("BindCraft output CSVs: %s", [os.path.basename(c) for c in all_csvs])
     else:
-        logger.warning("BindCraft design directory does not exist: %s", design_dir)
+        logger.warning("BindCraft output directory does not exist: %s", output_dir)
         return []
 
-    # Collect PDB files (ranked by BindCraft's internal scoring)
-    pdb_files = sorted(glob(os.path.join(design_dir, "design_*.pdb")))
+    if os.path.isdir(accepted_dir):
+        all_files = os.listdir(accepted_dir)
+        logger.info("BindCraft Accepted/ files: %s", all_files)
+    else:
+        logger.warning("BindCraft Accepted/ directory does not exist: %s", accepted_dir)
+        return []
+
+    # Collect PDB files from Accepted/ (ranked by BindCraft's internal scoring)
+    pdb_files = sorted(glob(os.path.join(accepted_dir, "*.pdb")))
     logger.info("Found %d candidate PDB files", len(pdb_files))
 
     if not pdb_files:
@@ -350,7 +363,7 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
         except Exception as exc:
             logger.warning("Failed to parse results CSV: %s", exc)
     else:
-        logger.warning("No design_results.csv found at %s", csv_path)
+        logger.warning("No final_design_stats.csv found at %s", csv_path)
 
     candidates = []
     for rank_idx, pdb_path in enumerate(pdb_files):
@@ -430,15 +443,17 @@ def main():
         settings_path = write_bindcraft_settings(job_spec, target_pdb, output_dir)
         send_heartbeat(webhook_url, job_id, "Running BindCraft", 0, num_designs)
 
-        # ----- Run BindCraft -----
-        # BindCraft handles the full pipeline internally:
+        # ----- Run FreeBindCraft -----
+        # FreeBindCraft handles the full pipeline internally:
         #   1. Diffusion-based binder backbone generation
-        #   2. Sequence design
+        #   2. Sequence design (ProteinMPNN)
         #   3. AF2 multimer validation (4-stage protocol)
-        #   4. Filtering and ranking
+        #   4. OpenMM relaxation (replaces PyRosetta FastRelax)
+        #   5. Filtering and ranking
         # Cannot be parallelized on single GPU — one trajectory at a time.
+        # Must run from BINDCRAFT_DIR so relative imports resolve.
         cmd = [
-            "python", BINDCRAFT_SCRIPT,
+            "python", "-u", BINDCRAFT_SCRIPT,
             "--settings", settings_path,
             "--filters", BINDCRAFT_FILTERS,
             "--advanced", BINDCRAFT_ADVANCED,
@@ -474,7 +489,7 @@ def main():
             filenames_to_upload.append("metrics.csv")
 
         # Also upload the BindCraft results CSV if it exists
-        bindcraft_csv = os.path.join(output_dir, "design", "design_results.csv")
+        bindcraft_csv = os.path.join(output_dir, "final_design_stats.csv")
         if os.path.exists(bindcraft_csv) and candidates:
             filenames_to_upload.append("bindcraft_results.csv")
 
