@@ -138,7 +138,11 @@ def send_heartbeat(
         designs_completed: Number of designs finished so far.
         designs_total: Total designs requested.
     """
-    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    # Derive heartbeat URL safely using urllib rather than brittle string replace
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(webhook_url)
+    heartbeat_path = "/webhooks/heartbeat"
+    heartbeat_url = urlunparse(parsed._replace(path=heartbeat_path))
     body = {
         "job_id": job_id,
         "stage": stage,
@@ -462,14 +466,7 @@ def main():
             "--no-animations",
         ]
 
-        try:
-            run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
-        except RuntimeError as exc:
-            logger.error("BindCraft failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"BindCraft failed: {exc}",
-            })
-            return
+        run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
 
         send_heartbeat(webhook_url, job_id, "BindCraft complete, parsing results", 0, num_designs)
 
@@ -561,6 +558,15 @@ def main():
             ),
         }
         post_webhook(webhook_url, job_id, pod_id, result_payload)
+
+    except Exception as exc:
+        # Catch-all: guarantee a FAILED webhook for ANY unhandled error
+        # (bad payload JSON, download failure, upload failure, etc.)
+        # Without this, the backend never learns the job died — zombie jobs.
+        logger.error("Pipeline failed: %s", exc)
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Pipeline failed: {exc}",
+        })
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

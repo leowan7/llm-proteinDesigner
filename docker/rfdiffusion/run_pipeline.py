@@ -147,7 +147,9 @@ def send_heartbeat(
         designs_completed: Number of designs finished so far.
         designs_total: Total designs requested.
     """
-    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(webhook_url)
+    heartbeat_url = urlunparse(parsed._replace(path="/webhooks/heartbeat"))
     body = {
         "job_id": job_id,
         "stage": stage,
@@ -808,6 +810,12 @@ def main():
             ),
         }
         post_webhook(webhook_url, job_id, pod_id, result_payload)
+
+    except Exception as exc:
+        logger.error("Pipeline failed: %s", exc)
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Pipeline failed: {exc}",
+        })
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
