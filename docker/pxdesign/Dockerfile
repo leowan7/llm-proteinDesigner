@@ -1,11 +1,10 @@
-# Kendrew PXDesign Pipeline — v2
-# PXDesign requires CUDA 12.1+ and Python 3.11.
+# Kendrew PXDesign Pipeline — v4
+# PXDesign requires CUDA 12.1+ and Python >=3.10 (setup.py: python_requires='>=3.10').
 # Uses devel image because CUTLASS and DeepSpeed compile custom CUDA kernels.
+# Ubuntu 22.04 ships with Python 3.10 — no deadsnakes PPA needed.
 #
 # Official PXDesign Dockerfile uses private protenix:v0.0.3 base (inaccessible).
 # We replicate their exact pip install steps on a public CUDA image.
-# NOTE: install.sh only supports conda/mamba/micromamba, NOT pip.
-# So we follow the official Dockerfile pattern: direct pip installs.
 FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -14,21 +13,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUTLASS_PATH=/opt/cutlass
 
 # ---------- System deps ----------
-# curl is required by download_tool_weights.sh (exit 127 without it)
+# curl is required by download_tool_weights.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl git cmake python3-pip python3-dev build-essential \
-    software-properties-common libffi-dev && \
+    libffi-dev && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     rm -rf /var/lib/apt/lists/*
-
-# ---------- Python 3.11 ----------
-RUN add-apt-repository -y ppa:deadsnakes/ppa && \
-    apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv python3.11-dev && \
-    rm -rf /var/lib/apt/lists/* && \
-    ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3.11 /usr/bin/python && \
-    python3.11 -m ensurepip --upgrade && \
-    python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # ---------- PyTorch 2.3.1 (CUDA 12.1) ----------
 # Pinned to 2.3.1 per official PXDesign requirements.txt
