@@ -1,4 +1,4 @@
-# Kendrew PXDesign Pipeline — v4
+# Kendrew PXDesign Pipeline — v5
 # PXDesign requires CUDA 12.1+ and Python >=3.10 (setup.py: python_requires='>=3.10').
 # Uses devel image because CUTLASS and DeepSpeed compile custom CUDA kernels.
 # Ubuntu 22.04 ships with Python 3.10 — no deadsnakes PPA needed.
@@ -13,7 +13,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUTLASS_PATH=/opt/cutlass
 
 # ---------- System deps ----------
-# curl is required by download_tool_weights.sh
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl git cmake python3-pip python3-dev build-essential \
     libffi-dev && \
@@ -65,12 +64,41 @@ RUN pip install --no-cache-dir git+https://github.com/bytedance/PXDesignBench.gi
 RUN cd $PXDESIGN_DIR && pip install --no-cache-dir -e .
 
 # ---------- Download tool weights (AF2, ProteinMPNN, CCD cache) ----------
-RUN cd $PXDESIGN_DIR && \
-    bash download_tool_weights.sh && \
-    echo "=== Weight validation ===" && \
-    ls -lh tool_weights/af2/ && \
-    ls -lh tool_weights/mpnn/ && \
-    ls -lh tool_weights/ccd/ && \
+# PXDesign's download_tool_weights.sh fetches CCD cache from ByteDance's
+# China CDN (tos-cn-beijing.volces.com), which is unreachable from US-based
+# GitHub Actions runners. We inline the downloads from global sources.
+
+# AF2 weights (from Google Cloud — globally accessible)
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/af2 && \
+    wget -q --show-progress -O /tmp/af2_params.tar \
+      "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar" && \
+    tar -xf /tmp/af2_params.tar -C $PXDESIGN_DIR/tool_weights/af2 && \
+    rm /tmp/af2_params.tar && \
+    echo "AF2 weights OK: $(ls $PXDESIGN_DIR/tool_weights/af2/ | wc -l) files"
+
+# ProteinMPNN weights (from GitHub — globally accessible)
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/mpnn && \
+    git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /tmp/ProteinMPNN && \
+    cp -r /tmp/ProteinMPNN/ca_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    cp -r /tmp/ProteinMPNN/vanilla_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    rm -rf /tmp/ProteinMPNN && \
+    echo "ProteinMPNN weights OK"
+
+# CCD cache — download from wwPDB (globally accessible), generate pickle via Protenix
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/ccd && \
+    wget -q --show-progress -O $PXDESIGN_DIR/tool_weights/ccd/components.cif.gz \
+      "https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz" && \
+    gunzip $PXDESIGN_DIR/tool_weights/ccd/components.cif.gz && \
+    echo "CCD source: $(du -sh $PXDESIGN_DIR/tool_weights/ccd/components.cif)" && \
+    wget -q --show-progress -O $PXDESIGN_DIR/tool_weights/ccd/clusters-by-entity-40.txt \
+      "https://cdn.rcsb.org/resources/sequence/clusters/clusters-by-entity-40.txt" && \
+    echo "Clusters file OK"
+
+# Validate all weight directories
+RUN echo "=== Weight validation ===" && \
+    ls -lh $PXDESIGN_DIR/tool_weights/af2/ && \
+    ls -lh $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    ls -lh $PXDESIGN_DIR/tool_weights/ccd/ && \
     echo "Weight download complete"
 
 # ---------- Pipeline utilities ----------
@@ -84,8 +112,7 @@ RUN python3 -m pip install --no-cache-dir \
 RUN cd $PXDESIGN_DIR && \
     python3 -c "import pxdesign; print('PXDesign importable')" && \
     python3 -c "import protenix; print('Protenix importable')" && \
-    python3 -c "import torch; print('PyTorch', torch.__version__)" || \
-    echo "Import check failed — will validate at runtime"
+    python3 -c "import torch; print('PyTorch', torch.__version__)"
 
 # ---------- Pipeline script ----------
 COPY run_pipeline.py /opt/run_pipeline.py

@@ -608,7 +608,6 @@ def main():
             "--protocol", protocol,
             "--num_designs", str(num_designs),
             "--budget", str(budget),
-            "--cache", BOLTZGEN_CACHE,
             "--devices", "1",
         ]
 
