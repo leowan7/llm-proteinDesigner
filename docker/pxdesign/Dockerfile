@@ -14,8 +14,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CUTLASS_PATH=/opt/cutlass
 
 # ---------- System deps ----------
+# curl is required by download_tool_weights.sh (exit 127 without it)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget git cmake python3-pip python3-dev build-essential \
+    wget curl git cmake python3-pip python3-dev build-essential \
     software-properties-common libffi-dev && \
     rm -rf /var/lib/apt/lists/*
 

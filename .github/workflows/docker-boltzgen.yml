@@ -41,5 +41,5 @@ jobs:
         with:
           context: docker/boltzgen
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/kendrew-boltzgen:v3
+          tags: ghcr.io/${{ github.repository_owner }}/kendrew-boltzgen:v4
           no-cache: true

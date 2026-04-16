@@ -29,7 +29,8 @@ RUN python3 -m pip install --no-cache-dir \
     torch --index-url https://download.pytorch.org/whl/cu124
 
 # ---------- BoltzGen ----------
-RUN python3 -m pip install --no-cache-dir boltzgen==0.1.0
+# Must use latest (not 0.1.0) — the `boltzgen download` CLI was added post-0.1.0.
+RUN python3 -m pip install --no-cache-dir boltzgen
 
 # ---------- Pipeline utilities ----------
 RUN python3 -m pip install --no-cache-dir \
