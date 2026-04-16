@@ -1,88 +1,99 @@
-# Kendrew PXDesign Pipeline — v1 (ByteDance PXDesign binder design)
-FROM runpod/base:0.6.2-cuda11.8.0
+# Kendrew PXDesign Pipeline — v2
+# PXDesign requires CUDA 12.1+ and Python 3.11.
+# Uses devel image because CUTLASS and DeepSpeed compile custom CUDA kernels.
+#
+# Official PXDesign Dockerfile uses private protenix:v0.0.3 base (inaccessible).
+# We replicate their exact pip install steps on a public CUDA image.
+# NOTE: install.sh only supports conda/mamba/micromamba, NOT pip.
+# So we follow the official Dockerfile pattern: direct pip installs.
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PXDESIGN_DIR=/opt/pxdesign \
-    CUTLASS_DIR=/opt/cutlass
+    CUTLASS_PATH=/opt/cutlass
 
 # ---------- System deps ----------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget git cmake python3-pip python3-dev build-essential \
-    ninja-build libffi-dev && \
-    ln -sf /usr/bin/python3 /usr/bin/python && \
+    software-properties-common libffi-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- Python 3.11 ----------
+RUN add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3.11-dev && \
     rm -rf /var/lib/apt/lists/* && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+    ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    python3.11 -m ensurepip --upgrade && \
+    python3.11 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# ---------- PyTorch 2.2.2+cu118 ----------
+# ---------- PyTorch 2.3.1 (CUDA 12.1) ----------
+# Pinned to 2.3.1 per official PXDesign requirements.txt
 RUN python3 -m pip install --no-cache-dir \
-    torch==2.2.2 torchvision==0.17.2 \
-    --index-url https://download.pytorch.org/whl/cu118 && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+    torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
 
-# ---------- CUTLASS v3.5.1 (required for DeepSpeed Evo attention) ----------
+# ---------- CUTLASS v3.5.1 (header-only, for DeepSpeed Evo attention) ----------
 RUN git clone --depth 1 --branch v3.5.1 \
-    https://github.com/NVIDIA/cutlass.git $CUTLASS_DIR && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
-
-ENV CUTLASS_PATH=$CUTLASS_DIR
+    https://github.com/NVIDIA/cutlass.git $CUTLASS_PATH
 
 # ---------- Clone PXDesign ----------
-RUN git clone --depth 1 https://github.com/bytedance/pxdesign.git $PXDESIGN_DIR && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+RUN git clone --depth 1 https://github.com/bytedance/PXDesign.git $PXDESIGN_DIR
 
-# ---------- Install PXDesign via install.sh ----------
-# Try the install script first; if it fails, fall back to manual pip installs.
-# The install script sets up Protenix, ProteinMPNN, and PXDesignBench deps.
-RUN cd $PXDESIGN_DIR && \
-    (bash install.sh --env pxdesign --pkg_manager pip --cuda-version 11.8 || \
-     python3 -m pip install --no-cache-dir \
-         numpy==1.26.4 \
-         pandas==2.2.2 \
-         scipy==1.13.0 \
-         biopython==1.83 \
-         pyyaml==6.0.1 \
-         einops==0.8.0 \
-         ml-collections==0.1.1 \
-         dm-haiku==0.0.12 \
-         rdkit-pypi==2023.9.6 \
-         modelcif==1.0 \
-         ihm==1.5 \
-         deepspeed==0.14.4 \
-         ninja==1.11.1.1 && \
-     python3 -m pip install --no-cache-dir -e $PXDESIGN_DIR) && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+# ---------- Install PXDesign deps (replicating official Dockerfile pattern) ----------
+# Official Dockerfile does NOT use install.sh — it pip installs directly.
+# Order follows their Dockerfile: Protenix -> ColabDesign -> JAX -> PXDesignBench -> PXDesign
 
-# ---------- Download tool weights (AF2, MPNN, CCD cache) ----------
+# Protenix (PXDesign fork)
+RUN pip --no-cache-dir install git+https://github.com/bytedance/Protenix.git@v0.5.0+pxd
+
+# ColabDesign + PXDesignBench deps
+RUN pip install --no-cache-dir git+https://github.com/sokrypton/ColabDesign.git --no-deps && \
+    pip install --no-cache-dir \
+    posix_ipc einops transformers==4.51.3 optax==0.2.5 dm-haiku==0.0.13
+
+# JAX with CUDA support
+RUN pip install --no-cache-dir \
+    "jax[cuda]==0.4.29" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
+# Remaining deps from requirements.txt
+RUN pip install --no-cache-dir \
+    numpy==1.26.3 natsort dm-tree \
+    biopython==1.83 modelcif==0.7 biotite==1.0.1 \
+    scipy scikit-learn scikit-learn-extra \
+    "deepspeed>=0.15.1" protobuf==3.20.2 \
+    matplotlib==3.9.2 rdkit-pypi \
+    pyyaml ml_collections tqdm pandas
+
+# PXDesignBench
+RUN pip install --no-cache-dir git+https://github.com/bytedance/PXDesignBench.git@v0.1.2 --no-deps
+
+# PXDesign itself (editable install — setup.py has no install_requires)
+RUN cd $PXDESIGN_DIR && pip install --no-cache-dir -e .
+
+# ---------- Download tool weights (AF2, ProteinMPNN, CCD cache) ----------
 RUN cd $PXDESIGN_DIR && \
     bash download_tool_weights.sh && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+    echo "=== Weight validation ===" && \
+    ls -lh tool_weights/af2/ && \
+    ls -lh tool_weights/mpnn/ && \
+    ls -lh tool_weights/ccd/ && \
+    echo "Weight download complete"
 
-# ---------- Bake diffusion weights (auto-downloaded on first run) ----------
-# Run a minimal dummy inference to trigger weight download and JIT compilation
-# of custom CUDA kernels. This adds build time but avoids first-run latency.
-RUN cd $PXDESIGN_DIR && \
-    python3 -c " \
-import yaml, tempfile, os; \
-spec = {'target': {'file': 'test.pdb', 'chains': {'A': {'crop': True, 'hotspots': []}}}, \
-        'binder_length': {'min': 10, 'max': 15}, 'preset': 'basic', 'N_sample': 1}; \
-os.makedirs('/tmp/pxdesign_warmup', exist_ok=True); \
-path = '/tmp/pxdesign_warmup/spec.yaml'; \
-open(path, 'w').write(yaml.dump(spec)); \
-print('Warmup spec written — attempting weight download via import...'); \
-" && \
-    (pxdesign pipeline --preset basic \
-        -i /tmp/pxdesign_warmup/spec.yaml \
-        -o /tmp/pxdesign_warmup/out \
-        --N_sample 1 --dtype bf16 2>&1 | tail -100 || \
-     echo "Warmup inference failed (expected if no PDB provided), weights should be cached") && \
-    rm -rf /tmp/pxdesign_warmup && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
-
-# ---------- Python utilities ----------
+# ---------- Pipeline utilities ----------
 RUN python3 -m pip install --no-cache-dir \
-    requests==2.31.0 && \
-    find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
+    gemmi \
+    requests
+
+# ---------- JIT kernel warmup (best-effort, no GPU during build) ----------
+# Attempt to trigger model imports so Python bytecode is cached.
+# Actual CUDA kernel compilation will happen on first RunPod job.
+RUN cd $PXDESIGN_DIR && \
+    python3 -c "import pxdesign; print('PXDesign importable')" && \
+    python3 -c "import protenix; print('Protenix importable')" && \
+    python3 -c "import torch; print('PyTorch', torch.__version__)" || \
+    echo "Import check failed — will validate at runtime"
 
 # ---------- Pipeline script ----------
 COPY run_pipeline.py /opt/run_pipeline.py
