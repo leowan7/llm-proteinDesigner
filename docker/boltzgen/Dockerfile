@@ -39,13 +39,12 @@ RUN python3 -m pip install --no-cache-dir \
 
 # ---------- Bake model weights (~6 GB) ----------
 # Pre-download HuggingFace weights so pods start instantly.
-# Cannot use BoltzGenModel() here — it requires CUDA, unavailable during build.
-# Use huggingface_hub snapshot_download to fetch weights without GPU init.
+# Uses BoltzGen's built-in CLI to download from boltzgen/boltzgen-1 (public).
+# Avoids `download all` which includes gated inference-data repo.
 RUN mkdir -p $HF_HOME && \
-    python3 -c "import os; from huggingface_hub import snapshot_download; \
-c = os.environ['HF_HOME']; \
-snapshot_download(repo_id='boltzgen/boltzgen1_diverse', cache_dir=c); \
-snapshot_download(repo_id='boltzgen/boltzgen1_adherence', cache_dir=c)" && \
+    boltzgen download design-diverse --cache $HF_HOME && \
+    boltzgen download inverse-fold --cache $HF_HOME && \
+    boltzgen download folding --cache $HF_HOME && \
     du -sh $HF_HOME && \
     echo "Weight cache populated"
 
