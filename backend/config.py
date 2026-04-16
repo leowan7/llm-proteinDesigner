@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # Docker images per tool (pulled by RunPod pods)
     runpod_image_rfdiffusion: str = "ghcr.io/leowan7/kendrew-rfdiffusion:v11"
     runpod_image_rfantibody: str = ""
-    runpod_image_bindcraft: str = "ghcr.io/leowan7/kendrew-bindcraft:v6"
+    runpod_image_bindcraft: str = "ghcr.io/leowan7/kendrew-bindcraft:v7"
     runpod_image_boltzgen: str = ""
     runpod_image_pxdesign: str = ""
 

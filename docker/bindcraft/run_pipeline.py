@@ -63,27 +63,19 @@ def startup_check():
     """Verify GPU, dependencies, and critical files at boot. Crash if GPU unavailable."""
     checks = {}
 
-    # --- Torch + CUDA ---
-    try:
-        import torch
-        checks["torch"] = torch.__version__
-        checks["cuda_available"] = torch.cuda.is_available()
-        if torch.cuda.is_available():
-            checks["gpu"] = torch.cuda.get_device_name(0)
-        else:
-            logger.error("CUDA is not available — BindCraft requires a GPU")
-            sys.exit(1)
-    except Exception as exc:
-        logger.error("PyTorch import failed: %s", exc)
-        sys.exit(1)
-
-    # --- JAX ---
+    # --- JAX + GPU (FreeBindCraft uses JAX, not PyTorch) ---
     try:
         import jax
         checks["jax"] = jax.__version__
         checks["jax_devices"] = [str(d) for d in jax.devices()]
+        gpu_devices = jax.devices("gpu")
+        if not gpu_devices:
+            logger.error("No JAX GPU devices found — FreeBindCraft requires a GPU")
+            sys.exit(1)
+        checks["gpu"] = str(gpu_devices[0])
     except Exception as exc:
-        checks["jax_error"] = str(exc)
+        logger.error("JAX import/GPU check failed: %s", exc)
+        sys.exit(1)
 
     # --- Biopython ---
     try:
@@ -457,7 +449,7 @@ def main():
         # Cannot be parallelized on single GPU — one trajectory at a time.
         # Must run from BINDCRAFT_DIR so relative imports resolve.
         cmd = [
-            "python", "-u", BINDCRAFT_SCRIPT,
+            sys.executable, "-u", BINDCRAFT_SCRIPT,
             "--settings", settings_path,
             "--filters", BINDCRAFT_FILTERS,
             "--advanced", BINDCRAFT_ADVANCED,
