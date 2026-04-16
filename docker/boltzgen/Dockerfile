@@ -11,9 +11,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # ---------- System deps ----------
 # Ubuntu 24.04 ships Python 3.12 — satisfies boltzgen's >=3.11 requirement.
+# python3-pip is in the universe repo (not enabled in NVIDIA runtime images),
+# so we use ensurepip which ships with Python 3.12 natively.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget git python3-pip python3-dev python3-venv build-essential && \
+    wget git python3-dev python3-venv build-essential && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
+    python3 -m ensurepip --upgrade && \
     python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel --break-system-packages && \
     rm -rf /var/lib/apt/lists/*
 
