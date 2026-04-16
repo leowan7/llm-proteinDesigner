@@ -41,5 +41,5 @@ jobs:
         with:
           context: docker/rfantibody
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/kendrew-rfantibody:v1
+          tags: ghcr.io/${{ github.repository_owner }}/kendrew-rfantibody:v2
           no-cache: true

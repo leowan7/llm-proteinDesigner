@@ -1,8 +1,11 @@
-"""Standalone pipeline script for RunPod GPU Pods — RFantibody antibody design.
+"""Standalone pipeline script for RFantibody on RunPod GPU Pods.
 
 Reads job configuration from the JOB_PAYLOAD environment variable,
-runs the 3-stage RFantibody pipeline, uploads results via presigned URLs,
-POSTs results to the Kendrew webhook, then exits.
+runs the 3-stage RFantibody Quiver pipeline, uploads results via
+presigned URLs, POSTs results to the Kendrew webhook, then exits.
+
+RFantibody uses Quiver (.qv) files as the primary I/O format across
+all three stages. PDB files are extracted at the end for upload.
 
 Environment variables:
     JOB_PAYLOAD     JSON string with job_spec, upload endpoint, and webhook config
@@ -12,9 +15,11 @@ Environment variables:
     RUNPOD_POD_ID   RunPod pod ID (so backend can terminate after completion)
 
 Pipeline stages:
-  1. RFantibody CDR loop generation — generates antibody backbones with designed CDR loops
-  2. AbMPNN sequence design — assigns amino acid sequences to CDR loops
-  3. RF2 antibody validation — predicts structure of designed antibody-antigen complex
+  1. rfdiffusion  — generate antibody backbones with designed CDR loops
+  2. proteinmpnn  — assign amino acid sequences to CDR loops
+  3. rf2          — predict structure of designed antibody-antigen complex
+  4. qvscorefile  — extract confidence scores to TSV
+  5. qvextract    — extract passing PDB files for upload
 """
 
 import csv
@@ -27,8 +32,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from glob import glob
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import requests
 
@@ -40,81 +45,74 @@ logging.basicConfig(
 logger = logging.getLogger("rfantibody_pipeline")
 
 # ---------------------------------------------------------------------------
-# Paths inside the container (all weights baked into the Docker image)
+# Paths inside the container
 # ---------------------------------------------------------------------------
 RFANTIBODY_DIR = os.environ.get("RFANTIBODY_DIR", "/opt/rfantibody")
-WEIGHTS_DIR = os.environ.get("WEIGHTS_DIR", "/opt/rfantibody/weights")
 
-# RF2 confidence threshold for passing designs
-RF2_CONFIDENCE_THRESHOLD = 0.70
+# Bundled framework PDBs (HLT-marked, from RFantibody repo examples)
+FRAMEWORKS = {
+    "VHH": os.path.join(RFANTIBODY_DIR, "scripts/examples/example_inputs/h-NbBCII10.pdb"),
+    "scFv": os.path.join(RFANTIBODY_DIR, "scripts/examples/example_inputs/hu-4D5-8_Fv.pdb"),
+}
+
+# Filtering thresholds
+PAE_THRESHOLD = 10.0
+PLDDT_THRESHOLD = 80.0
+IPTM_THRESHOLD = 0.70
 
 
 # ===========================================================================
 # Startup diagnostics
 # ===========================================================================
 
-def startup_check():
+def startup_check() -> dict:
     """Log environment and dependency status at startup.
 
-    Crashes if CUDA is not available — running without GPU is not supported.
-    Validates all required environment variables and weight files exist.
-
-    Returns:
-        Dict of diagnostic check results.
-
-    Raises:
-        SystemExit: If CUDA is unavailable or required env vars are missing.
+    Crashes if CUDA is not available or required CLI tools are missing.
     """
     checks = {}
 
-    # --- Torch + CUDA ---
+    # Validate required environment variables
+    required_vars = ["JOB_PAYLOAD", "WEBHOOK_URL", "JOB_ID"]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    if missing:
+        logger.error("Missing required environment variables: %s", missing)
+        sys.exit(1)
+
+    # Check PyTorch and CUDA
     try:
         import torch
         checks["torch"] = torch.__version__
         checks["cuda_available"] = torch.cuda.is_available()
         if torch.cuda.is_available():
             checks["gpu"] = torch.cuda.get_device_name(0)
+            checks["cuda_version"] = torch.version.cuda
         else:
-            logger.error("CUDA is NOT available. Cannot run RFantibody without GPU.")
+            logger.error("CUDA is not available — RFantibody requires GPU")
             sys.exit(1)
-    except Exception as exc:
-        logger.error("PyTorch import failed: %s", exc)
+    except ImportError:
+        logger.error("PyTorch is not installed.")
         sys.exit(1)
 
-    # --- Required env vars ---
-    required_env = ["JOB_PAYLOAD", "WEBHOOK_URL", "JOB_ID"]
-    for var in required_env:
-        val = os.environ.get(var)
-        if not val:
-            logger.error("Required environment variable %s is not set", var)
+    # Check CLI tools
+    for tool in ["rfdiffusion", "proteinmpnn", "rf2", "qvextract", "qvscorefile"]:
+        try:
+            subprocess.run(
+                [tool, "--help"], capture_output=True, text=True, timeout=10,
+            )
+            checks[f"{tool}_cli"] = True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            checks[f"{tool}_cli"] = False
+            logger.error("%s CLI not found in PATH", tool)
             sys.exit(1)
-        checks[f"env_{var}"] = "set"
 
-    # --- Biopython ---
-    try:
-        from Bio.PDB import PDBParser
-        checks["biopython"] = "ok"
-    except Exception as exc:
-        checks["biopython_error"] = str(exc)
+    # Check framework PDBs
+    for name, path in FRAMEWORKS.items():
+        checks[f"framework_{name}"] = os.path.exists(path)
 
-    # --- RFantibody directory ---
-    checks["rfantibody_dir"] = os.path.isdir(RFANTIBODY_DIR)
-
-    # --- Weight files ---
-    expected_weights = [
-        "RF2_ab.pt",
-    ]
-    for weight_file in expected_weights:
-        weight_path = os.path.join(WEIGHTS_DIR, weight_file)
-        checks[f"weight_{weight_file}"] = os.path.exists(weight_path)
-
-    # Check for any .pt files in weights dir
-    if os.path.isdir(WEIGHTS_DIR):
-        pt_files = glob(os.path.join(WEIGHTS_DIR, "*.pt"))
-        checks["weight_files_found"] = len(pt_files)
-        checks["weight_files"] = [os.path.basename(f) for f in pt_files]
-    else:
-        checks["weights_dir_exists"] = False
+    # Check weights
+    weights_dir = os.path.join(RFANTIBODY_DIR, "weights")
+    checks["weights_dir"] = os.path.isdir(weights_dir)
 
     logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
     return checks
@@ -131,19 +129,9 @@ def send_heartbeat(
     designs_completed: int = 0,
     designs_total: int = 0,
 ) -> None:
-    """Send a heartbeat to the Kendrew backend.
-
-    Derives the heartbeat URL from the main webhook URL by replacing
-    the /webhooks/runpod path with /webhooks/heartbeat.
-
-    Args:
-        webhook_url: The main RunPod webhook URL.
-        job_id: Kendrew job UUID.
-        stage: Current pipeline stage description.
-        designs_completed: Number of designs finished so far.
-        designs_total: Total designs requested.
-    """
-    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    """Send a heartbeat to the Kendrew backend."""
+    parsed = urlparse(webhook_url)
+    heartbeat_url = urlunparse(parsed._replace(path="/webhooks/heartbeat"))
     body = {
         "job_id": job_id,
         "stage": stage,
@@ -158,40 +146,20 @@ def send_heartbeat(
 
 
 def download_input(url: str, dest_path: str) -> None:
-    """Download a file from a presigned GET URL.
-
-    Args:
-        url: Presigned S3/R2 GET URL.
-        dest_path: Local path to write the downloaded file.
-
-    Raises:
-        RuntimeError: If download fails (non-200 response).
-    """
-    logger.info("Downloading input PDB -> %s", dest_path)
+    """Download a file from a presigned GET URL."""
+    logger.info("Downloading input -> %s", dest_path)
     resp = requests.get(url, timeout=120)
     if resp.status_code != 200:
-        raise RuntimeError(f"Failed to download input PDB: HTTP {resp.status_code}")
+        raise RuntimeError(f"Failed to download input: HTTP {resp.status_code}")
     Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
     Path(dest_path).write_bytes(resp.content)
     logger.info("Downloaded %d bytes", len(resp.content))
 
 
 def request_upload_urls(
-    upload_endpoint: str, job_token: str, filenames: list[str]
+    upload_endpoint: str, job_token: str, filenames: list[str],
 ) -> dict[str, str]:
-    """Request fresh presigned PUT URLs from the Kendrew backend.
-
-    Args:
-        upload_endpoint: URL of the /jobs/{job_id}/upload-urls endpoint.
-        job_token: Job-specific Bearer token for authentication.
-        filenames: List of filenames to upload.
-
-    Returns:
-        Dict mapping filename to presigned PUT URL.
-
-    Raises:
-        RuntimeError: If the request fails.
-    """
+    """Request fresh presigned PUT URLs from the Kendrew backend."""
     resp = requests.post(
         upload_endpoint,
         json={"filenames": filenames},
@@ -206,19 +174,14 @@ def request_upload_urls(
 
 
 def upload_output(url: str, file_path: str) -> None:
-    """Upload a file to R2/S3 via a presigned PUT URL.
-
-    Args:
-        url: Presigned PUT URL.
-        file_path: Local file path to upload.
-
-    Raises:
-        RuntimeError: If upload fails.
-    """
+    """Upload a file to R2/S3 via a presigned PUT URL."""
     data = Path(file_path).read_bytes()
-    content_type = "text/csv" if file_path.endswith(".csv") else "chemical/x-pdb"
+    if file_path.endswith(".csv") or file_path.endswith(".tsv"):
+        content_type = "text/csv"
+    else:
+        content_type = "chemical/x-pdb"
     resp = requests.put(
-        url, data=data, headers={"Content-Type": content_type}, timeout=120
+        url, data=data, headers={"Content-Type": content_type}, timeout=120,
     )
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Upload failed for {file_path}: HTTP {resp.status_code}")
@@ -226,55 +189,34 @@ def upload_output(url: str, file_path: str) -> None:
 
 
 def run_command(
-    cmd: list[str], timeout: int = 3600, cwd: str | None = None
+    cmd: list[str], timeout: int = 3600, cwd: str | None = None,
 ) -> str:
-    """Run a subprocess command with timeout and logging.
-
-    Always logs the last 2000 chars of combined stdout+stderr, even on
-    success, to aid debugging in production.
-
-    Args:
-        cmd: Command and arguments as a list.
-        timeout: Maximum seconds before killing the process.
-        cwd: Working directory for the subprocess.
-
-    Returns:
-        Combined stdout + stderr output.
-
-    Raises:
-        RuntimeError: If the command exits with non-zero status.
-    """
-    logger.info("Running: %s", " ".join(cmd[:8]) + ("..." if len(cmd) > 8 else ""))
+    """Run a subprocess command with timeout and logging."""
+    logger.info("Running: %s", " ".join(cmd[:10]) + ("..." if len(cmd) > 10 else ""))
     start = time.time()
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd
+        cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
     )
     elapsed = time.time() - start
     combined_output = (result.stdout or "") + (result.stderr or "")
 
-    # Log last 2000 chars even on success for debugging
+    output_tail = combined_output[-2000:]
     logger.info(
         "Command finished in %.1fs (exit code %d). Output tail:\n%s",
-        elapsed,
-        result.returncode,
-        combined_output[-2000:],
+        elapsed, result.returncode, output_tail,
     )
 
     if result.returncode != 0:
-        error_tail = combined_output[-2000:]
-        raise RuntimeError(f"Command failed (exit {result.returncode}): {error_tail}")
+        raise RuntimeError(
+            f"Command failed (exit {result.returncode}): {output_tail}"
+        )
     return combined_output
 
 
-def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> None:
-    """POST results to the Kendrew backend webhook.
-
-    Args:
-        webhook_url: Backend webhook endpoint URL.
-        job_id: Kendrew job UUID.
-        pod_id: RunPod pod ID (for backend to terminate).
-        payload: Results dict (candidates, counts, etc.).
-    """
+def post_webhook(
+    webhook_url: str, job_id: str, pod_id: str, payload: dict,
+) -> None:
+    """POST results to the Kendrew backend webhook."""
     body = {
         "id": job_id,
         "pod_id": pod_id,
@@ -283,7 +225,10 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
     if "error" in payload:
-        body["error"] = {"category": "Pipeline error", "message": payload["error"]}
+        body["error"] = {
+            "category": "Pipeline error",
+            "message": payload["error"],
+        }
 
     logger.info("Posting webhook to %s", webhook_url)
     try:
@@ -293,392 +238,282 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
         logger.error("Webhook POST failed: %s", exc)
 
 
+def _safe_float(value: str, default: float) -> float:
+    """Parse a float from a string, returning default on failure."""
+    if not value or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+        if parsed != parsed:  # NaN check
+            return default
+        return parsed
+    except (ValueError, TypeError):
+        return default
+
+
 # ===========================================================================
-# Pipeline stage functions
+# Pipeline stages (Quiver-based)
 # ===========================================================================
 
-def stage_rfantibody_design(
+def stage_rfdiffusion(
     target_pdb: str,
-    config: dict,
-    output_dir: str,
+    framework_pdb: str,
+    backbones_qv: str,
+    num_designs: int,
+    cdr_lengths: str,
+    hotspots: str,
     webhook_url: str = "",
     job_id: str = "",
-) -> list[str]:
-    """Stage 1: Run RFantibody CDR loop generation.
+) -> None:
+    """Stage 1: Generate antibody backbones with RFdiffusion.
 
-    Generates antibody backbones with designed CDR loops targeting the
-    specified epitope residues on the antigen.
+    Uses the antibody-finetuned RFdiffusion model to generate CDR loop
+    backbones on the provided framework scaffold.
 
     Args:
-        target_pdb: Path to the input target PDB file.
-        config: Pipeline config dict with epitope_residues, cdr_design,
-                framework, num_designs.
-        output_dir: Directory to write generated backbone PDBs.
-        webhook_url: Heartbeat webhook URL (optional).
-        job_id: Kendrew job ID for heartbeats (optional).
-
-    Returns:
-        List of paths to generated backbone PDB files.
-
-    Raises:
-        RuntimeError: If RFantibody produces no output.
+        target_pdb: Path to target antigen PDB.
+        framework_pdb: Path to HLT-marked antibody framework PDB.
+        backbones_qv: Output path for backbones Quiver file.
+        num_designs: Number of backbone designs to generate.
+        cdr_lengths: CDR loop length spec, e.g. "H1:8,H2:7,H3:10-16".
+        hotspots: Comma-separated epitope residues, e.g. "A50,A51,A80".
+        webhook_url: Heartbeat webhook URL.
+        job_id: Kendrew job ID for heartbeats.
     """
-    logger.info("=== Stage 1: RFantibody CDR loop generation ===")
-    os.makedirs(output_dir, exist_ok=True)
-
-    num_designs = config.get("num_designs", 10)
-    epitope_residues = config.get("epitope_residues", [])
-    cdr_design = config.get("cdr_design", ["H1", "H2", "H3"])
-    framework = config.get("framework", "VHH")
+    logger.info("=== Stage 1: RFdiffusion backbone generation ===")
 
     if webhook_url and job_id:
-        send_heartbeat(webhook_url, job_id, "Running RFantibody design", 0, num_designs)
+        send_heartbeat(webhook_url, job_id, "Running RFdiffusion", 0, num_designs)
 
-    # Build the RFantibody design command.
-    # RFantibody uses Hydra-style config overrides similar to RFdiffusion.
     cmd = [
-        "python", "-m", "rfantibody.design",
-        f"input.target_pdb={target_pdb}",
-        f"input.epitope_residues=[{','.join(epitope_residues)}]",
-        f"input.cdr_design=[{','.join(cdr_design)}]",
-        f"input.framework={framework}",
-        f"output.num_designs={num_designs}",
-        f"output.prefix={output_dir}/design",
+        "rfdiffusion",
+        "-t", target_pdb,
+        "-f", framework_pdb,
+        "-q", backbones_qv,
+        "-n", str(num_designs),
+        "-l", cdr_lengths,
+    ]
+    if hotspots:
+        cmd.extend(["-h", hotspots])
+
+    run_command(cmd, timeout=1800, cwd=RFANTIBODY_DIR)
+
+    if not os.path.exists(backbones_qv):
+        raise RuntimeError(f"RFdiffusion did not produce {backbones_qv}")
+
+    logger.info("RFdiffusion complete: %s", backbones_qv)
+
+
+def stage_proteinmpnn(
+    backbones_qv: str,
+    sequences_qv: str,
+    seqs_per_backbone: int = 5,
+    temperature: float = 0.2,
+    webhook_url: str = "",
+    job_id: str = "",
+    num_designs: int = 0,
+) -> None:
+    """Stage 2: Design CDR loop sequences with ProteinMPNN.
+
+    Assigns amino acid sequences to the CDR loops designed by RFdiffusion,
+    keeping the framework and antigen regions fixed.
+
+    Args:
+        backbones_qv: Path to backbones Quiver file from stage 1.
+        sequences_qv: Output path for sequences Quiver file.
+        seqs_per_backbone: Number of sequences per backbone (default 5).
+        temperature: Sampling temperature (0.2 = conservative).
+        webhook_url: Heartbeat webhook URL.
+        job_id: Kendrew job ID for heartbeats.
+        num_designs: Total design count for heartbeat display.
+    """
+    logger.info("=== Stage 2: ProteinMPNN sequence design ===")
+
+    if webhook_url and job_id:
+        send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, num_designs)
+
+    cmd = [
+        "proteinmpnn",
+        "-q", backbones_qv,
+        "--output-quiver", sequences_qv,
+        "-n", str(seqs_per_backbone),
+        "-t", str(temperature),
     ]
 
     run_command(cmd, timeout=1800, cwd=RFANTIBODY_DIR)
 
-    generated = sorted(glob(os.path.join(output_dir, "design_*.pdb")))
-    logger.info("RFantibody generated %d backbone PDBs", len(generated))
-    if not generated:
-        raise RuntimeError("RFantibody produced no output PDB files")
+    if not os.path.exists(sequences_qv):
+        raise RuntimeError(f"ProteinMPNN did not produce {sequences_qv}")
 
-    if webhook_url and job_id:
-        send_heartbeat(
-            webhook_url, job_id, "RFantibody design complete",
-            len(generated), num_designs,
-        )
-    return generated
+    logger.info("ProteinMPNN complete: %s", sequences_qv)
 
 
-def stage_abmpnn(
-    backbone_pdbs: list[str],
-    config: dict,
-    output_dir: str,
+def stage_rf2(
+    sequences_qv: str,
+    predictions_qv: str,
+    recycles: int = 10,
     webhook_url: str = "",
     job_id: str = "",
-) -> list[str]:
-    """Stage 2: Run AbMPNN sequence design on generated backbones.
+    num_designs: int = 0,
+) -> None:
+    """Stage 3: Predict structures with RoseTTAFold2-Antibody.
 
-    AbMPNN assigns amino acid sequences to the CDR loops designed by
-    RFantibody, keeping the framework and antigen regions fixed.
-
-    Args:
-        backbone_pdbs: List of backbone PDB paths from stage 1.
-        config: Pipeline config dict.
-        output_dir: Directory for AbMPNN output files.
-        webhook_url: Heartbeat webhook URL (optional).
-        job_id: Kendrew job ID for heartbeats (optional).
-
-    Returns:
-        List of paths to designed PDB/FASTA output files.
-
-    Raises:
-        RuntimeError: If AbMPNN produces no output.
-    """
-    logger.info("=== Stage 2: AbMPNN sequence design ===")
-    os.makedirs(output_dir, exist_ok=True)
-
-    if webhook_url and job_id:
-        send_heartbeat(
-            webhook_url, job_id, "Running AbMPNN sequence design",
-            0, len(backbone_pdbs),
-        )
-
-    designed_files = []
-    for idx, backbone_pdb in enumerate(backbone_pdbs):
-        design_name = Path(backbone_pdb).stem
-        per_design_out = os.path.join(output_dir, design_name)
-        os.makedirs(per_design_out, exist_ok=True)
-
-        cmd = [
-            "python", "-m", "rfantibody.abmpnn",
-            f"input.pdb={backbone_pdb}",
-            f"output.prefix={per_design_out}/{design_name}",
-            f"output.num_seqs=2",
-        ]
-
-        try:
-            run_command(cmd, timeout=600, cwd=RFANTIBODY_DIR)
-
-            # Collect output PDB or FASTA files
-            output_files = sorted(
-                glob(os.path.join(per_design_out, "*.pdb"))
-                + glob(os.path.join(per_design_out, "*.fa"))
-                + glob(os.path.join(per_design_out, "*.fasta"))
-            )
-            if output_files:
-                designed_files.extend(output_files)
-                logger.info(
-                    "AbMPNN design %d/%d (%s): %d output files",
-                    idx + 1, len(backbone_pdbs), design_name, len(output_files),
-                )
-            else:
-                logger.warning("AbMPNN produced no output for %s", design_name)
-
-        except RuntimeError as exc:
-            logger.warning("AbMPNN failed for %s: %s", design_name, exc)
-            continue
-
-        if webhook_url and job_id:
-            send_heartbeat(
-                webhook_url, job_id, "Running AbMPNN sequence design",
-                idx + 1, len(backbone_pdbs),
-            )
-
-    if not designed_files:
-        raise RuntimeError("AbMPNN produced no output files for any design")
-
-    logger.info("AbMPNN produced %d designed files total", len(designed_files))
-    return designed_files
-
-
-def stage_rf2_validation(
-    designed_files: list[str],
-    target_pdb: str,
-    output_dir: str,
-    webhook_url: str = "",
-    job_id: str = "",
-) -> list[dict]:
-    """Stage 3: RF2 antibody structure validation.
-
-    Predicts the structure of each designed antibody-antigen complex using
-    RF2 (RoseTTAFold2) antibody model and extracts confidence scores.
+    Predicts the structure of each designed antibody-antigen complex
+    and generates confidence scores (pAE, pLDDT, ipTM).
 
     Args:
-        designed_files: List of designed PDB/FASTA paths from stage 2.
-        target_pdb: Path to the original target antigen PDB.
-        output_dir: Directory for RF2 prediction output.
-        webhook_url: Heartbeat webhook URL (optional).
-        job_id: Kendrew job ID for heartbeats (optional).
-
-    Returns:
-        List of dicts with design_name, scores, pdb_path, and sequence keys.
+        sequences_qv: Path to sequences Quiver file from stage 2.
+        predictions_qv: Output path for predictions Quiver file.
+        recycles: Number of RF2 refinement cycles (default 10).
+        webhook_url: Heartbeat webhook URL.
+        job_id: Kendrew job ID for heartbeats.
+        num_designs: Total design count for heartbeat display.
     """
-    logger.info("=== Stage 3: RF2 antibody validation ===")
-    os.makedirs(output_dir, exist_ok=True)
+    logger.info("=== Stage 3: RF2 structure prediction ===")
 
     if webhook_url and job_id:
-        send_heartbeat(
-            webhook_url, job_id, "Running RF2 validation",
-            0, len(designed_files),
-        )
+        send_heartbeat(webhook_url, job_id, "Running RF2 validation", 0, num_designs)
 
-    results = []
-    for idx, designed_file in enumerate(designed_files):
-        design_name = Path(designed_file).stem
-        per_design_out = os.path.join(output_dir, design_name)
-        os.makedirs(per_design_out, exist_ok=True)
+    cmd = [
+        "rf2",
+        "-q", sequences_qv,
+        "--output-quiver", predictions_qv,
+        "-r", str(recycles),
+    ]
 
-        cmd = [
-            "python", "-m", "rfantibody.rf2_predict",
-            f"input.pdb={designed_file}",
-            f"input.target_pdb={target_pdb}",
-            f"output.prefix={per_design_out}/{design_name}",
-        ]
+    run_command(cmd, timeout=3600, cwd=RFANTIBODY_DIR)
 
-        try:
-            output_text = run_command(cmd, timeout=600, cwd=RFANTIBODY_DIR)
+    if not os.path.exists(predictions_qv):
+        raise RuntimeError(f"RF2 did not produce {predictions_qv}")
 
-            # Parse RF2 confidence scores from output
-            scores = _parse_rf2_scores(per_design_out, design_name, output_text)
-            if scores:
-                # Find the predicted PDB
-                predicted_pdbs = glob(
-                    os.path.join(per_design_out, f"{design_name}*.pdb")
-                )
-                pdb_path = predicted_pdbs[0] if predicted_pdbs else designed_file
+    logger.info("RF2 complete: %s", predictions_qv)
 
-                # Extract sequence from designed file if it is a PDB
-                sequence = _extract_sequence_from_pdb(designed_file)
 
-                results.append({
-                    "design_name": design_name,
-                    "scores": scores,
-                    "pdb_path": pdb_path,
-                    "designed_pdb": designed_file,
-                    "sequence": sequence or "",
-                })
-                logger.info(
-                    "RF2 scores for %s: rf2_confidence=%.3f",
-                    design_name, scores.get("rf2_confidence", 0.0),
-                )
+# ===========================================================================
+# Score extraction and parsing
+# ===========================================================================
 
-        except RuntimeError as exc:
-            logger.warning("RF2 validation failed for %s: %s", design_name, exc)
-            continue
+def extract_scores(predictions_qv: str, scores_tsv: str) -> None:
+    """Extract confidence scores from predictions Quiver to TSV.
 
-        if webhook_url and job_id:
-            send_heartbeat(
-                webhook_url, job_id, "Running RF2 validation",
-                idx + 1, len(designed_files),
-            )
-
-    logger.info(
-        "RF2 validated %d / %d designs", len(results), len(designed_files)
+    Uses qvscorefile to extract pAE, pLDDT, ipTM, pTM for all designs.
+    """
+    logger.info("Extracting scores from %s", predictions_qv)
+    output = run_command(
+        ["qvscorefile", predictions_qv],
+        timeout=120,
+        cwd=RFANTIBODY_DIR,
     )
+    with open(scores_tsv, "w") as fh:
+        fh.write(output)
+    logger.info("Scores written to %s", scores_tsv)
+
+
+def extract_pdbs(predictions_qv: str, out_dir: str) -> list[str]:
+    """Extract all PDB files from predictions Quiver.
+
+    Uses qvextract to write individual PDB files for upload.
+
+    Returns:
+        List of extracted PDB file paths.
+    """
+    logger.info("Extracting PDBs from %s to %s", predictions_qv, out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    run_command(
+        ["qvextract", predictions_qv, "--out-dir", out_dir],
+        timeout=120,
+        cwd=RFANTIBODY_DIR,
+    )
+    pdbs = sorted(str(p) for p in Path(out_dir).glob("*.pdb"))
+    logger.info("Extracted %d PDB files", len(pdbs))
+    return pdbs
+
+
+def parse_scores_tsv(tsv_path: str) -> list[dict]:
+    """Parse the scores TSV produced by qvscorefile.
+
+    Expected columns include: design_name, pAE, pLDDT, ipTM, pTM.
+    Column names may vary; we search case-insensitively.
+
+    Returns:
+        List of dicts with design_name and scores.
+    """
+    results = []
+    with open(tsv_path, newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t")
+        columns = reader.fieldnames or []
+        logger.info("Scores TSV columns: %s", columns)
+
+        for row in reader:
+            row_lower = {k.lower().strip(): v for k, v in row.items()}
+
+            design_name = (
+                row_lower.get("design_name")
+                or row_lower.get("name")
+                or row_lower.get("design")
+                or f"design_{len(results)}"
+            )
+            design_name = Path(design_name).stem
+
+            scores = {}
+            for metric, keys, default in [
+                ("pAE", ["pae", "ipae", "i_pae", "mean_pae"], 99.0),
+                ("pLDDT", ["plddt", "mean_plddt", "avg_plddt"], 0.0),
+                ("ipTM", ["iptm", "ip_tm", "iptm_score"], 0.0),
+                ("pTM", ["ptm", "p_tm"], 0.0),
+            ]:
+                for key in keys:
+                    if key in row_lower and row_lower[key]:
+                        scores[metric] = _safe_float(row_lower[key], default)
+                        break
+
+            results.append({
+                "design_name": design_name,
+                "scores": scores,
+            })
+
+    logger.info("Parsed %d designs from scores TSV", len(results))
     return results
 
 
-def _parse_rf2_scores(
-    result_dir: str, design_name: str, output_text: str
-) -> dict | None:
-    """Extract RF2 confidence scores from validation output.
+def filter_and_rank(designs: list[dict]) -> list[dict]:
+    """Filter designs by quality thresholds and rank by ipTM."""
+    passing = []
+    for design in designs:
+        scores = design["scores"]
+        pae = scores.get("pAE", 99.0)
+        plddt = scores.get("pLDDT", 0.0)
+        iptm = scores.get("ipTM", 0.0)
 
-    Checks for a JSON scores file first, then falls back to parsing
-    stdout for confidence metrics.
+        if pae <= PAE_THRESHOLD and plddt >= PLDDT_THRESHOLD and iptm >= IPTM_THRESHOLD:
+            passing.append(design)
 
-    Args:
-        result_dir: Directory containing RF2 output files.
-        design_name: Name of the design being scored.
-        output_text: Combined stdout+stderr from the RF2 command.
+    passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
-    Returns:
-        Dict with rf2_confidence and cdr_geometry scores, or None on failure.
-    """
-    # Try JSON score file first
-    score_files = glob(os.path.join(result_dir, f"{design_name}*scores*.json"))
-    if not score_files:
-        score_files = glob(os.path.join(result_dir, "*scores*.json"))
-
-    if score_files:
-        try:
-            with open(score_files[0]) as fh:
-                data = json.load(fh)
-            return {
-                "rf2_confidence": float(data.get("confidence", data.get("plddt", 0.0))),
-                "cdr_rmsd": float(data.get("cdr_rmsd", 0.0)),
-                "cdr_geometry": data.get("cdr_geometry", {}),
-            }
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            logger.warning(
-                "Failed to parse RF2 JSON scores for %s: %s", design_name, exc
-            )
-
-    # Fallback: parse confidence from stdout
-    # RF2 typically prints lines like "confidence: 0.85" or "pLDDT: 82.3"
-    confidence = _extract_float_from_output(output_text, "confidence")
-    plddt = _extract_float_from_output(output_text, "plddt")
-
-    if confidence is not None or plddt is not None:
-        # Normalize pLDDT (0-100) to 0-1 scale for rf2_confidence if needed
-        rf2_conf = confidence if confidence is not None else (plddt / 100.0 if plddt else 0.0)
-        return {
-            "rf2_confidence": round(rf2_conf, 4),
-            "cdr_rmsd": 0.0,
-            "cdr_geometry": {},
-        }
-
-    logger.warning("No RF2 scores found for %s", design_name)
-    return None
-
-
-def _extract_float_from_output(text: str, keyword: str) -> float | None:
-    """Extract a float value following a keyword in command output.
-
-    Searches for lines containing the keyword (case-insensitive) and
-    extracts the first float-like value after it.
-
-    Args:
-        text: Command output text to search.
-        keyword: Keyword to look for (e.g., 'confidence', 'plddt').
-
-    Returns:
-        Extracted float value, or None if not found.
-    """
-    import re
-    pattern = rf"(?i){keyword}\s*[:=]\s*([\d.]+)"
-    match = re.search(pattern, text)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            return None
-    return None
-
-
-def _extract_sequence_from_pdb(pdb_path: str) -> str | None:
-    """Extract the antibody heavy chain sequence from a PDB file.
-
-    Reads chain H (heavy chain) residues from the PDB. Falls back to
-    chain A if H is not found.
-
-    Args:
-        pdb_path: Path to the PDB file.
-
-    Returns:
-        Amino acid sequence string, or None on failure.
-    """
-    if not pdb_path.endswith(".pdb"):
-        return None
-    try:
-        from Bio.PDB import PDBParser
-        from Bio.PDB.Polypeptide import protein_letters_3to1
-
-        parser = PDBParser(QUIET=True)
-        structure = parser.get_structure("design", pdb_path)
-
-        # Try heavy chain first, then fall back to first chain
-        for target_chain_id in ["H", "A"]:
-            for model in structure:
-                for chain in model:
-                    if chain.id == target_chain_id:
-                        residues = []
-                        for residue in chain:
-                            resname = residue.get_resname().strip()
-                            if resname in protein_letters_3to1:
-                                residues.append(protein_letters_3to1[resname])
-                        if residues:
-                            return "".join(residues)
-
-        # Last resort: first chain with residues
-        for model in structure:
-            for chain in model:
-                residues = []
-                for residue in chain:
-                    resname = residue.get_resname().strip()
-                    if resname in protein_letters_3to1:
-                        residues.append(protein_letters_3to1[resname])
-                if residues:
-                    return "".join(residues)
-
-        return None
-    except Exception as exc:
-        logger.warning("Failed to extract sequence from %s: %s", pdb_path, exc)
-        return None
+    logger.info(
+        "Filtering: %d / %d pass (pAE<=%.1f, pLDDT>=%.0f, ipTM>=%.2f)",
+        len(passing), len(designs),
+        PAE_THRESHOLD, PLDDT_THRESHOLD, IPTM_THRESHOLD,
+    )
+    return passing
 
 
 def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
-    """Write a metrics CSV summarizing all passing candidates.
-
-    Args:
-        csv_path: Path to write the CSV file.
-        candidates: List of candidate dicts with rank, pdb_key, scores, sequence.
-    """
+    """Write a normalized metrics CSV for upload to Kendrew."""
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([
-            "rank", "design_name", "rf2_confidence", "cdr_rmsd", "sequence",
+            "rank", "design_name", "ipTM", "pLDDT", "pAE", "pTM",
         ])
         for candidate in candidates:
-            design_name = Path(candidate["pdb_key"]).stem
             scores = candidate["scores"]
             writer.writerow([
                 candidate["rank"],
-                design_name,
-                scores.get("rf2_confidence", ""),
-                scores.get("cdr_rmsd", ""),
-                candidate.get("sequence", ""),
+                candidate["design_name"],
+                scores.get("ipTM", ""),
+                scores.get("pLDDT", ""),
+                scores.get("pAE", ""),
+                scores.get("pTM", ""),
             ])
 
 
@@ -687,7 +522,7 @@ def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
 # ===========================================================================
 
 def main():
-    """Run the full pipeline: download -> RFantibody -> AbMPNN -> RF2 -> upload -> webhook."""
+    """Run the full RFantibody pipeline."""
     startup_check()
 
     # Read configuration from environment
@@ -697,140 +532,201 @@ def main():
     pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
     job_token = os.environ.get("JOB_TOKEN", "")
 
-    # JOB_PAYLOAD already validated in startup_check
+    if not job_payload_str:
+        logger.error("JOB_PAYLOAD environment variable not set")
+        sys.exit(1)
+
     job_payload = json.loads(job_payload_str)
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
 
-    # Build pipeline config from job_spec
     params = job_spec.get("parameters", {})
-    target_chain = job_spec.get("target_chain", "A")
-    hotspots = job_spec.get("hotspot_residues", [])
+    num_designs = params.get("num_designs", 100)
+    framework = params.get("framework", "VHH")
+    cdr_lengths = params.get("cdr_lengths", "H1:8,H2:7,H3:10-16")
+    hotspots_str = params.get("hotspots", "")
+    mpnn_seqs = params.get("mpnn_seqs_per_backbone", 5)
+    mpnn_temp = params.get("mpnn_temperature", 0.2)
+    rf2_recycles = params.get("rf2_recycles", 10)
 
-    config = {
-        "epitope_residues": [f"{target_chain}{res}" for res in hotspots],
-        "cdr_design": params.get("cdr_design", ["H1", "H2", "H3"]),
-        "framework": params.get("framework", "VHH"),
-        "num_designs": params.get("num_designs", 10),
-    }
+    # Resolve framework PDB
+    framework_pdb = FRAMEWORKS.get(framework)
+    if not framework_pdb or not os.path.exists(framework_pdb):
+        logger.error("Framework '%s' not found. Available: %s", framework, list(FRAMEWORKS.keys()))
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Unknown framework '{framework}'. Available: {list(FRAMEWORKS.keys())}",
+        })
+        sys.exit(1)
+
+    # Build hotspots string from job_spec
+    if not hotspots_str:
+        chain = job_spec.get("target_chain", "A")
+        hotspot_residues = job_spec.get("hotspot_residues", [])
+        if hotspot_residues:
+            hotspots_str = ",".join(f"{chain}{res}" for res in hotspot_residues)
 
     pipeline_start = time.time()
     work_dir = tempfile.mkdtemp(prefix="rfantibody_job_")
     target_pdb = os.path.join(work_dir, "target.pdb")
 
+    # Quiver file paths
+    backbones_qv = os.path.join(work_dir, "backbones.qv")
+    sequences_qv = os.path.join(work_dir, "sequences.qv")
+    predictions_qv = os.path.join(work_dir, "predictions.qv")
+    scores_tsv = os.path.join(work_dir, "scores.tsv")
+    top_hits_dir = os.path.join(work_dir, "top_hits")
+
     try:
-        # ----- Download input PDB -----
+        # ----- Download target PDB -----
         download_input(input_url, target_pdb)
+        send_heartbeat(webhook_url, job_id, "Input downloaded", 0, num_designs)
 
-        # ----- Stage 1: RFantibody CDR generation -----
-        design_output = os.path.join(work_dir, "rfantibody_output")
-        os.makedirs(design_output, exist_ok=True)
-
+        # ----- Stage 1: RFdiffusion -----
         try:
-            backbone_pdbs = stage_rfantibody_design(
-                target_pdb, config, design_output,
+            stage_rfdiffusion(
+                target_pdb, framework_pdb, backbones_qv,
+                num_designs, cdr_lengths, hotspots_str,
                 webhook_url=webhook_url, job_id=job_id,
             )
         except RuntimeError as exc:
-            logger.error("RFantibody design failed: %s", exc)
+            logger.error("RFdiffusion failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"RFantibody design failed: {exc}",
+                "error": f"RFdiffusion failed: {exc}",
             })
             return
 
-        # ----- Stage 2: AbMPNN sequence design -----
-        abmpnn_output = os.path.join(work_dir, "abmpnn_output")
+        # ----- Stage 2: ProteinMPNN -----
         try:
-            designed_files = stage_abmpnn(
-                backbone_pdbs, config, abmpnn_output,
+            stage_proteinmpnn(
+                backbones_qv, sequences_qv,
+                seqs_per_backbone=mpnn_seqs,
+                temperature=mpnn_temp,
                 webhook_url=webhook_url, job_id=job_id,
+                num_designs=num_designs,
             )
         except RuntimeError as exc:
-            logger.error("AbMPNN failed: %s", exc)
+            logger.error("ProteinMPNN failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"AbMPNN failed: {exc}",
+                "error": f"ProteinMPNN failed: {exc}",
                 "partial": True,
-                "backbone_count": len(backbone_pdbs),
             })
             return
 
-        # ----- Stage 3: RF2 validation -----
-        rf2_output = os.path.join(work_dir, "rf2_output")
+        # ----- Stage 3: RF2 -----
         try:
-            rf2_results = stage_rf2_validation(
-                designed_files, target_pdb, rf2_output,
+            stage_rf2(
+                sequences_qv, predictions_qv,
+                recycles=rf2_recycles,
                 webhook_url=webhook_url, job_id=job_id,
+                num_designs=num_designs,
             )
         except RuntimeError as exc:
-            logger.error("RF2 validation failed: %s", exc)
+            logger.error("RF2 failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
                 "error": f"RF2 validation failed: {exc}",
                 "partial": True,
-                "backbone_count": len(backbone_pdbs),
-                "designed_count": len(designed_files),
             })
             return
 
-        # ----- Filter and rank by rf2_confidence -----
-        passing = [
-            r for r in rf2_results
-            if r["scores"].get("rf2_confidence", 0.0) >= RF2_CONFIDENCE_THRESHOLD
-        ]
-        passing.sort(
-            key=lambda x: x["scores"].get("rf2_confidence", 0.0), reverse=True
-        )
+        send_heartbeat(webhook_url, job_id, "RF2 complete", num_designs, num_designs)
 
-        logger.info(
-            "Filtering: %d / %d pass (rf2_confidence >= %.2f)",
-            len(passing), len(rf2_results), RF2_CONFIDENCE_THRESHOLD,
-        )
+        # ----- Extract scores and PDBs -----
+        try:
+            extract_scores(predictions_qv, scores_tsv)
+        except RuntimeError as exc:
+            logger.error("Score extraction failed: %s", exc)
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": f"Score extraction failed: {exc}",
+            })
+            return
 
-        # ----- Upload outputs (on-demand URLs) -----
+        all_designs = parse_scores_tsv(scores_tsv)
+        if not all_designs:
+            logger.error("No designs found in scores TSV")
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": "RF2 produced no scored designs",
+            })
+            return
+
+        # Extract PDB files from predictions quiver
+        extracted_pdbs = extract_pdbs(predictions_qv, top_hits_dir)
+        pdb_map = {Path(p).stem: p for p in extracted_pdbs}
+
+        # ----- Filter and rank -----
+        passing = filter_and_rank(all_designs)
+
+        # ----- Prepare upload list -----
         candidates = []
         filenames_to_upload = []
-        for rank_idx in range(len(passing)):
-            filenames_to_upload.append(f"design_{rank_idx + 1:03d}.pdb")
+
+        for rank_idx, design in enumerate(passing):
+            rank = rank_idx + 1
+            design_name = design["design_name"]
+
+            # Match design to extracted PDB
+            local_file = pdb_map.get(design_name)
+            if not local_file:
+                for key, path in pdb_map.items():
+                    if design_name in key or key in design_name:
+                        local_file = path
+                        break
+
+            if not local_file:
+                logger.warning(
+                    "No PDB found for design %s (available: %s)",
+                    design_name, list(pdb_map.keys())[:10],
+                )
+                continue
+
+            upload_filename = f"design_{rank:03d}.pdb"
+            filenames_to_upload.append(upload_filename)
+
+            candidates.append({
+                "rank": rank,
+                "design_name": design_name,
+                "pdb_key": f"designs/{design_name}.pdb",
+                "scores": design["scores"],
+                "local_file": local_file,
+                "upload_filename": upload_filename,
+            })
+
         if filenames_to_upload:
             filenames_to_upload.append("metrics.csv")
+
+        # ----- Upload outputs -----
+        send_heartbeat(
+            webhook_url, job_id, "Uploading results",
+            len(candidates), len(candidates),
+        )
 
         upload_urls = {}
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(
-                    upload_endpoint, job_token, filenames_to_upload
+                    upload_endpoint, job_token, filenames_to_upload,
                 )
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
 
-        for rank_idx, result in enumerate(passing):
-            rank = rank_idx + 1
-            design_name = result["design_name"]
-            pdb_path = result.get("pdb_path", result.get("designed_pdb", ""))
-
-            pdb_key = f"designs/{design_name}.pdb"
-            candidate = {
-                "rank": rank,
-                "pdb_key": pdb_key,
-                "scores": result["scores"],
-                "sequence": result.get("sequence", ""),
-            }
-            candidates.append(candidate)
-
-            upload_filename = f"design_{rank:03d}.pdb"
-            if upload_filename in upload_urls and pdb_path and os.path.exists(pdb_path):
+        failed_uploads = []
+        for candidate in candidates:
+            upload_filename = candidate["upload_filename"]
+            local_file = candidate["local_file"]
+            if upload_filename in upload_urls and os.path.exists(local_file):
                 try:
-                    upload_output(upload_urls[upload_filename], pdb_path)
+                    upload_output(upload_urls[upload_filename], local_file)
                 except RuntimeError as exc:
-                    logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
+                    logger.warning("Failed to upload %s: %s", upload_filename, exc)
+                    failed_uploads.append(upload_filename)
 
         # ----- Upload metrics CSV -----
         if candidates:
-            csv_path = os.path.join(work_dir, "metrics.csv")
-            write_metrics_csv(csv_path, candidates)
+            metrics_csv_path = os.path.join(work_dir, "metrics.csv")
+            write_metrics_csv(metrics_csv_path, candidates)
             if "metrics.csv" in upload_urls:
                 try:
-                    upload_output(upload_urls["metrics.csv"], csv_path)
+                    upload_output(upload_urls["metrics.csv"], metrics_csv_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload metrics CSV: %s", exc)
 
@@ -851,18 +747,37 @@ def main():
                 for c in candidates
             ],
             "candidate_count": len(candidates),
-            "total_designs": len(backbone_pdbs),
-            "rf2_validated": len(rf2_results),
+            "total_designs": num_designs,
+            "rf2_scored": len(all_designs),
+            "passing_filters": len(passing),
+            "framework": framework,
+            "cdr_lengths": cdr_lengths,
             "runtime_minutes": round(elapsed_minutes, 1),
             "next_steps": (
-                "Recommend experimental validation: SPR or BLI binding assay "
-                "for top antibody candidates, followed by thermal stability "
-                "assessment (nanoDSF). Consider yeast display for affinity "
-                "maturation of the best CDR loop designs."
+                "Recommend experimental validation: yeast display screening "
+                "for top candidates, followed by SPR/BLI for binding kinetics. "
+                "RFantibody designs have shown 78 nM affinity with 1.45 A RMSD "
+                "to cryo-EM structures in published benchmarks."
             ),
         }
+        if failed_uploads:
+            result_payload["failed_uploads"] = failed_uploads
+
         post_webhook(webhook_url, job_id, pod_id, result_payload)
 
+    except KeyError as exc:
+        logger.error("Missing required key in job payload: %s", exc)
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Missing required key in job payload: {exc}",
+        })
+    except Exception as exc:
+        logger.exception("Unhandled pipeline error: %s", exc)
+        try:
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": f"Pipeline crashed: {exc}",
+            })
+        except Exception:
+            logger.error("Failed to send error webhook")
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
