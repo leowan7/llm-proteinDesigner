@@ -11,13 +11,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # ---------- System deps ----------
 # Ubuntu 24.04 ships Python 3.12 — satisfies boltzgen's >=3.11 requirement.
-# python3-pip is in the universe repo (not enabled in NVIDIA runtime images),
-# so we use ensurepip which ships with Python 3.12 natively.
+# python3-pip AND python3-venv are in Ubuntu's universe repo, which NVIDIA
+# runtime images don't enable. Bootstrap pip via get-pip.py instead.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget git python3-dev python3-venv build-essential && \
+    wget git python3-dev build-essential && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
-    python3 -m ensurepip --upgrade && \
-    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel --break-system-packages && \
+    wget -qO /tmp/get-pip.py https://bootstrap.pypa.io/get-pip.py && \
+    python3 /tmp/get-pip.py --break-system-packages && \
+    rm /tmp/get-pip.py && \
+    python3 -m pip install --no-cache-dir --upgrade setuptools wheel --break-system-packages && \
     rm -rf /var/lib/apt/lists/*
 
 # ---------- PyTorch (CUDA 12.4) ----------
