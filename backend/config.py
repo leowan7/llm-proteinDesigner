@@ -75,7 +75,7 @@ class Settings(BaseSettings):
     runpod_image_rfdiffusion: str = "ghcr.io/leowan7/kendrew-rfdiffusion:v11"
     runpod_image_rfantibody: str = ""
     runpod_image_bindcraft: str = "ghcr.io/leowan7/kendrew-bindcraft:v7"
-    runpod_image_boltzgen: str = ""
+    runpod_image_boltzgen: str = "ghcr.io/leowan7/kendrew-boltzgen:v3"
     runpod_image_pxdesign: str = ""
 
     # Resend (for job notifications)

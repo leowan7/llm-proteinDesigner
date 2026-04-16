@@ -1,4 +1,4 @@
-# Kendrew BoltzGen Pipeline — v2
+# Kendrew BoltzGen Pipeline — v3
 # BoltzGen requires CUDA 12.4+ (cuequivariance_ops_cu12) and Python 3.12.
 # Weights (~6 GB) are baked into the image to avoid cold-start downloads.
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
@@ -38,10 +38,14 @@ RUN python3 -m pip install --no-cache-dir \
     pyyaml
 
 # ---------- Bake model weights (~6 GB) ----------
-# Trigger HuggingFace weight download during build so pods start instantly.
-# BoltzGen downloads to $HF_HOME on first import or run.
+# Pre-download HuggingFace weights so pods start instantly.
+# Cannot use BoltzGenModel() here — it requires CUDA, unavailable during build.
+# Use huggingface_hub snapshot_download to fetch weights without GPU init.
 RUN mkdir -p $HF_HOME && \
-    python3 -c "from boltzgen import BoltzGenModel; BoltzGenModel()" && \
+    python3 -c "import os; from huggingface_hub import snapshot_download; \
+c = os.environ['HF_HOME']; \
+snapshot_download(repo_id='boltzgen/boltzgen1_diverse', cache_dir=c); \
+snapshot_download(repo_id='boltzgen/boltzgen1_adherence', cache_dir=c)" && \
     du -sh $HF_HOME && \
     echo "Weight cache populated"
 
