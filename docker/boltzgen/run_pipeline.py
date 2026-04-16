@@ -12,12 +12,13 @@ Environment variables:
     RUNPOD_POD_ID   RunPod pod ID (so backend can terminate after completion)
 
 Pipeline stages:
-  1. Download target PDB from presigned URL
-  2. Write BoltzGen YAML spec to disk
-  3. Run `boltzgen run spec.yaml` via subprocess
-  4. Parse output CSV for ranked candidates
-  5. Upload passing PDBs + metrics CSV
-  6. POST results to webhook
+  1. Download target structure from presigned URL
+  2. Convert to CIF and re-index residues (BoltzGen requires CIF with chains at index 1)
+  3. Write BoltzGen YAML design spec to disk
+  4. Run `boltzgen run spec.yaml` via subprocess
+  5. Parse output metrics CSV for ranked candidates
+  6. Upload passing CIFs + metrics CSV
+  7. POST results to webhook
 """
 
 import csv
@@ -31,6 +32,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import requests
 import yaml
@@ -49,31 +51,18 @@ IPTM_THRESHOLD = 0.70
 PLDDT_THRESHOLD = 80.0
 RMSD_THRESHOLD = 2.0  # refolding RMSD in angstroms
 
+# BoltzGen weight cache (baked into Docker image)
+BOLTZGEN_CACHE = os.environ.get("HF_HOME", "/opt/boltzgen_cache")
+
 
 # ===========================================================================
 # Startup diagnostics
 # ===========================================================================
 
-def validate_env_vars() -> None:
-    """Validate that all required environment variables are set.
-
-    Crashes immediately if any required variable is missing, so the pod
-    fails fast rather than burning GPU time on an incomplete configuration.
-    """
-    required = ["JOB_PAYLOAD", "WEBHOOK_URL", "JOB_ID"]
-    missing = [var for var in required if not os.environ.get(var)]
-    if missing:
-        logger.error("Missing required environment variables: %s", missing)
-        sys.exit(1)
-
-
 def startup_check() -> dict:
     """Log environment and dependency status at startup.
 
-    Crashes if CUDA is not available (no point running a GPU pipeline on CPU).
-
-    Returns:
-        Dict of diagnostic checks for logging.
+    Crashes if CUDA is not available or BoltzGen is not installed.
     """
     checks = {}
 
@@ -92,7 +81,7 @@ def startup_check() -> dict:
         logger.error("PyTorch is not installed.")
         sys.exit(1)
 
-    # BoltzGen
+    # BoltzGen CLI
     try:
         result = subprocess.run(
             ["boltzgen", "--version"],
@@ -105,10 +94,12 @@ def startup_check() -> dict:
     except Exception as exc:
         checks["boltzgen_error"] = str(exc)
 
-    # HuggingFace cache
-    hf_home = os.environ.get("HF_HOME", "~/.cache/huggingface")
-    checks["hf_home"] = hf_home
-    checks["hf_home_exists"] = os.path.isdir(os.path.expanduser(hf_home))
+    # Weight cache
+    checks["cache_dir"] = BOLTZGEN_CACHE
+    checks["cache_exists"] = os.path.isdir(BOLTZGEN_CACHE)
+    if os.path.isdir(BOLTZGEN_CACHE):
+        cache_files = list(Path(BOLTZGEN_CACHE).rglob("*"))
+        checks["cache_file_count"] = len(cache_files)
 
     logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
     return checks
@@ -125,19 +116,9 @@ def send_heartbeat(
     designs_completed: int = 0,
     designs_total: int = 0,
 ) -> None:
-    """Send a heartbeat to the Kendrew backend.
-
-    Derives the heartbeat URL from the main webhook URL by replacing
-    the /webhooks/runpod path with /webhooks/heartbeat.
-
-    Args:
-        webhook_url: The main RunPod webhook URL.
-        job_id: Kendrew job UUID.
-        stage: Current pipeline stage description.
-        designs_completed: Number of designs finished so far.
-        designs_total: Total designs requested.
-    """
-    heartbeat_url = webhook_url.replace("/webhooks/runpod", "/webhooks/heartbeat")
+    """Send a heartbeat to the Kendrew backend."""
+    parsed = urlparse(webhook_url)
+    heartbeat_url = urlunparse(parsed._replace(path="/webhooks/heartbeat"))
     body = {
         "job_id": job_id,
         "stage": stage,
@@ -152,16 +133,11 @@ def send_heartbeat(
 
 
 def download_input(url: str, dest_path: str) -> None:
-    """Download a file from a presigned GET URL.
-
-    Args:
-        url: Presigned S3/R2 GET URL.
-        dest_path: Local filesystem destination path.
-    """
-    logger.info("Downloading input PDB -> %s", dest_path)
+    """Download a file from a presigned GET URL."""
+    logger.info("Downloading input structure -> %s", dest_path)
     resp = requests.get(url, timeout=120)
     if resp.status_code != 200:
-        raise RuntimeError(f"Failed to download input PDB: HTTP {resp.status_code}")
+        raise RuntimeError(f"Failed to download input: HTTP {resp.status_code}")
     Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
     Path(dest_path).write_bytes(resp.content)
     logger.info("Downloaded %d bytes", len(resp.content))
@@ -170,16 +146,7 @@ def download_input(url: str, dest_path: str) -> None:
 def request_upload_urls(
     upload_endpoint: str, job_token: str, filenames: list[str],
 ) -> dict[str, str]:
-    """Request fresh presigned PUT URLs from the Kendrew backend.
-
-    Args:
-        upload_endpoint: URL of the /jobs/{job_id}/upload-urls endpoint.
-        job_token: Job-specific Bearer token for authentication.
-        filenames: List of filenames to upload.
-
-    Returns:
-        Dict mapping filename to presigned PUT URL.
-    """
+    """Request fresh presigned PUT URLs from the Kendrew backend."""
     resp = requests.post(
         upload_endpoint,
         json={"filenames": filenames},
@@ -194,12 +161,7 @@ def request_upload_urls(
 
 
 def upload_output(url: str, file_path: str) -> None:
-    """Upload a file to R2/S3 via a presigned PUT URL.
-
-    Args:
-        url: Presigned PUT URL.
-        file_path: Local file path to upload.
-    """
+    """Upload a file to R2/S3 via a presigned PUT URL."""
     data = Path(file_path).read_bytes()
     if file_path.endswith(".csv"):
         content_type = "text/csv"
@@ -218,19 +180,7 @@ def upload_output(url: str, file_path: str) -> None:
 def run_command(
     cmd: list[str], timeout: int = 3600, cwd: str | None = None,
 ) -> str:
-    """Run a subprocess command with timeout, logging output even on success.
-
-    Args:
-        cmd: Command and arguments to run.
-        timeout: Maximum seconds before killing the process.
-        cwd: Working directory for the subprocess.
-
-    Returns:
-        Combined stdout + stderr from the command.
-
-    Raises:
-        RuntimeError: If the command exits with a non-zero return code.
-    """
+    """Run a subprocess command with timeout and logging."""
     logger.info("Running: %s", " ".join(cmd[:8]) + ("..." if len(cmd) > 8 else ""))
     start = time.time()
     result = subprocess.run(
@@ -239,7 +189,7 @@ def run_command(
     elapsed = time.time() - start
     combined_output = (result.stdout or "") + (result.stderr or "")
 
-    # Always log last 2000 chars of output, even on success
+    # Always log last 2000 chars of output
     output_tail = combined_output[-2000:]
     logger.info(
         "Command finished in %.1fs (exit code %d). Output tail:\n%s",
@@ -256,14 +206,7 @@ def run_command(
 def post_webhook(
     webhook_url: str, job_id: str, pod_id: str, payload: dict,
 ) -> None:
-    """POST results to the Kendrew backend webhook.
-
-    Args:
-        webhook_url: Backend webhook endpoint URL.
-        job_id: Kendrew job UUID.
-        pod_id: RunPod pod ID (for backend to terminate).
-        payload: Results dict (candidates, counts, etc.).
-    """
+    """POST results to the Kendrew backend webhook."""
     body = {
         "id": job_id,
         "pod_id": pod_id,
@@ -286,28 +229,70 @@ def post_webhook(
 
 
 # ===========================================================================
+# CIF conversion and re-indexing
+# ===========================================================================
+
+def ensure_cif(input_path: str, work_dir: str) -> str:
+    """Ensure input is in CIF format. Convert from PDB if needed.
+
+    BoltzGen requires mmCIF format. If the input is a PDB file, convert it
+    using gemmi. Also re-indexes chains so residues start at 1.
+
+    Args:
+        input_path: Path to the downloaded target file (.pdb or .cif).
+        work_dir: Working directory for writing the CIF file.
+
+    Returns:
+        Path to the validated/converted CIF file.
+    """
+    import gemmi
+
+    if input_path.endswith(".cif") or input_path.endswith(".mmcif"):
+        # Already CIF — read, re-index, and write back
+        logger.info("Input is CIF, re-indexing residues...")
+        structure = gemmi.read_structure(input_path)
+    else:
+        # PDB -> CIF conversion
+        logger.info("Converting PDB to CIF...")
+        structure = gemmi.read_structure(input_path)
+
+    # Re-index: ensure each chain starts at residue 1 using label_seq_id
+    for model in structure:
+        for chain in model:
+            for idx, residue in enumerate(chain):
+                residue.label_seq = idx + 1
+                residue.seqid = gemmi.SeqId(str(idx + 1))
+
+    cif_path = os.path.join(work_dir, "target.cif")
+    structure.make_mmcif_document().write_file(cif_path)
+    logger.info("CIF written to %s (%d bytes)", cif_path, os.path.getsize(cif_path))
+    return cif_path
+
+
+# ===========================================================================
 # BoltzGen YAML spec generation
 # ===========================================================================
 
 def write_yaml_spec(
-    yaml_spec: dict, target_pdb_path: str, work_dir: str,
+    yaml_spec: dict, target_cif_path: str, work_dir: str,
 ) -> str:
     """Write the BoltzGen YAML design specification to disk.
 
-    The YAML spec defines the target entity, binder constraints, and
-    hotspot residues for BoltzGen.
+    Rewrites entity file paths to point to the local target CIF,
+    ensuring the spec references the container-local file.
 
     Args:
-        yaml_spec: Dict from job payload with entities, binder config.
-        target_pdb_path: Path to the downloaded target PDB inside the container.
+        yaml_spec: Dict from job payload with entities and constraints.
+        target_cif_path: Path to the re-indexed target CIF inside the container.
         work_dir: Working directory for writing the spec file.
 
     Returns:
         Path to the written YAML spec file.
     """
-    # Rewrite entity file paths to point to the local target PDB
+    # Rewrite file entity paths to point to the local CIF
     for entity in yaml_spec.get("entities", []):
-        entity["file"] = target_pdb_path
+        if "file" in entity and isinstance(entity["file"], dict):
+            entity["file"]["path"] = target_cif_path
 
     spec_path = os.path.join(work_dir, "spec.yaml")
     with open(spec_path, "w") as fh:
@@ -327,56 +312,106 @@ def write_yaml_spec(
 def find_metrics_csv(output_dir: str) -> str | None:
     """Locate the BoltzGen metrics CSV in the output directory.
 
-    BoltzGen writes files named final_designs_metrics_N.csv. Returns the
-    first match found, or None if no metrics file exists.
+    BoltzGen writes metrics to:
+      - intermediate_designs_inverse_folded/aggregate_metrics_analyze.csv
+      - intermediate_designs_inverse_folded/per_target_metrics_analyze.csv
 
-    Args:
-        output_dir: BoltzGen output directory.
+    Falls back to searching for any *metrics*.csv in the output tree.
 
     Returns:
-        Path to the metrics CSV, or None.
+        Path to the best metrics CSV, or None.
     """
+    # Primary location
+    primary = os.path.join(
+        output_dir, "intermediate_designs_inverse_folded",
+        "aggregate_metrics_analyze.csv",
+    )
+    if os.path.isfile(primary):
+        return primary
+
+    # Secondary: per-target metrics
+    secondary = os.path.join(
+        output_dir, "intermediate_designs_inverse_folded",
+        "per_target_metrics_analyze.csv",
+    )
+    if os.path.isfile(secondary):
+        return secondary
+
+    # Fallback: search for any metrics CSV
     for root, _dirs, files in os.walk(output_dir):
         for fname in sorted(files):
-            if fname.startswith("final_designs_metrics") and fname.endswith(".csv"):
+            if "metrics" in fname.lower() and fname.endswith(".csv"):
                 return os.path.join(root, fname)
+
     return None
 
 
-def find_design_files(output_dir: str) -> list[str]:
-    """Locate designed PDB/CIF files in the BoltzGen output directory.
+def find_design_files(output_dir: str, budget: int) -> list[str]:
+    """Locate designed CIF files in the BoltzGen output directory.
 
-    Looks inside final_ranked_designs/ for structure files.
+    BoltzGen writes ranked designs to:
+      final_ranked_designs/intermediate_ranked_{budget}_designs/
+
+    Falls back to searching for CIF/PDB files in final_ranked_designs/.
 
     Args:
         output_dir: BoltzGen output directory.
+        budget: The --budget value used (determines subdirectory name).
 
     Returns:
         Sorted list of paths to design structure files.
     """
-    ranked_dir = os.path.join(output_dir, "final_ranked_designs")
+    # Primary: budget-specific ranked directory
+    ranked_dir = os.path.join(
+        output_dir, "final_ranked_designs",
+        f"intermediate_ranked_{budget}_designs",
+    )
     if not os.path.isdir(ranked_dir):
-        # Fall back to searching entire output directory
-        ranked_dir = output_dir
+        # Try other ranked subdirectories
+        parent = os.path.join(output_dir, "final_ranked_designs")
+        if os.path.isdir(parent):
+            subdirs = sorted(os.listdir(parent))
+            for d in subdirs:
+                candidate = os.path.join(parent, d)
+                if os.path.isdir(candidate):
+                    ranked_dir = candidate
+                    break
+            else:
+                ranked_dir = parent
+        else:
+            # Last resort: search entire output
+            ranked_dir = output_dir
 
     design_files = []
-    for fname in sorted(os.listdir(ranked_dir)):
-        if fname.endswith((".pdb", ".cif")):
-            design_files.append(os.path.join(ranked_dir, fname))
+    for root, _dirs, files in os.walk(ranked_dir):
+        for fname in sorted(files):
+            if fname.endswith((".cif", ".pdb")):
+                design_files.append(os.path.join(root, fname))
 
-    return design_files
+    return sorted(design_files)
+
+
+def _safe_float(value: str, default: float) -> float:
+    """Parse a float from a CSV value, returning default on failure."""
+    if not value or not value.strip():
+        return default
+    try:
+        parsed = float(value)
+        if parsed != parsed:  # NaN check
+            return default
+        return parsed
+    except (ValueError, TypeError):
+        return default
 
 
 def parse_metrics_csv(csv_path: str) -> list[dict]:
     """Parse the BoltzGen metrics CSV into a list of scored designs.
 
-    Expected columns include: design name/file, refolding_rmsd, ipTM, pLDDT.
-
-    Args:
-        csv_path: Path to the BoltzGen metrics CSV.
+    BoltzGen aggregate_metrics_analyze.csv may have various column names.
+    We try common patterns for each metric.
 
     Returns:
-        List of dicts with design_name, scores, and file reference.
+        List of dicts with design_name and scores.
     """
     results = []
     with open(csv_path, newline="") as fh:
@@ -385,28 +420,39 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
         logger.info("Metrics CSV columns: %s", columns)
 
         for row in reader:
-            # BoltzGen CSV column names may vary; handle common patterns
+            # Design name: try several column names
             design_name = (
                 row.get("design_name")
                 or row.get("design")
                 or row.get("name")
-                or row.get("file", "unknown")
+                or row.get("file")
+                or row.get("sample")
+                or "unknown"
             )
             # Strip path prefix and extension if present
             design_name = Path(design_name).stem
 
             scores = {}
-            for key in ["refolding_rmsd", "rmsd", "RMSD"]:
+
+            # Refolding RMSD
+            for key in ["refolding_rmsd", "rmsd", "RMSD", "bb_rmsd",
+                        "design_rmsd", "ca_rmsd"]:
                 if key in row and row[key]:
-                    scores["refolding_rmsd"] = float(row[key])
+                    scores["refolding_rmsd"] = _safe_float(row[key], 99.0)
                     break
-            for key in ["ipTM", "iptm", "iPTM"]:
+
+            # ipTM
+            for key in ["ipTM", "iptm", "iPTM", "interface_ptm",
+                        "iptm_score"]:
                 if key in row and row[key]:
-                    scores["ipTM"] = float(row[key])
+                    scores["ipTM"] = _safe_float(row[key], 0.0)
                     break
-            for key in ["pLDDT", "plddt", "mean_plddt"]:
+
+            # pLDDT
+            for key in ["pLDDT", "plddt", "mean_plddt", "binder_plddt",
+                        "avg_plddt"]:
                 if key in row and row[key]:
-                    scores["pLDDT"] = float(row[key])
+                    scores["pLDDT"] = _safe_float(row[key], 0.0)
                     break
 
             results.append({
@@ -419,14 +465,7 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
 
 
 def filter_and_rank(designs: list[dict]) -> list[dict]:
-    """Filter designs by quality thresholds and rank by ipTM.
-
-    Args:
-        designs: List of design dicts with scores.
-
-    Returns:
-        Filtered and ranked list of designs.
-    """
+    """Filter designs by quality thresholds and rank by ipTM."""
     passing = []
     for design in designs:
         scores = design["scores"]
@@ -448,13 +487,32 @@ def filter_and_rank(designs: list[dict]) -> list[dict]:
     return passing
 
 
-def write_output_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
-    """Write a standardized metrics CSV for upload to Kendrew.
+def check_ubiquitin_risk(design_files: list[str]) -> list[str]:
+    """Check for designs in the 73-76 amino acid range (ubiquitin-like).
 
-    Args:
-        csv_path: Destination path for the CSV.
-        candidates: Ranked list of candidate dicts.
+    BoltzGen can produce designs that resemble ubiquitin in this length range.
+    Returns a list of warning strings for any suspicious designs.
     """
+    warnings = []
+    for fpath in design_files:
+        try:
+            import gemmi
+            structure = gemmi.read_structure(fpath)
+            for model in structure:
+                for chain in model:
+                    n_res = sum(1 for _ in chain)
+                    if 73 <= n_res <= 76:
+                        warnings.append(
+                            f"{Path(fpath).name} chain {chain.name}: {n_res} residues "
+                            f"(ubiquitin-like length — BLAST-check recommended)"
+                        )
+        except Exception:
+            continue
+    return warnings
+
+
+def write_output_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
+    """Write a standardized metrics CSV for upload to Kendrew."""
     with open(csv_path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([
@@ -476,8 +534,7 @@ def write_output_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
 # ===========================================================================
 
 def main():
-    """Run the BoltzGen pipeline: download -> design -> parse -> upload -> webhook."""
-    validate_env_vars()
+    """Run the BoltzGen pipeline: download -> CIF convert -> design -> parse -> upload -> webhook."""
     startup_check()
 
     # Read configuration from environment
@@ -486,6 +543,10 @@ def main():
     job_id = os.environ.get("JOB_ID", "unknown")
     job_token = os.environ.get("JOB_TOKEN", "")
     pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
+
+    if not job_payload_str:
+        logger.error("JOB_PAYLOAD environment variable not set")
+        sys.exit(1)
 
     job_payload = json.loads(job_payload_str)
     job_spec = job_payload["job_spec"]
@@ -496,26 +557,49 @@ def main():
     params = job_spec.get("parameters", {})
     yaml_spec = params.get("yaml_spec", {})
     protocol = params.get("protocol", "protein-anything")
-    num_designs = params.get("num_designs", 10)
-    budget = params.get("budget", 1000)
+    num_designs = params.get("num_designs", 10000)
+    budget = params.get("budget", 60)
+
+    if not yaml_spec.get("entities"):
+        logger.error("yaml_spec must contain at least one entity")
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": "Invalid yaml_spec: no entities defined",
+        })
+        sys.exit(1)
 
     pipeline_start = time.time()
     work_dir = tempfile.mkdtemp(prefix="boltzgen_job_")
     output_dir = os.path.join(work_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
 
-    target_pdb = os.path.join(work_dir, "target.pdb")
+    # Determine input file extension from URL or default to .pdb
+    input_ext = ".pdb"
+    input_url_path = urlparse(input_url).path
+    if input_url_path.endswith(".cif"):
+        input_ext = ".cif"
+    target_input = os.path.join(work_dir, f"target_input{input_ext}")
 
     try:
-        # ----- Download input PDB -----
-        send_heartbeat(webhook_url, job_id, "Downloading input", 0, num_designs)
-        download_input(input_url, target_pdb)
+        # ----- Stage 1: Download input -----
+        send_heartbeat(webhook_url, job_id, "Downloading input", 0, budget)
+        download_input(input_url, target_input)
 
-        # ----- Write YAML spec -----
-        spec_path = write_yaml_spec(yaml_spec, target_pdb, work_dir)
+        # ----- Stage 2: Convert to CIF and re-index -----
+        send_heartbeat(webhook_url, job_id, "Preparing CIF", 0, budget)
+        try:
+            target_cif = ensure_cif(target_input, work_dir)
+        except Exception as exc:
+            logger.error("CIF conversion failed: %s", exc)
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": f"CIF conversion failed: {exc}",
+            })
+            return
 
-        # ----- Run BoltzGen -----
-        send_heartbeat(webhook_url, job_id, "Running BoltzGen", 0, num_designs)
+        # ----- Stage 3: Write YAML spec -----
+        spec_path = write_yaml_spec(yaml_spec, target_cif, work_dir)
+
+        # ----- Stage 4: Run BoltzGen -----
+        send_heartbeat(webhook_url, job_id, "Running BoltzGen", 0, budget)
         logger.info("=== Running BoltzGen design ===")
 
         cmd = [
@@ -524,10 +608,14 @@ def main():
             "--protocol", protocol,
             "--num_designs", str(num_designs),
             "--budget", str(budget),
+            "--cache", BOLTZGEN_CACHE,
+            "--devices", "1",
         ]
 
+        # Reserve 30 min for pre/post-processing; rest for BoltzGen
+        boltzgen_timeout = max(6600, 7200 - 1800)
         try:
-            run_command(cmd, timeout=7200, cwd=work_dir)
+            run_command(cmd, timeout=boltzgen_timeout, cwd=work_dir)
         except RuntimeError as exc:
             logger.error("BoltzGen failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
@@ -535,15 +623,15 @@ def main():
             })
             return
 
-        send_heartbeat(webhook_url, job_id, "BoltzGen complete", num_designs, num_designs)
+        send_heartbeat(webhook_url, job_id, "BoltzGen complete", budget, budget)
 
-        # ----- List output contents for debugging -----
+        # ----- Log output tree for debugging -----
         for root, dirs, files in os.walk(output_dir):
             rel_root = os.path.relpath(root, output_dir)
             for fname in files:
                 logger.info("Output file: %s/%s", rel_root, fname)
 
-        # ----- Parse metrics CSV -----
+        # ----- Stage 5: Parse metrics CSV -----
         logger.info("=== Parsing BoltzGen output ===")
         metrics_csv_path = find_metrics_csv(output_dir)
         if not metrics_csv_path:
@@ -565,13 +653,17 @@ def main():
 
         # ----- Filter and rank -----
         passing = filter_and_rank(all_designs)
-        design_files = find_design_files(output_dir)
+        design_files = find_design_files(output_dir, budget)
 
-        # Build a lookup from design name to file path
+        # Build a lookup from design name stem to file path
         design_file_map = {}
         for fpath in design_files:
             stem = Path(fpath).stem
             design_file_map[stem] = fpath
+            # Also map without common prefixes/suffixes for fuzzy matching
+            for prefix in ["design_", "ranked_", "sample_"]:
+                if stem.startswith(prefix):
+                    design_file_map[stem[len(prefix):]] = fpath
 
         # ----- Prepare upload list -----
         candidates = []
@@ -580,16 +672,24 @@ def main():
         for rank_idx, design in enumerate(passing):
             rank = rank_idx + 1
             design_name = design["design_name"]
+
+            # Try exact match, then fuzzy match
             design_file = design_file_map.get(design_name)
+            if not design_file:
+                # Try matching just the numeric suffix
+                for key, fpath in design_file_map.items():
+                    if design_name in key or key in design_name:
+                        design_file = fpath
+                        break
 
             if not design_file:
                 logger.warning(
-                    "No structure file found for design %s, skipping upload",
-                    design_name,
+                    "No structure file found for design %s (available: %s), skipping",
+                    design_name, list(design_file_map.keys())[:10],
                 )
                 continue
 
-            ext = Path(design_file).suffix  # .pdb or .cif
+            ext = Path(design_file).suffix  # .cif or .pdb
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
 
@@ -620,6 +720,7 @@ def main():
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
 
+        failed_uploads = []
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate["local_file"]
@@ -630,6 +731,7 @@ def main():
                     logger.warning(
                         "Failed to upload %s: %s", upload_filename, exc,
                     )
+                    failed_uploads.append(upload_filename)
 
         # ----- Upload metrics CSV -----
         if candidates:
@@ -647,7 +749,27 @@ def main():
             len(candidates), elapsed_minutes,
         )
 
+        # ----- Check for ubiquitin-risk designs -----
+        ubi_warnings = check_ubiquitin_risk(
+            [c["local_file"] for c in candidates if os.path.exists(c["local_file"])]
+        )
+        if ubi_warnings:
+            logger.warning("Ubiquitin-risk designs detected: %s", ubi_warnings)
+
         # ----- POST results to webhook -----
+        next_steps = (
+            "Recommend experimental validation: SPR or BLI binding assay "
+            "for top candidates, followed by counter-screen for specificity. "
+            "Consider yeast display library construction for affinity maturation "
+            "of the best hits."
+        )
+        if ubi_warnings:
+            next_steps += (
+                " WARNING: Some designs are in the 73-76 aa range and may "
+                "resemble ubiquitin. BLAST-check these candidates before "
+                "proceeding: " + "; ".join(ubi_warnings)
+            )
+
         result_payload = {
             "candidates": [
                 {
@@ -662,15 +784,18 @@ def main():
             "boltzgen_scored": len(all_designs),
             "passing_filters": len(passing),
             "runtime_minutes": round(elapsed_minutes, 1),
-            "next_steps": (
-                "Recommend experimental validation: SPR or BLI binding assay "
-                "for top candidates, followed by counter-screen for specificity. "
-                "Consider yeast display library construction for affinity maturation "
-                "of the best hits."
-            ),
+            "next_steps": next_steps,
         }
+        if failed_uploads:
+            result_payload["failed_uploads"] = failed_uploads
+
         post_webhook(webhook_url, job_id, pod_id, result_payload)
 
+    except KeyError as exc:
+        logger.error("Missing required key in job payload: %s", exc)
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Missing required key in job payload: {exc}",
+        })
     except Exception as exc:
         logger.exception("Unhandled pipeline error: %s", exc)
         post_webhook(webhook_url, job_id, pod_id, {
