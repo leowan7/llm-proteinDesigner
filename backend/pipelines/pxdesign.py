@@ -14,7 +14,8 @@ The handler determines chain length from the CIF and fills crop accordingly.
 
 Expected runtime (A100-80GB, PD-L1 IgV target):
   - smoke (N=1, basic):       ~8-12 min (JAX JIT + sampling + AF2 IG)
-  - mini_pilot (N=2, basic):  ~12-18 min
+  - mini_pilot (N=1, basic):  ~30-40 min (PXDesign-specific exception, see
+                               docs/SMOKE-TEST-SPEC.md Per-tool exceptions)
   - pilot (N=2, basic):       ~12-18 min
 """
 
@@ -53,13 +54,18 @@ class PXDesignPipeline(ToolPipeline):
         }
 
     def mini_pilot_preset(self) -> dict:
-        """Mini-pilot: N=2, basic preset, full post-scoring.
+        """Mini-pilot: N=1, basic preset, full post-scoring.
 
-        Final success gate — every candidate must have real (non-zero, non-NaN)
+        Final success gate — the candidate must have real (non-zero, non-NaN)
         scores. Used by docker/pxdesign/run_pipeline.py when tier == "mini_pilot".
+
+        NOTE: PXDesign mini_pilot uses N=1 (not N=2 like other tools) because
+        each design takes ~35 GPU-min due to AF2-IG validation. One candidate
+        with real scores is sufficient pipeline-end-to-end evidence. See
+        docs/SMOKE-TEST-SPEC.md "Per-tool exceptions" for rationale.
         """
         return {
-            "num_designs": 2,
+            "num_designs": 1,
             "preset": "preview",
             "post_filter": True,
             "binder_length": 80,

@@ -5,7 +5,9 @@ Supports three execution tiers (see docs/SMOKE-TEST-SPEC.md):
 
   * tier == "smoke"       -> N=1 basic mode, no post-filter.
                               Writes results inline to /tmp/smoke_results.json.
-  * tier == "mini_pilot"  -> N=2 basic mode, full scoring.
+  * tier == "mini_pilot"  -> N=1 basic mode, full scoring (PXDesign-specific
+                              exception; other tools use N=2). See
+                              docs/SMOKE-TEST-SPEC.md "Per-tool exceptions".
                               Writes results inline to /tmp/smoke_results.json.
   * default (webhook)     -> legacy RunPod pilot path: presigned I/O + webhook.
 
@@ -78,9 +80,15 @@ def smoke_preset() -> dict:
 
 
 def mini_pilot_preset() -> dict:
-    """N=2, no-MSA (``preview``) mode, full post-scoring. Final success gate."""
+    """N=1, no-MSA (``preview``) mode, full post-scoring. Final success gate.
+
+    PXDesign-specific exception: other tools use N=2, but each PXDesign design
+    takes ~35 GPU-min due to AF2-IG validation. N=1 with real ipTM/pLDDT/pAE
+    is sufficient pipeline-end-to-end evidence. Real pilots use pilot_preset
+    (unchanged, N>=2). See docs/SMOKE-TEST-SPEC.md "Per-tool exceptions".
+    """
     return {
-        "num_designs": 2,
+        "num_designs": 1,
         "preset": "preview",
         "post_filter": True,
         "binder_length": 80,
