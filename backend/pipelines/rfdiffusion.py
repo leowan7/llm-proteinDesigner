@@ -16,8 +16,12 @@ class RFdiffusionPipeline(ToolPipeline):
 
     @property
     def gpu_sku(self) -> str:
-        """RFdiffusion fits in 24GB (A10G)."""
-        return "A10G-24GB"
+        """AF2 multimer validation needs A100-40GB for tractable runtime;
+        RFdiffusion + ProteinMPNN themselves fit on A10G but multimer
+        inference at ~180 residues is memory-bandwidth bound and ~2-3x
+        faster on A100. Must match infrastructure/modal/rfdiffusion_app.py.
+        """
+        return "A100-40GB"
 
     def pilot_preset(self) -> dict:
         """Pilot: 2 designs — minimal validation that RFdiffusion + MPNN + AF2

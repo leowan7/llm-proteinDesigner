@@ -347,7 +347,7 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
         try:
             af2_results = stage_af2_validation(
                 designed_fastas, target_pdb, target_chain, af2_output,
-                webhook_url="", job_id="",
+                webhook_url="", job_id="", tier=tier,
             )
         except RuntimeError as exc:
             return {
@@ -947,6 +947,7 @@ def stage_af2_validation(
     output_dir: str,
     webhook_url: str = "",
     job_id: str = "",
+    tier: str = "",
 ) -> list[dict]:
     """Stage 3: AF2 multimer validation of designed binder-target complexes."""
     logger.info("=== Stage 3: AF2 multimer validation ===")
@@ -1013,6 +1014,18 @@ def stage_af2_validation(
                 "--num-models", "1",
                 "--rank", "iptm",
             ]
+            # Smoke/mini_pilot: cut recycles hard + allow early-exit once
+            # a reasonable ipTM is reached. Legacy production tier keeps
+            # the default 3 recycles, 5 models (see pilot_preset()).
+            if tier in ("smoke", "mini_pilot"):
+                # Replace --num-recycle 3 with --num-recycle 1 and append
+                # early-stop flags. We know the list shape above.
+                recycle_idx = cmd.index("--num-recycle")
+                cmd[recycle_idx + 1] = "1"
+                cmd += [
+                    "--stop-at-score", "85",
+                    "--recycle-early-stop-tolerance", "0.5",
+                ]
             # colabfold_batch for a 280+ residue multimer on A10G runs 15-25 min
             # and emits nothing to stdout until done. Without a background
             # heartbeat the stale-detection cron (STALE_HEARTBEAT_SECONDS,
