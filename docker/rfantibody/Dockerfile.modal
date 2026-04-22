@@ -1,0 +1,86 @@
+# Modal variant of docker/rfantibody/Dockerfile.
+# Diff vs production:
+#   - `wget` kept in system deps because the upstream RFantibody repo's
+#     `include/download_weights.sh` uses wget internally to fetch RF2_ab.pt etc.
+#   - No COPY run_pipeline.py; no CMD; no WORKDIR /opt.
+#   - The PD-L1 smoke-test fixture is injected at image-assembly time by the
+#     Modal wrapper (infrastructure/modal/rfantibody_app.py) via
+#     `.add_local_file(..., copy=True)`, NOT via a Dockerfile COPY. Reason:
+#     `modal.Image.from_dockerfile` uses this file's directory as the build
+#     context, so repo-root paths like `backend/tests/fixtures/...` aren't
+#     visible to COPY. See docs/SMOKE-TEST-SPEC.md.
+# Based on the official RFantibody Dockerfile (CUDA 11.8 devel image needed for
+# SE3-Transformer + DeepSpeed CUDA kernel compilation).
+FROM nvidia/cuda:11.8.0-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    RFANTIBODY_DIR=/opt/rfantibody \
+    WEIGHTS_DIR=/opt/rfantibody/weights
+
+# ---------- System deps ----------
+# wget is required by upstream RFantibody's include/download_weights.sh.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget git cmake python3-pip python3-dev build-essential \
+    libhdf5-dev && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- uv package manager ----------
+RUN curl -LsSf --retry 5 --retry-delay 10 https://astral.sh/uv/install.sh | sh && \
+    ln -sf /root/.local/bin/uv /usr/local/bin/uv
+
+# ---------- Clone RFantibody ----------
+RUN git clone --depth 1 https://github.com/RosettaCommons/RFantibody.git $RFANTIBODY_DIR
+
+# ---------- Install via uv sync (registers CLI entry points) ----------
+RUN cd $RFANTIBODY_DIR && \
+    uv sync && \
+    echo "=== Verifying CLI entry points ===" && \
+    .venv/bin/rfdiffusion --help > /dev/null 2>&1 && echo "rfdiffusion OK" && \
+    .venv/bin/proteinmpnn --help > /dev/null 2>&1 && echo "proteinmpnn OK" && \
+    .venv/bin/rf2 --help > /dev/null 2>&1 && echo "rf2 OK" && \
+    echo "All CLI tools verified"
+
+ENV PATH="$RFANTIBODY_DIR/.venv/bin:$PATH"
+
+# ---------- Download model weights (~10 GB) ----------
+RUN cd $RFANTIBODY_DIR && \
+    bash include/download_weights.sh && \
+    echo "=== Weight validation ===" && \
+    test -f weights/RF2_ab.pt && echo "RF2_ab.pt OK" && \
+    ls -lh weights/ && \
+    echo "Weight download complete"
+
+# ---------- Validate bundled framework PDBs ----------
+RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
+    echo "VHH framework OK" && \
+    test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/hu-4D5-8_Fv.pdb && \
+    echo "scFv framework OK"
+
+# ---------- Pipeline utilities ----------
+RUN pip install --no-cache-dir requests
+
+# ---------- Layer 1 fail-fast build-time checks ----------
+# Any failure here fails `modal deploy` before GPU is spent on a broken image.
+# See docs/SMOKE-TEST-SPEC.md "Layer 1".
+#
+# Note: the smoke-target fixture existence check is intentionally NOT here.
+# The fixture is injected by `.add_local_file(..., copy=True)` in the Modal
+# wrapper AFTER this Dockerfile finishes building, so it does not exist at
+# this point. The Layer-2 preflight in run_pipeline.py catches a missing
+# fixture at runtime.
+RUN echo "=== Layer 1 fail-fast checks ===" && \
+    test -f $WEIGHTS_DIR/RF2_ab.pt && echo "RF2_ab.pt present" && \
+    test -f $WEIGHTS_DIR/RFdiffusion_Ab.pt && echo "RFdiffusion_Ab.pt present" && \
+    test -f $WEIGHTS_DIR/ProteinMPNN_v48_noise_0.2.pt && echo "ProteinMPNN weights present" && \
+    which rfdiffusion && rfdiffusion --help > /dev/null && echo "rfdiffusion CLI OK" && \
+    which proteinmpnn && proteinmpnn --help > /dev/null && echo "proteinmpnn CLI OK" && \
+    which rf2 && rf2 --help > /dev/null && echo "rf2 CLI OK" && \
+    which qvscorefile && qvscorefile --help > /dev/null && echo "qvscorefile CLI OK" && \
+    which qvextract && qvextract --help > /dev/null && echo "qvextract CLI OK" && \
+    python -c "import torch; assert torch.__version__.startswith(('2.3', '2.4')), torch.__version__; print('torch', torch.__version__)" && \
+    python -c "import rfantibody; print('rfantibody import OK')" && \
+    echo "=== All Layer 1 checks passed ==="
+
+# NOTE: no COPY run_pipeline.py or CMD — Modal invokes @app.function bodies.
