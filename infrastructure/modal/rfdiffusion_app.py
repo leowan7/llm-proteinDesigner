@@ -68,8 +68,22 @@ image = (
 
 app = modal.App(f"kendrew-{_TOOL}-prod")
 
+# Persistent XLA/JAX compilation cache. The first mini_pilot run populates
+# ~/.cache/jax with compiled HLO for the AF2 multimer_v3 model (~10-15 min
+# cold JIT); subsequent runs reuse the cache and complete in ~5-8 GPU-min.
+# See docs/blocker-rfdiffusion.md for root-cause analysis.
+xla_cache_volume = modal.Volume.from_name(
+    "kendrew-rfdiffusion-xla-cache",
+    create_if_missing=True,
+)
 
-@app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)
+
+@app.function(
+    image=image,
+    gpu=_GPU,
+    timeout=_MAX_SESSION_S,
+    volumes={"/root/.cache/jax": xla_cache_volume},
+)
 def run_tool(payload: dict) -> dict:
     """Run one RFdiffusion session.
 
@@ -93,6 +107,14 @@ def run_tool(payload: dict) -> dict:
     )
 
     print(f"[run_tool] subprocess exited: {result.returncode}", flush=True)
+
+    # Persist any new XLA cache entries produced by this run so the next
+    # cold container can reuse them.
+    try:
+        xla_cache_volume.commit()
+        print("[run_tool] xla cache volume committed", flush=True)
+    except Exception as exc:
+        print(f"[run_tool] xla cache commit failed (non-fatal): {exc}", flush=True)
 
     # Smoke/mini_pilot tier: read inline results from /tmp/smoke_results.json.
     # See docs/SMOKE-TEST-SPEC.md.

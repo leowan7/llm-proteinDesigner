@@ -203,6 +203,23 @@ def preflight(payload: dict) -> None:
         logger.error("Preflight: /tmp not writable: %s", exc)
         sys.exit(1)
 
+    # 6. JAX persistent-cache visibility. We mount a Modal Volume at
+    #    /root/.cache/jax so the 10-15 min XLA compile for AF2 multimer_v3
+    #    only happens once. Log cache state so cold-vs-warm behaviour is
+    #    obvious from the first few lines of the run log.
+    jax_cache_dir = Path("/root/.cache/jax")
+    try:
+        jax_cache_dir.mkdir(parents=True, exist_ok=True)
+        n_cached = sum(1 for p in jax_cache_dir.rglob("*") if p.is_file())
+        logger.info("JAX persistent cache: %d files at %s", n_cached, jax_cache_dir)
+        if n_cached == 0 and tier == "mini_pilot":
+            logger.warning(
+                "JAX cache cold — first AF2 run may take 10-15 min for XLA "
+                "compile. Subsequent runs will reuse the Volume-backed cache."
+            )
+    except OSError as exc:
+        logger.warning("Could not inspect JAX cache dir: %s", exc)
+
     logger.info("Preflight: OK (tier=%s)", tier)
 
 
@@ -612,11 +629,23 @@ def upload_output(url: str, file_path: str) -> None:
     logger.info("Uploaded %s (%d bytes)", file_path, len(data))
 
 
-def run_command(cmd: list[str], timeout: int = 3600, cwd: str | None = None) -> str:
+def run_command(
+    cmd: list[str],
+    timeout: int = 3600,
+    cwd: str | None = None,
+    env: dict | None = None,
+) -> str:
     """Run a subprocess command with timeout and logging."""
     logger.info("Running: %s", " ".join(cmd[:6]) + ("..." if len(cmd) > 6 else ""))
     start = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        env=env,
+    )
     elapsed = time.time() - start
     logger.info("Command finished in %.1fs (exit code %d)", elapsed, result.returncode)
     if result.returncode != 0:
@@ -940,6 +969,26 @@ def _extract_target_sequence(pdb_path: str, chain_id: str) -> str | None:
         return None
 
 
+def _af2_env_with_jax_cache() -> dict:
+    """Return an env dict with JAX persistent cache enabled for AF2 subprocess.
+
+    ColabFold drives JAX, and JAX's persistent compilation cache is controlled
+    by env vars. The Modal function mounts a named Volume at /root/.cache/jax
+    so compiled HLO survives container eviction. First cold run populates the
+    cache (~10-15 min XLA compile for AF2 multimer_v3); subsequent runs reuse
+    the compiled graph and skip the JIT step.
+
+    See infrastructure/modal/rfdiffusion_app.py::xla_cache_volume.
+    """
+    cache_dir = "/root/.cache/jax"
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["JAX_COMPILATION_CACHE_DIR"] = cache_dir
+    env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
+    env["JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES"] = "0"
+    return env
+
+
 def stage_af2_validation(
     designed_fastas: list[str],
     target_pdb: str,
@@ -954,6 +1003,17 @@ def stage_af2_validation(
     os.makedirs(output_dir, exist_ok=True)
     if webhook_url and job_id:
         send_heartbeat(webhook_url, job_id, "Running AF2 validation", 0, len(designed_fastas))
+
+    # Log JAX persistent cache state for visibility. Cold cache implies
+    # the first AF2 run will pay the 10-15 min XLA compile cost.
+    cache_dir = Path("/root/.cache/jax")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    n_cached = sum(1 for p in cache_dir.rglob("*") if p.is_file())
+    logger.info("JAX persistent cache: %d files at %s", n_cached, cache_dir)
+    if n_cached == 0:
+        logger.warning(
+            "JAX cache cold — first AF2 run may take 10-15 min for XLA compile"
+        )
 
     target_sequence = _extract_target_sequence(target_pdb, target_chain)
     if not target_sequence:
@@ -1042,7 +1102,11 @@ def stage_af2_validation(
                 # and on A10G A100 multimer can take >30 min for a 272-residue
                 # complex. 60 min timeout gives enough headroom for the first
                 # design; subsequent designs reuse cached weights and are fast.
-                af2_output_text = run_command(cmd, timeout=3600)
+                # Pass JAX persistent-cache env so compiled HLO is written to
+                # the Modal Volume-backed /root/.cache/jax directory.
+                af2_output_text = run_command(
+                    cmd, timeout=3600, env=_af2_env_with_jax_cache(),
+                )
             logger.info("ColabFold output for %s:\n%s", design_name, af2_output_text[-2000:])
 
             # List what ColabFold actually produced
