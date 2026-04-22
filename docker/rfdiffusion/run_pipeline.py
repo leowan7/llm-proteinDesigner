@@ -17,6 +17,7 @@ Pipeline stages:
   3. AF2 multimer -- validate binder-target complex, extract ipTM/pLDDT/i_pAE
 """
 
+import base64
 import csv
 import datetime
 import json
@@ -31,6 +32,16 @@ from glob import glob
 from pathlib import Path
 
 import requests
+
+# ---------------------------------------------------------------------------
+# Smoke/mini_pilot constants — see docs/SMOKE-TEST-SPEC.md
+# ---------------------------------------------------------------------------
+SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
+SMOKE_TARGET_PDB = "/opt/smoke_target.pdb"  # Baked into the Docker image.
+SMOKE_TARGET_CHAIN = "A"
+# Reasonable PD-1 binding interface residues on PD-L1 chain A.
+# (Residues ~54, 56, 115, 123 sit on the IgV sheet that contacts PD-1.)
+SMOKE_HOTSPOTS = [54, 56, 115, 123]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +98,325 @@ def download_af2_weights():
         logger.error("AF2 weight download failed: %s", exc)
         raise RuntimeError(f"Failed to download AF2 weights: {exc}")
 
+
+# ===========================================================================
+# Smoke/mini_pilot — Layer 2 preflight + result serialization
+# ===========================================================================
+
+def _write_smoke_failure(bucket: str, check: str, detail: str) -> None:
+    """Write a structured preflight failure to SMOKE_RESULTS_PATH.
+
+    See docs/SMOKE-TEST-SPEC.md Layer 2 — the orchestrator reads this file
+    after the subprocess exits to classify the failure.
+    """
+    payload = {
+        "status": "FAILED",
+        "error": {"bucket": bucket, "check": check, "detail": detail[:2000]},
+    }
+    try:
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            json.dump(payload, fh)
+    except OSError as exc:
+        logger.error("Failed to write %s: %s", SMOKE_RESULTS_PATH, exc)
+
+
+def preflight(payload: dict) -> None:
+    """Fail-fast checks before any compute. ≤ 60 s on GPU.
+
+    On any failure writes a structured error to SMOKE_RESULTS_PATH and
+    calls sys.exit(1). See docs/SMOKE-TEST-SPEC.md section "Layer 2".
+    """
+    logger.info("=== Preflight ===")
+
+    # 1. Payload keys.
+    tier = payload.get("tier", "")
+    if tier not in ("smoke", "mini_pilot"):
+        # Legacy webhook mode — preflight is a no-op; main() handles it.
+        return
+    if "job_spec" not in payload:
+        _write_smoke_failure("preflight", "payload", "missing key: job_spec")
+        sys.exit(1)
+
+    # 2. Target PDB accessible. In smoke/mini_pilot we use the baked fixture.
+    if not os.path.isfile(SMOKE_TARGET_PDB):
+        _write_smoke_failure(
+            "preflight", "target_pdb",
+            f"baked smoke target not found at {SMOKE_TARGET_PDB}",
+        )
+        sys.exit(1)
+
+    # 3. GPU available.
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            _write_smoke_failure(
+                "preflight", "gpu",
+                "torch.cuda.is_available() is False",
+            )
+            sys.exit(1)
+        logger.info("GPU: %s", torch.cuda.get_device_name(0))
+    except Exception as exc:
+        _write_smoke_failure("preflight", "torch_import", str(exc))
+        sys.exit(1)
+
+    # 4. Every CLI we will call responds.
+    #    - python3 runs (trivially — we're running in it).
+    #    - colabfold_batch --help exits 0 (only needed when skip_af2=False,
+    #      but cheap to check always).
+    try:
+        result = subprocess.run(
+            ["colabfold_batch", "--help"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            _write_smoke_failure(
+                "preflight", "colabfold_batch --help",
+                f"exit={result.returncode} stderr={result.stderr[-500:]}",
+            )
+            sys.exit(1)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        _write_smoke_failure("preflight", "colabfold_batch", str(exc))
+        sys.exit(1)
+
+    # RFdiffusion's run_inference.py is Hydra-driven and doesn't have a
+    # fast --help (it spins up the whole config stack). Assert the script
+    # file exists instead.
+    if not os.path.isfile(RFDIFFUSION_SCRIPT):
+        _write_smoke_failure(
+            "preflight", "rfdiffusion_script",
+            f"not found at {RFDIFFUSION_SCRIPT}",
+        )
+        sys.exit(1)
+    if not os.path.isfile(PROTEINMPNN_SCRIPT):
+        _write_smoke_failure(
+            "preflight", "proteinmpnn_script",
+            f"not found at {PROTEINMPNN_SCRIPT}",
+        )
+        sys.exit(1)
+
+    # 5. /tmp/smoke_results.json is writable.
+    try:
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            fh.write("{}")
+    except OSError as exc:
+        # Can't use _write_smoke_failure since writing is what failed.
+        logger.error("Preflight: /tmp not writable: %s", exc)
+        sys.exit(1)
+
+    logger.info("Preflight: OK (tier=%s)", tier)
+
+
+def _build_smoke_job_spec(tier: str) -> dict:
+    """Build a job_spec dict for smoke/mini_pilot runs.
+
+    Mirrors backend/pipelines/rfdiffusion.py::smoke_preset / mini_pilot_preset.
+    Kept in sync manually because this script ships inside the Docker image
+    and can't import from the backend package.
+    """
+    if tier == "smoke":
+        parameters = {
+            "num_designs": 1,
+            "diffusion_steps": 50,
+            "skip_af2": True,
+            "binder_length": {"min": 55, "max": 65},
+        }
+    elif tier == "mini_pilot":
+        parameters = {
+            "num_designs": 2,
+            "diffusion_steps": 50,
+            "skip_af2": False,
+            "binder_length": {"min": 55, "max": 65},
+        }
+    else:
+        raise ValueError(f"Unknown tier: {tier}")
+
+    return {
+        "tool": "rfdiffusion",
+        "target_chain": SMOKE_TARGET_CHAIN,
+        "hotspot_residues": SMOKE_HOTSPOTS,
+        "parameters": parameters,
+    }
+
+
+def _stub_af2_scores(rank: int) -> dict:
+    """Return deterministic plausible-looking scores for smoke tier.
+
+    Marked filter_status='stub' so downstream code can tell these apart
+    from real AF2 output.
+    """
+    return {
+        "ipTM": round(0.45 + 0.01 * rank, 4),
+        "pLDDT": round(70.0 + rank, 2),
+        "i_pAE": round(12.0 - 0.1 * rank, 2),
+        "filter_status": "stub (smoke)",
+    }
+
+
+def _encode_pdb(pdb_path: str) -> str:
+    """Return base64 of the PDB bytes, per SMOKE-TEST-SPEC.md Layer 3."""
+    return base64.b64encode(Path(pdb_path).read_bytes()).decode()
+
+
+def _build_smoke_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
+    """Like build_hydra_args but adds diffuser.T override for smoke speed."""
+    args = build_hydra_args(job_spec, target_pdb_path)
+    steps = job_spec.get("parameters", {}).get("diffusion_steps")
+    if steps:
+        # RFdiffusion's diffusion step-count is ``diffuser.T`` in its Hydra config.
+        args.append(f"diffuser.T={int(steps)}")
+    return args
+
+
+def run_smoke_tier(tier: str, work_dir: str) -> dict:
+    """Execute the RFdiffusion -> ProteinMPNN (-> AF2) pipeline for smoke/mini_pilot.
+
+    Returns a dict shaped per SMOKE-TEST-SPEC.md Layer 3 "output shape".
+    """
+    start = time.time()
+    job_spec = _build_smoke_job_spec(tier)
+    params = job_spec["parameters"]
+    skip_af2 = bool(params.get("skip_af2", False))
+    num_designs = int(params.get("num_designs", 1))
+    target_chain = job_spec["target_chain"]
+
+    # Copy baked fixture into work dir so RFdiffusion can write adjacent.
+    target_pdb = os.path.join(work_dir, "target.pdb")
+    shutil.copy(SMOKE_TARGET_PDB, target_pdb)
+
+    # ---- Stage 1: RFdiffusion ----
+    rfdiff_output = os.path.join(work_dir, "rfdiffusion_output")
+    os.makedirs(rfdiff_output, exist_ok=True)
+
+    hydra_args = _build_smoke_hydra_args(job_spec, target_pdb)
+    rfdiff_cmd = [
+        "python", RFDIFFUSION_SCRIPT,
+        f"inference.output_prefix={rfdiff_output}/design",
+        *hydra_args,
+    ]
+    try:
+        run_command(rfdiff_cmd, timeout=1800)
+    except RuntimeError as exc:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "tool-invocation", "check": "rfdiffusion",
+                      "detail": str(exc)[:2000]},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    backbone_pdbs = sorted(glob(os.path.join(rfdiff_output, "design_*.pdb")))
+    if not backbone_pdbs:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "output-parse", "check": "rfdiffusion",
+                      "detail": "no design_*.pdb emitted"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+    logger.info("RFdiffusion emitted %d backbone PDBs", len(backbone_pdbs))
+
+    # ---- Stage 2: ProteinMPNN ----
+    mpnn_output = os.path.join(work_dir, "mpnn_output")
+    try:
+        designed_fastas = stage_proteinmpnn(
+            backbone_pdbs, target_chain, mpnn_output,
+            webhook_url="", job_id="",
+        )
+    except RuntimeError as exc:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "tool-invocation", "check": "proteinmpnn",
+                      "detail": str(exc)[:2000]},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    # ---- Stage 3 (mini_pilot only): AF2 validation ----
+    af2_results: list[dict] = []
+    if skip_af2:
+        # Stub scoring per SMOKE-TEST-SPEC.md: smoke tier scores may be stubbed.
+        for idx, fasta_path in enumerate(designed_fastas):
+            design_name = Path(fasta_path).stem
+            af2_results.append({
+                "design_name": design_name,
+                "scores": _stub_af2_scores(idx + 1),
+                "fasta_path": fasta_path,
+            })
+    else:
+        af2_output = os.path.join(work_dir, "af2_output")
+        try:
+            af2_results = stage_af2_validation(
+                designed_fastas, target_pdb, target_chain, af2_output,
+                webhook_url="", job_id="",
+            )
+        except RuntimeError as exc:
+            return {
+                "status": "FAILED",
+                "error": {"bucket": "tool-invocation", "check": "af2",
+                          "detail": str(exc)[:2000]},
+                "tier": tier,
+                "gpu_seconds": int(time.time() - start),
+            }
+        if not af2_results:
+            return {
+                "status": "FAILED",
+                "error": {"bucket": "output-parse", "check": "af2",
+                          "detail": "zero AF2 results parsed"},
+                "tier": tier,
+                "gpu_seconds": int(time.time() - start),
+            }
+
+    # ---- Build candidates ----
+    # Rank by ipTM desc (matches production path). For smoke/stubs, ipTM
+    # grows with rank by construction, so we sort desc to keep behaviour
+    # identical.
+    af2_results.sort(key=lambda r: r["scores"].get("ipTM", 0.0), reverse=True)
+    af2_results = af2_results[:num_designs]
+
+    candidates = []
+    for rank_idx, r in enumerate(af2_results):
+        design_name = r["design_name"]
+        # Find the backbone PDB corresponding to this design (vanilla
+        # ProteinMPNN uses backbone name as stem in the fasta filename).
+        backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
+        if not os.path.exists(backbone_pdb) and backbone_pdbs:
+            # Fallback: just take the i-th backbone.
+            backbone_pdb = backbone_pdbs[min(rank_idx, len(backbone_pdbs) - 1)]
+        if not os.path.exists(backbone_pdb):
+            return {
+                "status": "FAILED",
+                "error": {"bucket": "output-parse", "check": "backbone_pdb",
+                          "detail": f"no PDB found for {design_name}"},
+                "tier": tier,
+                "gpu_seconds": int(time.time() - start),
+            }
+        candidates.append({
+            "rank": rank_idx + 1,
+            "pdb_key": f"design_{rank_idx + 1:03d}.pdb",
+            "pdb_content_b64": _encode_pdb(backbone_pdb),
+            "scores": r["scores"],
+        })
+
+    if len(candidates) < num_designs:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "output-parse", "check": "candidate_count",
+                      "detail": f"got {len(candidates)}, expected {num_designs}"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    return {
+        "status": "COMPLETED",
+        "output": {"candidates": candidates},
+        "tier": tier,
+        "gpu_seconds": int(time.time() - start),
+    }
+
+
+# ===========================================================================
+# Startup diagnostics
+# ===========================================================================
 
 def startup_check():
     """Log environment and dependency status at startup."""
@@ -161,6 +491,80 @@ def send_heartbeat(
         logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
     except Exception as exc:
         logger.warning("Heartbeat failed: %s", exc)
+
+
+class _HeartbeatThread:
+    """Background thread that emits heartbeats during long subprocess runs.
+
+    The subprocesses in this pipeline (RFdiffusion inference, ProteinMPNN,
+    and especially colabfold_batch AF2 prediction) can block Python for
+    10-25+ minutes with zero stdout. ``run_command`` uses
+    ``subprocess.run(capture_output=True)`` which means nothing streams
+    while the child is alive — so the backend's last_heartbeat_at never
+    updates and the stale-detection cron kills a perfectly healthy job.
+
+    Use as a context manager around each long-running subprocess:
+
+        with _HeartbeatThread(webhook_url, job_id, stage="..."):
+            run_command(cmd, timeout=1800)
+
+    The thread is a daemon so it cannot prevent process exit. See
+    cleanup.py:STALE_HEARTBEAT_SECONDS for the corresponding backend
+    threshold.
+    """
+
+    def __init__(
+        self,
+        webhook_url: str,
+        job_id: str,
+        stage: str,
+        designs_completed: int = 0,
+        designs_total: int = 0,
+        interval_seconds: int = 60,
+    ) -> None:
+        import threading
+        self._webhook_url = webhook_url
+        self._job_id = job_id
+        self._stage = stage
+        self._done = designs_completed
+        self._total = designs_total
+        self._interval = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        # Fire one immediately so the backend's last_heartbeat_at updates
+        # right away, then keep pinging every ``interval_seconds`` until
+        # stopped.
+        while not self._stop.is_set():
+            try:
+                send_heartbeat(
+                    self._webhook_url, self._job_id, self._stage,
+                    self._done, self._total,
+                )
+            except Exception as exc:
+                logger.warning("Background heartbeat emit failed: %s", exc)
+            # Sleep on the event so stop() returns promptly.
+            self._stop.wait(self._interval)
+
+    def start(self) -> None:
+        import threading
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="heartbeat",
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def __enter__(self) -> "_HeartbeatThread":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
 
 
 def download_input(url: str, dest_path: str) -> None:
@@ -398,7 +802,16 @@ def stage_rfdiffusion(
         f"inference.output_prefix={output_dir}/design",
         *hydra_args,
     ]
-    run_command(cmd, timeout=1800)
+    # RFdiffusion inference for 10 designs on A10G takes ~15 min with no
+    # stdout streamed (run_command captures output). Wrap in a heartbeat
+    # thread so the stale-detection cron doesn't kill a healthy job.
+    with _HeartbeatThread(
+        webhook_url, job_id,
+        stage="Running RFdiffusion",
+        designs_completed=0, designs_total=num_designs,
+        interval_seconds=60,
+    ):
+        run_command(cmd, timeout=1800)
 
     generated = sorted(glob(os.path.join(output_dir, "design_*.pdb")))
     logger.info("RFdiffusion generated %d backbone PDBs", len(generated))
@@ -455,7 +868,16 @@ def stage_proteinmpnn(
         "--batch_size", "1",
     ]
 
-    run_command(cmd, timeout=600, cwd="/opt/ProteinMPNN")
+    # ProteinMPNN is typically fast (~20-60s) but wrap defensively: large
+    # backbone batches or cold GPU init could push past 10 min with no
+    # streamed stdout.
+    with _HeartbeatThread(
+        webhook_url, job_id,
+        stage="Running ProteinMPNN",
+        designs_completed=0, designs_total=len(backbone_pdbs),
+        interval_seconds=60,
+    ):
+        run_command(cmd, timeout=600, cwd="/opt/ProteinMPNN")
 
     if webhook_url and job_id:
         send_heartbeat(webhook_url, job_id, "ProteinMPNN complete", len(backbone_pdbs), len(backbone_pdbs))
@@ -591,7 +1013,23 @@ def stage_af2_validation(
                 "--num-models", "1",
                 "--rank", "iptm",
             ]
-            af2_output_text = run_command(cmd, timeout=600)
+            # colabfold_batch for a 280+ residue multimer on A10G runs 15-25 min
+            # and emits nothing to stdout until done. Without a background
+            # heartbeat the stale-detection cron (STALE_HEARTBEAT_SECONDS,
+            # 30 min) kills the job. Update the stage string each iteration
+            # so the UI shows live per-design progress.
+            with _HeartbeatThread(
+                webhook_url, job_id,
+                stage=f"Running AF2 validation - {idx + 1}/{len(designed_fastas)} designs",
+                designs_completed=idx,
+                designs_total=len(designed_fastas),
+                interval_seconds=60,
+            ):
+                # colabfold_batch is slow on first call (weights load + JIT),
+                # and on A10G A100 multimer can take >30 min for a 272-residue
+                # complex. 60 min timeout gives enough headroom for the first
+                # design; subsequent designs reuse cached weights and are fast.
+                af2_output_text = run_command(cmd, timeout=3600)
             logger.info("ColabFold output for %s:\n%s", design_name, af2_output_text[-2000:])
 
             # List what ColabFold actually produced
@@ -642,19 +1080,50 @@ def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
 def main():
     """Run the full pipeline: download -> RFdiffusion -> MPNN -> AF2 -> upload -> webhook."""
     startup_check()
-    download_af2_weights()
 
     # Read configuration from environment
     job_payload_str = os.environ.get("JOB_PAYLOAD")
-    webhook_url = os.environ.get("WEBHOOK_URL", "")
-    job_id = os.environ.get("JOB_ID", "unknown")
-    pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
-
     if not job_payload_str:
         logger.error("JOB_PAYLOAD environment variable not set")
         sys.exit(1)
 
     job_payload = json.loads(job_payload_str)
+
+    # ---- Smoke / mini_pilot tier: bypass webhook+upload, write to
+    #      /tmp/smoke_results.json. See docs/SMOKE-TEST-SPEC.md. ----
+    tier = job_payload.get("tier", "")
+    if tier in ("smoke", "mini_pilot"):
+        preflight(job_payload)
+        # AF2 weights only needed for mini_pilot; for smoke we skip AF2.
+        if tier == "mini_pilot":
+            try:
+                download_af2_weights()
+            except Exception as exc:
+                _write_smoke_failure("preflight", "af2_weight_download", str(exc))
+                sys.exit(1)
+
+        work_dir = tempfile.mkdtemp(prefix="rfdiffusion_smoke_")
+        try:
+            result = run_smoke_tier(tier, work_dir)
+            with open(SMOKE_RESULTS_PATH, "w") as fh:
+                json.dump(result, fh)
+            logger.info(
+                "Smoke tier %s: status=%s gpu_seconds=%s",
+                tier, result.get("status"), result.get("gpu_seconds"),
+            )
+            if result.get("status") != "COMPLETED":
+                sys.exit(1)
+            return
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    # ---- Legacy webhook path ----
+    download_af2_weights()
+
+    webhook_url = os.environ.get("WEBHOOK_URL", "")
+    job_id = os.environ.get("JOB_ID", "unknown")
+    pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
+
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
@@ -733,6 +1202,25 @@ def main():
             len(passing), len(af2_results),
             IPTM_THRESHOLD, PLDDT_THRESHOLD, IPAE_THRESHOLD,
         )
+
+        # Pilot tier fallback: E2E pipeline validation must not be gated by
+        # design quality. A pilot with 2 random-target designs almost never
+        # passes IPTM>=0.70 AND pLDDT>=80 AND i_pAE<=10, which would leave
+        # `candidates=[]` and fail downstream E2E checks even though the
+        # pipeline worked end-to-end. Emit the top designs by ipTM regardless
+        # of quality, mark filter_status="fail (pilot fallback)" so callers
+        # can tell pilots apart from real runs.
+        if not passing and job_spec.get("job_tier") == "pilot" and af2_results:
+            af2_results.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+            passing = af2_results[:2]
+            for r in passing:
+                r["scores"]["filter_status"] = "fail (pilot fallback)"
+            logger.warning(
+                "No designs passed production thresholds; pilot fallback emitting "
+                "top %d by ipTM (all marked filter_status=fail) so validation "
+                "succeeds.",
+                len(passing),
+            )
 
         # ----- Upload outputs (on-demand URLs) -----
         candidates = []

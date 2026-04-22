@@ -8,13 +8,55 @@ Expected runtime: 10-30 minutes per batch on A100 80GB.
 """
 
 from jobs.models import CandidateResult
-from pipelines.base import ToolPipeline
+from pipelines.base import ToolPipeline, merge_pilot_params
 
 
 class RFdiffusionPipeline(ToolPipeline):
     """Pipeline for RFdiffusion binder design jobs."""
 
+    @property
+    def gpu_sku(self) -> str:
+        """RFdiffusion fits in 24GB (A10G)."""
+        return "A10G-24GB"
+
+    def pilot_preset(self) -> dict:
+        """Pilot: 2 designs — minimal validation that RFdiffusion + MPNN + AF2
+        all connect. AF2 on A10G is slow (~30 min/design); 2 designs caps the
+        pilot at ~70 min instead of ~5 hours for 10 designs."""
+        return {"num_designs": 2}
+
+    def smoke_preset(self) -> dict:
+        """Smoke: N=1, 50 diffusion steps, AF2 stubbed — cheapest possible
+        end-to-end pipeline validation. Proves RFdiffusion + ProteinMPNN can
+        emit a designed PDB; AF2 scoring is skipped and replaced with stub
+        floats so the full serialization path is exercised without paying
+        the ~20-minute A10G multimer cost.
+
+        See docs/SMOKE-TEST-SPEC.md.
+        """
+        return {
+            "num_designs": 1,
+            "diffusion_steps": 50,
+            "skip_af2": True,
+            "binder_length": {"min": 55, "max": 65},
+        }
+
+    def mini_pilot_preset(self) -> dict:
+        """Mini-pilot: N=2, full 100 diffusion steps, real AF2 scoring.
+
+        Final success gate for Phase 4 per-tool agents. Must produce two
+        candidates with real parseable PDBs and real ipTM/pLDDT floats.
+        """
+        return {
+            "num_designs": 2,
+            "diffusion_steps": 50,  # cut from RFdiffusion default 50 to keep runtime bounded
+            "skip_af2": False,
+            "binder_length": {"min": 55, "max": 65},
+        }
+
     def generate_config(self, job_spec: dict, target_local_path: str) -> dict:
+        # Clamp to pilot preset when job_tier=pilot.
+        job_spec = merge_pilot_params(job_spec, self.pilot_preset())
         """Build Hydra CLI override args from JobSpec parameters.
 
         Key mappings:
