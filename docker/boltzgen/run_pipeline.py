@@ -1,4 +1,4 @@
-"""Standalone pipeline script for BoltzGen on RunPod GPU Pods.
+"""Standalone pipeline script for BoltzGen on RunPod GPU Pods (and Modal).
 
 Reads job configuration from the JOB_PAYLOAD environment variable,
 runs BoltzGen protein binder design, uploads results via presigned URLs,
@@ -19,8 +19,14 @@ Pipeline stages:
   5. Parse output metrics CSV for ranked candidates
   6. Upload passing CIFs + metrics CSV
   7. POST results to webhook
+
+Smoke/mini_pilot path (see docs/SMOKE-TEST-SPEC.md):
+  When JOB_PAYLOAD contains tier="smoke" or "mini_pilot", we bypass the
+  webhook/upload path entirely. The baked /opt/smoke_target.pdb fixture is
+  used as the target and results are written to /tmp/smoke_results.json.
 """
 
+import base64
 import csv
 import datetime
 import json
@@ -30,6 +36,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -53,6 +60,47 @@ RMSD_THRESHOLD = 2.0  # refolding RMSD in angstroms
 
 # BoltzGen weight cache (baked into Docker image)
 BOLTZGEN_CACHE = os.environ.get("HF_HOME", "/opt/boltzgen_cache")
+
+# ---------------------------------------------------------------------------
+# Smoke/mini_pilot constants — see docs/SMOKE-TEST-SPEC.md
+# ---------------------------------------------------------------------------
+SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
+SMOKE_TARGET_PDB = "/opt/smoke_target.pdb"  # baked into the Docker image
+SMOKE_TARGET_CHAIN = "A"
+# Reasonable PD-1 binding interface residues on PD-L1 chain A (PD-1 contact
+# face of the IgV sheet). Note: the baked PDB uses author numbering 18..132,
+# but our CIF step re-indexes to 1..N. These residue numbers are specified
+# in the post-reindex (1-based) coordinate system:
+#   author 54 -> 54-18+1 = 37
+#   author 56 -> 39
+#   author 115 -> 98
+#   author 123 -> 106
+SMOKE_HOTSPOTS = [37, 39, 98, 106]
+
+
+# ---------------------------------------------------------------------------
+# Tier presets (mirrors backend/pipelines/boltzgen.py::smoke_preset /
+# mini_pilot_preset). Kept in sync manually because this script ships inside
+# the Docker image and can't import from the backend package.
+# ---------------------------------------------------------------------------
+def _smoke_params() -> dict:
+    """Smoke tier: 1 design, 1 budget, short binder. Proves pipeline runs."""
+    return {
+        "num_designs": 1,
+        "budget": 1,
+        "protocol": "protein-anything",
+        "binder_length": {"min": 30, "max": 40},
+    }
+
+
+def _mini_pilot_params() -> dict:
+    """Mini-pilot tier: 2 designs, budget 2, real scores."""
+    return {
+        "num_designs": 2,
+        "budget": 2,
+        "protocol": "protein-anything",
+        "binder_length": {"min": 50, "max": 70},
+    }
 
 
 # ===========================================================================
@@ -103,6 +151,360 @@ def startup_check() -> dict:
 
     logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
     return checks
+
+
+# ===========================================================================
+# Smoke/mini_pilot — Layer 2 preflight + result serialization
+# ===========================================================================
+
+def _write_smoke_failure(bucket: str, check: str, detail: str) -> None:
+    """Write a structured preflight/compute failure to SMOKE_RESULTS_PATH.
+
+    See docs/SMOKE-TEST-SPEC.md Layer 2 — the orchestrator reads this file
+    after the subprocess exits to classify the failure.
+    """
+    payload = {
+        "status": "FAILED",
+        "error": {"bucket": bucket, "check": check, "detail": detail[:2000]},
+    }
+    try:
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            json.dump(payload, fh)
+    except OSError as exc:
+        logger.error("Failed to write %s: %s", SMOKE_RESULTS_PATH, exc)
+
+
+def preflight(payload: dict) -> None:
+    """Fail-fast checks before any compute. <= 60 s on GPU.
+
+    On any failure writes a structured error to SMOKE_RESULTS_PATH and
+    calls sys.exit(1). See docs/SMOKE-TEST-SPEC.md section "Layer 2".
+    """
+    logger.info("=== Preflight ===")
+
+    tier = payload.get("tier", "")
+    if tier not in ("smoke", "mini_pilot"):
+        # Legacy webhook mode — preflight is a no-op; main() handles it.
+        return
+
+    # 1. Required payload keys.
+    if "job_spec" not in payload:
+        _write_smoke_failure("preflight", "payload", "missing key: job_spec")
+        sys.exit(1)
+
+    # 2. Target PDB (baked fixture).
+    if not os.path.isfile(SMOKE_TARGET_PDB):
+        _write_smoke_failure(
+            "preflight", "target_pdb",
+            f"baked smoke target not found at {SMOKE_TARGET_PDB}",
+        )
+        sys.exit(1)
+
+    # 3. GPU available.
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            _write_smoke_failure(
+                "preflight", "gpu",
+                "torch.cuda.is_available() is False",
+            )
+            sys.exit(1)
+        logger.info("GPU: %s", torch.cuda.get_device_name(0))
+    except Exception as exc:
+        _write_smoke_failure("preflight", "torch_import", str(exc))
+        sys.exit(1)
+
+    # 4. gemmi import (required for CIF re-indexing).
+    try:
+        import gemmi  # noqa: F401
+    except Exception as exc:
+        _write_smoke_failure("preflight", "gemmi_import", str(exc))
+        sys.exit(1)
+
+    # 5. boltzgen CLI responds.
+    try:
+        result = subprocess.run(
+            ["boltzgen", "--help"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            _write_smoke_failure(
+                "preflight", "boltzgen --help",
+                f"exit={result.returncode} stderr={result.stderr[-500:]}",
+            )
+            sys.exit(1)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        _write_smoke_failure("preflight", "boltzgen_cli", str(exc))
+        sys.exit(1)
+
+    # 6. Weight cache present.
+    if not os.path.isdir(BOLTZGEN_CACHE):
+        _write_smoke_failure(
+            "preflight", "boltzgen_cache",
+            f"cache dir missing: {BOLTZGEN_CACHE}",
+        )
+        sys.exit(1)
+
+    # 7. /tmp/smoke_results.json writable.
+    try:
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            fh.write("{}")
+    except OSError as exc:
+        logger.error("Preflight: /tmp not writable: %s", exc)
+        sys.exit(1)
+
+    logger.info("Preflight: OK (tier=%s)", tier)
+
+
+def _encode_pdb(path: str) -> str:
+    """Return base64 of file bytes, per SMOKE-TEST-SPEC.md Layer 3."""
+    return base64.b64encode(Path(path).read_bytes()).decode()
+
+
+def _pdb_from_cif(cif_path: str, pdb_path: str) -> None:
+    """Convert a CIF to PDB using gemmi (BoltzGen emits CIF)."""
+    import gemmi
+    structure = gemmi.read_structure(cif_path)
+    structure.setup_entities()
+    structure.write_pdb(pdb_path)
+
+
+def _ensure_pdb_output(design_file: str, work_dir: str, rank: int) -> str:
+    """Return a PDB path for a BoltzGen design output (convert if needed)."""
+    if design_file.endswith(".pdb"):
+        return design_file
+    pdb_path = os.path.join(work_dir, f"design_{rank:03d}.pdb")
+    _pdb_from_cif(design_file, pdb_path)
+    return pdb_path
+
+
+def _stub_scores(rank: int) -> dict:
+    """Deterministic plausible scores for smoke when real metrics absent."""
+    return {
+        "ipTM": round(0.45 + 0.01 * rank, 4),
+        "pLDDT": round(70.0 + rank, 2),
+        "refolding_rmsd": round(2.5 - 0.1 * rank, 2),
+        "filter_status": "stub (smoke)",
+    }
+
+
+def _build_smoke_job_spec(tier: str) -> dict:
+    """Build a job_spec dict for smoke/mini_pilot runs."""
+    if tier == "smoke":
+        parameters = _smoke_params()
+    elif tier == "mini_pilot":
+        parameters = _mini_pilot_params()
+    else:
+        raise ValueError(f"Unknown tier: {tier}")
+
+    return {
+        "tool": "boltzgen",
+        "target_chain": SMOKE_TARGET_CHAIN,
+        "hotspot_residues": SMOKE_HOTSPOTS,
+        "parameters": parameters,
+    }
+
+
+def _run_boltzgen_streaming(cmd: list[str], timeout: int, cwd: str | None = None) -> int:
+    """Run `boltzgen run` with live stdout/stderr streaming.
+
+    The existing run_command() captures output which (a) buffers megabytes
+    in memory for long runs and (b) hides progress. Smoke/mini_pilot uses
+    this streaming variant so we can watch BoltzGen initialise in Modal's
+    live logs.
+    """
+    logger.info("Running (streaming): %s", " ".join(cmd))
+    start = time.time()
+    proc = subprocess.Popen(
+        cmd, cwd=cwd,
+        stdout=sys.stdout, stderr=sys.stderr,
+        bufsize=1,
+    )
+    try:
+        rc = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=30)
+        raise
+    elapsed = time.time() - start
+    logger.info("boltzgen exit=%d (%.1fs)", rc, elapsed)
+    return rc
+
+
+def run_smoke_tier(tier: str, work_dir: str) -> dict:
+    """Execute the BoltzGen smoke/mini_pilot pipeline.
+
+    Returns a dict shaped per SMOKE-TEST-SPEC.md Layer 3 "output shape".
+    """
+    start = time.time()
+    job_spec = _build_smoke_job_spec(tier)
+    params = job_spec["parameters"]
+    num_designs = int(params["num_designs"])
+    budget = int(params["budget"])
+    protocol = params["protocol"]
+
+    # ---- Stage 1: copy baked fixture + re-index to CIF ----
+    target_input = os.path.join(work_dir, "target_input.pdb")
+    shutil.copy(SMOKE_TARGET_PDB, target_input)
+
+    try:
+        target_cif = ensure_cif(target_input, work_dir)
+    except Exception as exc:
+        logger.exception("CIF conversion failed")
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "preflight", "check": "cif_prep",
+                      "detail": str(exc)},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    # ---- Stage 2: build YAML spec ----
+    yaml_spec = build_yaml_spec(job_spec, target_cif)
+    spec_path = write_yaml_spec(yaml_spec, target_cif, work_dir)
+
+    # ---- Stage 3: run BoltzGen (streamed) ----
+    output_dir = os.path.join(work_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    cmd = [
+        "boltzgen", "run", spec_path,
+        "--output", output_dir,
+        "--protocol", protocol,
+        "--num_designs", str(num_designs),
+        "--budget", str(budget),
+        "--devices", "1",
+    ]
+
+    # Smoke timeout: 20 min. Mini-pilot: 30 min. Budget in GPU-minutes is 30
+    # and 20 respectively per the agent brief, keep runs well inside that.
+    timeout_s = 1200 if tier == "smoke" else 1800
+    try:
+        rc = _run_boltzgen_streaming(cmd, timeout=timeout_s, cwd=work_dir)
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "tool-invocation", "check": "boltzgen_timeout",
+                      "detail": f"boltzgen run exceeded {timeout_s}s"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    if rc != 0:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "tool-invocation", "check": "boltzgen_exit",
+                      "detail": f"boltzgen run exited {rc}"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    # ---- Stage 4: locate design files ----
+    # Log output tree for debugging, independent of whether the metrics CSV
+    # shows up where we expect.
+    for root, _dirs, files in os.walk(output_dir):
+        rel = os.path.relpath(root, output_dir)
+        for fname in files:
+            logger.info("Output: %s/%s", rel, fname)
+
+    design_files = find_design_files(output_dir, budget)
+    if not design_files:
+        # Fall back to searching the whole output tree for any *.cif/*.pdb
+        design_files = []
+        for root, _dirs, files in os.walk(output_dir):
+            for fname in files:
+                if fname.endswith((".cif", ".pdb")) and "target" not in fname.lower():
+                    design_files.append(os.path.join(root, fname))
+        design_files.sort()
+
+    if not design_files:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "output-parse", "check": "design_files",
+                      "detail": "no .cif/.pdb produced by boltzgen run"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    # ---- Stage 5: parse metrics (best-effort for smoke, required for mini_pilot) ----
+    metrics_csv = find_metrics_csv(output_dir)
+    design_scores_by_name: dict[str, dict] = {}
+    if metrics_csv:
+        logger.info("Metrics CSV: %s", metrics_csv)
+        try:
+            for entry in parse_metrics_csv(metrics_csv):
+                design_scores_by_name[entry["design_name"]] = entry["scores"]
+        except Exception as exc:
+            logger.warning("metrics CSV parse failed: %s", exc)
+    else:
+        logger.warning("No metrics CSV found in BoltzGen output tree")
+
+    # ---- Stage 6: build candidate list ----
+    # Rank by ipTM desc where we have real scores; preserve file order otherwise.
+    scored = []
+    for design_file in design_files:
+        name = Path(design_file).stem
+        scores = design_scores_by_name.get(name, {})
+        # fuzzy match
+        if not scores:
+            for key, val in design_scores_by_name.items():
+                if name in key or key in name:
+                    scores = val
+                    break
+        scored.append({"design_file": design_file, "name": name, "scores": scores})
+
+    if any("ipTM" in s["scores"] for s in scored):
+        scored.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+
+    scored = scored[:num_designs]
+
+    candidates = []
+    for rank_idx, s in enumerate(scored):
+        rank = rank_idx + 1
+        try:
+            pdb_path = _ensure_pdb_output(s["design_file"], work_dir, rank)
+        except Exception as exc:
+            return {
+                "status": "FAILED",
+                "error": {"bucket": "output-parse", "check": "cif_to_pdb",
+                          "detail": f"{s['design_file']}: {exc}"},
+                "tier": tier,
+                "gpu_seconds": int(time.time() - start),
+            }
+        scores = dict(s["scores"]) if s["scores"] else {}
+        # Mini-pilot requires real float scores. For smoke, stub if absent.
+        if not scores:
+            if tier == "mini_pilot":
+                return {
+                    "status": "FAILED",
+                    "error": {"bucket": "output-parse", "check": "missing_scores",
+                              "detail": f"no metrics for design {s['name']}"},
+                    "tier": tier,
+                    "gpu_seconds": int(time.time() - start),
+                }
+            scores = _stub_scores(rank)
+        candidates.append({
+            "rank": rank,
+            "pdb_key": f"design_{rank:03d}.pdb",
+            "pdb_content_b64": _encode_pdb(pdb_path),
+            "scores": scores,
+        })
+
+    if len(candidates) < num_designs:
+        return {
+            "status": "FAILED",
+            "error": {"bucket": "output-parse", "check": "candidate_count",
+                      "detail": f"got {len(candidates)}, expected {num_designs}"},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+        }
+
+    return {
+        "status": "COMPLETED",
+        "output": {"candidates": candidates},
+        "tier": tier,
+        "gpu_seconds": int(time.time() - start),
+    }
 
 
 # ===========================================================================
@@ -233,45 +635,247 @@ def post_webhook(
 # ===========================================================================
 
 def ensure_cif(input_path: str, work_dir: str) -> str:
-    """Ensure input is in CIF format. Convert from PDB if needed.
+    """Convert the downloaded PDB into a BoltzGen-ready mmCIF.
 
-    BoltzGen requires mmCIF format. If the input is a PDB file, convert it
-    using gemmi. Also re-indexes chains so residues start at 1.
+    BoltzGen's mmcif parser (``boltzgen.data.parse.mmcif.parse_mmcif``) is
+    strict: it requires the ``_entity_poly_seq`` block to exist and every
+    residue in ``_atom_site`` to match by name the entry at the same seq
+    position in ``_entity_poly_seq``. gemmi's ``setup_entities()`` +
+    ``make_mmcif_document()`` is not reliable here — for 4Z18 it either
+    omits the block (when called on a freshly-rebuilt Structure) or emits
+    mismatched residue names (when called on the original). We side-step
+    the whole problem by writing a minimal CIF from scratch with exactly
+    the blocks BoltzGen reads.
 
-    Args:
-        input_path: Path to the downloaded target file (.pdb or .cif).
-        work_dir: Working directory for writing the CIF file.
-
-    Returns:
-        Path to the validated/converted CIF file.
+    The resulting CIF contains only standard-20-AA polymer residues with
+    contiguous seqids starting at 1 per chain, no altlocs, no hydrogens,
+    no ligands, no waters. MSE, SEP, etc. are remapped to their standard
+    parents before writing.
     """
     import gemmi
+    from gemmi import cif
 
-    if input_path.endswith(".cif") or input_path.endswith(".mmcif"):
-        # Already CIF — read, re-index, and write back
-        logger.info("Input is CIF, re-indexing residues...")
-        structure = gemmi.read_structure(input_path)
-    else:
-        # PDB -> CIF conversion
-        logger.info("Converting PDB to CIF...")
-        structure = gemmi.read_structure(input_path)
+    STANDARD_AA = frozenset([
+        "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    ])
+    MODRES_MAP = {
+        "MSE": ("MET", {"SE": ("SD", "S")}),
+        "CME": ("CYS", {}), "CSO": ("CYS", {}), "SEP": ("SER", {}),
+        "TPO": ("THR", {}), "PTR": ("TYR", {}), "KCX": ("LYS", {}),
+        "HYP": ("PRO", {}), "LLP": ("LYS", {}),
+    }
 
-    # Re-index: ensure each chain starts at residue 1 using label_seq_id
+    logger.info("Reading input structure: %s", input_path)
+    structure = gemmi.read_structure(input_path)
+
+    # Cleanup: altlocs first (so later ops see one copy per residue).
+    structure.remove_alternative_conformations()
+    structure.remove_hydrogens()
+    structure.remove_ligands_and_waters()
+    structure.remove_empty_chains()
+
+    # Extract per-chain sequences and atom records.
+    # chains_data: { chain_name: [ {resnum, resname, atoms: [...]} ] }
+    chains_data: dict[str, list[dict]] = {}
+    modres_renames = 0
+    dropped_counts: dict[str, int] = {}
+
     for model in structure:
         for chain in model:
-            for idx, residue in enumerate(chain):
-                residue.label_seq = idx + 1
-                residue.seqid = gemmi.SeqId(str(idx + 1))
+            chain_residues: list[dict] = []
+            for residue in chain:
+                name = residue.name
+
+                # Rename modified residues.
+                atom_rename = {}
+                if name in MODRES_MAP:
+                    new_name, atom_fixes = MODRES_MAP[name]
+                    name = new_name
+                    atom_rename = atom_fixes
+                    modres_renames += 1
+
+                # Drop anything still non-standard.
+                if name not in STANDARD_AA:
+                    dropped_counts[residue.name] = dropped_counts.get(residue.name, 0) + 1
+                    continue
+
+                atoms: list[tuple[str, str, float, float, float]] = []
+                for atom in residue:
+                    atom_name = atom.name
+                    atom_elem = atom.element.name
+                    if atom_name in atom_rename:
+                        atom_name, atom_elem = atom_rename[atom_name]
+                    # Skip any stray hydrogens that slipped through.
+                    if atom_elem == "H":
+                        continue
+                    atoms.append((
+                        atom_name, atom_elem,
+                        atom.pos.x, atom.pos.y, atom.pos.z,
+                    ))
+                if atoms:
+                    chain_residues.append({
+                        "resname": name,
+                        "atoms": atoms,
+                    })
+
+            if chain_residues:
+                chains_data.setdefault(chain.name, []).extend(chain_residues)
+
+        break  # Only first model
+
+    if not chains_data:
+        raise RuntimeError("No standard polymer residues survived cleanup")
+
+    # Re-index residues 1..N per chain.
+    for chain_name, residues in chains_data.items():
+        for idx, res in enumerate(residues, start=1):
+            res["resnum"] = idx
+
+    kept_counts = {c: len(r) for c, r in chains_data.items()}
+    logger.info(
+        "CIF prep: modres_renames=%d, kept_per_chain=%s, dropped=%s",
+        modres_renames, kept_counts, dropped_counts,
+    )
+
+    # Build CIF document manually so we control every required block.
+    doc = cif.Document()
+    block = doc.add_new_block("target")
+
+    # Each chain -> its own entity (entity_id = index+1).
+    chain_names = list(chains_data.keys())
+    chain_to_entity = {name: str(i + 1) for i, name in enumerate(chain_names)}
+
+    # _entity
+    e_loop = block.init_loop("_entity.", ["id", "type"])
+    for name in chain_names:
+        e_loop.add_row([chain_to_entity[name], "polymer"])
+
+    # _entity_poly
+    ep_loop = block.init_loop("_entity_poly.", ["entity_id", "type"])
+    for name in chain_names:
+        ep_loop.add_row([chain_to_entity[name], "polypeptide(L)"])
+
+    # _entity_poly_seq — one row per residue.
+    eps_loop = block.init_loop(
+        "_entity_poly_seq.", ["entity_id", "num", "mon_id"],
+    )
+    for name in chain_names:
+        eid = chain_to_entity[name]
+        for res in chains_data[name]:
+            eps_loop.add_row([eid, str(res["resnum"]), res["resname"]])
+
+    # _struct_asym — subchain ids. Use chain name as asym_id.
+    sa_loop = block.init_loop("_struct_asym.", ["id", "entity_id"])
+    for name in chain_names:
+        sa_loop.add_row([name, chain_to_entity[name]])
+
+    # _atom_site — coords.
+    as_loop = block.init_loop("_atom_site.", [
+        "group_PDB", "id", "type_symbol", "label_atom_id",
+        "label_alt_id", "label_comp_id", "label_asym_id",
+        "label_entity_id", "label_seq_id",
+        "Cartn_x", "Cartn_y", "Cartn_z",
+        "occupancy", "B_iso_or_equiv",
+        "auth_asym_id", "auth_seq_id", "auth_comp_id",
+        "pdbx_PDB_model_num",
+    ])
+    atom_id = 0
+    for name in chain_names:
+        eid = chain_to_entity[name]
+        for res in chains_data[name]:
+            resnum = str(res["resnum"])
+            resname = res["resname"]
+            for atom_name, atom_elem, x, y, z in res["atoms"]:
+                atom_id += 1
+                as_loop.add_row([
+                    "ATOM", str(atom_id), atom_elem, atom_name,
+                    ".", resname, name,
+                    eid, resnum,
+                    f"{x:.3f}", f"{y:.3f}", f"{z:.3f}",
+                    "1.00", "20.00",
+                    name, resnum, resname,
+                    "1",
+                ])
 
     cif_path = os.path.join(work_dir, "target.cif")
-    structure.make_mmcif_document().write_file(cif_path)
-    logger.info("CIF written to %s (%d bytes)", cif_path, os.path.getsize(cif_path))
+    doc.write_file(cif_path)
+    logger.info(
+        "CIF written to %s (%d bytes, %d atoms, %d residues)",
+        cif_path, os.path.getsize(cif_path), atom_id,
+        sum(kept_counts.values()),
+    )
     return cif_path
 
 
 # ===========================================================================
 # BoltzGen YAML spec generation
 # ===========================================================================
+
+def build_yaml_spec(job_spec: dict, target_cif_path: str) -> dict:
+    """Build the BoltzGen YAML design spec from the JobSpec.
+
+    Mirrors backend/pipelines/boltzgen.py::generate_config so the container
+    is self-sufficient when the backend dispatches a raw JobSpec without a
+    pre-built yaml_spec in parameters.
+
+    Produces:
+      entities:
+        - file:
+            path: <target_cif>
+            include:
+              - chain: {id: <chain>}
+            binding_types:           # only when hotspots specified
+              - chain: {id: <chain>, binding: "50,51,52"}
+        - protein:
+            id: B
+            sequence: "<min>..<max>"  # binder length range
+
+    Args:
+        job_spec: Deserialized JobSpec dict from JOB_PAYLOAD.
+        target_cif_path: Path to the re-indexed target CIF inside the container.
+
+    Returns:
+        Dict representing the BoltzGen YAML spec (with an ``entities`` list).
+    """
+    params = job_spec.get("parameters", {})
+    chain = job_spec.get("target_chain", "A")
+    hotspots = job_spec.get("hotspot_residues", [])
+
+    # Binder length range from parameters.
+    binder_length = params.get("binder_length", {"min": 50, "max": 100})
+    if isinstance(binder_length, dict):
+        min_len = binder_length.get("min", 50)
+        max_len = binder_length.get("max", 100)
+    else:
+        min_len, max_len = 50, 100
+
+    file_entity: dict = {
+        "file": {
+            "path": target_cif_path,
+            "include": [{"chain": {"id": chain}}],
+        },
+    }
+    if hotspots:
+        binding_str = ",".join(str(r) for r in sorted(hotspots))
+        file_entity["file"]["binding_types"] = [
+            {"chain": {"id": chain, "binding": binding_str}},
+        ]
+
+    binder_entity = {
+        "protein": {
+            "id": "B",
+            "sequence": f"{min_len}..{max_len}",
+        },
+    }
+
+    yaml_spec = {"entities": [file_entity, binder_entity]}
+    logger.info(
+        "Built YAML spec: chain=%s, hotspots=%s, binder_length=%d..%d",
+        chain, hotspots, min_len, max_len,
+    )
+    return yaml_spec
+
 
 def write_yaml_spec(
     yaml_spec: dict, target_cif_path: str, work_dir: str,
@@ -350,40 +954,56 @@ def find_design_files(output_dir: str, budget: int) -> list[str]:
     """Locate designed CIF files in the BoltzGen output directory.
 
     BoltzGen writes ranked designs to:
-      final_ranked_designs/intermediate_ranked_{budget}_designs/
+      final_ranked_designs/final_{budget}_designs/rank{N}_{spec_id}.cif
 
-    Falls back to searching for CIF/PDB files in final_ranked_designs/.
+    There's also an ``intermediate_ranked_{K}_designs`` sibling (K == the
+    intermediate trajectory count, e.g. 10, not the budget). We prefer the
+    final_{budget}_designs directory because those are the post-refold
+    ranked outputs.
 
     Args:
         output_dir: BoltzGen output directory.
         budget: The --budget value used (determines subdirectory name).
 
     Returns:
-        Sorted list of paths to design structure files.
+        Sorted list of paths to design structure files (excluding the
+        before_refolding/ subdir).
     """
-    # Primary: budget-specific ranked directory
-    ranked_dir = os.path.join(
-        output_dir, "final_ranked_designs",
-        f"intermediate_ranked_{budget}_designs",
-    )
-    if not os.path.isdir(ranked_dir):
-        # Try other ranked subdirectories
-        parent = os.path.join(output_dir, "final_ranked_designs")
-        if os.path.isdir(parent):
-            subdirs = sorted(os.listdir(parent))
-            for d in subdirs:
+    parent = os.path.join(output_dir, "final_ranked_designs")
+    ranked_dir: str | None = None
+
+    # Preferred: final_{budget}_designs
+    candidate = os.path.join(parent, f"final_{budget}_designs")
+    if os.path.isdir(candidate):
+        ranked_dir = candidate
+
+    # Fallback: any final_*_designs (BoltzGen may round/adjust the count)
+    if ranked_dir is None and os.path.isdir(parent):
+        for d in sorted(os.listdir(parent)):
+            if d.startswith("final_") and d.endswith("_designs"):
                 candidate = os.path.join(parent, d)
                 if os.path.isdir(candidate):
                     ranked_dir = candidate
                     break
-            else:
-                ranked_dir = parent
-        else:
-            # Last resort: search entire output
-            ranked_dir = output_dir
+
+    # Fallback: intermediate_ranked_*_designs
+    if ranked_dir is None and os.path.isdir(parent):
+        for d in sorted(os.listdir(parent)):
+            if d.startswith("intermediate_ranked_") and d.endswith("_designs"):
+                candidate = os.path.join(parent, d)
+                if os.path.isdir(candidate):
+                    ranked_dir = candidate
+                    break
+
+    # Last resort: parent directory itself
+    if ranked_dir is None:
+        ranked_dir = parent if os.path.isdir(parent) else output_dir
 
     design_files = []
     for root, _dirs, files in os.walk(ranked_dir):
+        # Skip the pre-refold staging directory — we want the final structures.
+        if "before_refolding" in os.path.relpath(root, ranked_dir).split(os.sep):
+            continue
         for fname in sorted(files):
             if fname.endswith((".cif", ".pdb")):
                 design_files.append(os.path.join(root, fname))
@@ -407,52 +1027,71 @@ def _safe_float(value: str, default: float) -> float:
 def parse_metrics_csv(csv_path: str) -> list[dict]:
     """Parse the BoltzGen metrics CSV into a list of scored designs.
 
-    BoltzGen aggregate_metrics_analyze.csv may have various column names.
-    We try common patterns for each metric.
+    BoltzGen aggregate_metrics_analyze.csv columns include:
+      id, file_name, designed_sequence, ...,
+      native_rmsd, native_rmsd_bb, native_rmsd_refolded, native_rmsd_bb_refolded,
+      designfolding-bb_rmsd, bb_rmsd, iptm, ptm, design_iptm, complex_plddt, ...
+
+    We pick iptm for ipTM, complex_plddt for pLDDT, and prefer the refolded
+    backbone RMSD for refolding_rmsd. Multiplies pLDDT by 100 if it looks
+    normalized (BoltzGen emits complex_plddt in [0,1]).
 
     Returns:
         List of dicts with design_name and scores.
     """
+    # BoltzGen metrics value order of preference for each canonical score key.
+    RMSD_KEYS = [
+        "native_rmsd_bb_refolded", "native_rmsd_refolded",
+        "designfolding-bb_rmsd", "bb_rmsd", "native_rmsd_bb", "native_rmsd",
+        "refolding_rmsd", "rmsd", "RMSD", "design_rmsd", "ca_rmsd",
+    ]
+    IPTM_KEYS = [
+        "iptm", "ipTM", "iPTM", "design_iptm", "protein_iptm",
+        "interface_ptm", "iptm_score",
+    ]
+    PLDDT_KEYS = [
+        "complex_plddt", "complex_iplddt",
+        "pLDDT", "plddt", "mean_plddt", "binder_plddt", "avg_plddt",
+    ]
+
     results = []
     with open(csv_path, newline="") as fh:
         reader = csv.DictReader(fh)
         columns = reader.fieldnames or []
-        logger.info("Metrics CSV columns: %s", columns)
+        logger.info("Metrics CSV columns (%d): first20=%s", len(columns), columns[:20])
 
         for row in reader:
-            # Design name: try several column names
-            design_name = (
-                row.get("design_name")
+            # Design name: use file_name (BoltzGen's canonical key), else id.
+            name_raw = (
+                row.get("file_name")
+                or row.get("design_name")
                 or row.get("design")
                 or row.get("name")
-                or row.get("file")
+                or row.get("id")
                 or row.get("sample")
                 or "unknown"
             )
-            # Strip path prefix and extension if present
-            design_name = Path(design_name).stem
+            design_name = Path(str(name_raw)).stem
 
-            scores = {}
+            scores: dict = {}
 
-            # Refolding RMSD
-            for key in ["refolding_rmsd", "rmsd", "RMSD", "bb_rmsd",
-                        "design_rmsd", "ca_rmsd"]:
-                if key in row and row[key]:
+            for key in RMSD_KEYS:
+                if key in row and row[key] not in (None, ""):
                     scores["refolding_rmsd"] = _safe_float(row[key], 99.0)
                     break
 
-            # ipTM
-            for key in ["ipTM", "iptm", "iPTM", "interface_ptm",
-                        "iptm_score"]:
-                if key in row and row[key]:
+            for key in IPTM_KEYS:
+                if key in row and row[key] not in (None, ""):
                     scores["ipTM"] = _safe_float(row[key], 0.0)
                     break
 
-            # pLDDT
-            for key in ["pLDDT", "plddt", "mean_plddt", "binder_plddt",
-                        "avg_plddt"]:
-                if key in row and row[key]:
-                    scores["pLDDT"] = _safe_float(row[key], 0.0)
+            for key in PLDDT_KEYS:
+                if key in row and row[key] not in (None, ""):
+                    val = _safe_float(row[key], 0.0)
+                    # BoltzGen emits complex_plddt in [0,1]; rescale to 0..100.
+                    if 0.0 <= val <= 1.0:
+                        val = val * 100.0
+                    scores["pLDDT"] = round(val, 2)
                     break
 
             results.append({
@@ -549,23 +1188,47 @@ def main():
         sys.exit(1)
 
     job_payload = json.loads(job_payload_str)
+
+    # ---- Smoke / mini_pilot tier: bypass webhook+upload, write to
+    #      /tmp/smoke_results.json. See docs/SMOKE-TEST-SPEC.md. ----
+    tier = job_payload.get("tier", "")
+    if tier in ("smoke", "mini_pilot"):
+        preflight(job_payload)
+        work_dir = tempfile.mkdtemp(prefix="boltzgen_smoke_")
+        try:
+            result = run_smoke_tier(tier, work_dir)
+            with open(SMOKE_RESULTS_PATH, "w") as fh:
+                json.dump(result, fh)
+            logger.info(
+                "Smoke tier %s: status=%s gpu_seconds=%s",
+                tier, result.get("status"), result.get("gpu_seconds"),
+            )
+            if result.get("status") != "COMPLETED":
+                sys.exit(1)
+            return
+        except Exception as exc:
+            logger.exception("smoke tier crashed")
+            _write_smoke_failure("unhandled", "run_smoke_tier", str(exc))
+            sys.exit(1)
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+    # ---- Legacy webhook path ----
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
 
-    # Extract BoltzGen-specific config from job_spec parameters
+    # Extract BoltzGen-specific config from job_spec parameters.
+    # The backend may (a) pre-build yaml_spec in parameters, or (b) dispatch a
+    # raw JobSpec and expect the container to build it from target_chain +
+    # hotspot_residues + binder_length. Support both.
     params = job_spec.get("parameters", {})
-    yaml_spec = params.get("yaml_spec", {})
+    yaml_spec = params.get("yaml_spec") or {}
     protocol = params.get("protocol", "protein-anything")
     num_designs = params.get("num_designs", 10000)
-    budget = params.get("budget", 60)
-
-    if not yaml_spec.get("entities"):
-        logger.error("yaml_spec must contain at least one entity")
-        post_webhook(webhook_url, job_id, pod_id, {
-            "error": "Invalid yaml_spec: no entities defined",
-        })
-        sys.exit(1)
+    # Pilot tier clamps budget to 5; honour it container-side as well.
+    default_budget = 5 if job_spec.get("job_tier") == "pilot" else 60
+    budget = params.get("budget", default_budget)
 
     pipeline_start = time.time()
     work_dir = tempfile.mkdtemp(prefix="boltzgen_job_")
@@ -596,9 +1259,32 @@ def main():
             return
 
         # ----- Stage 3: Write YAML spec -----
+        # Backend's dispatcher currently sends the raw JobSpec without calling
+        # BoltzGenPipeline.generate_config(), so parameters.yaml_spec is often
+        # empty. Build it here from target_chain + hotspot_residues in that case.
+        if not yaml_spec.get("entities"):
+            logger.info(
+                "yaml_spec has no entities; constructing from JobSpec "
+                "(target_chain=%s, hotspots=%s)",
+                job_spec.get("target_chain", "A"),
+                job_spec.get("hotspot_residues", []),
+            )
+            yaml_spec = build_yaml_spec(job_spec, target_cif)
+
+        if not yaml_spec.get("entities"):
+            logger.error("yaml_spec must contain at least one entity")
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": "Invalid yaml_spec: no entities defined",
+            })
+            return
+
         spec_path = write_yaml_spec(yaml_spec, target_cif, work_dir)
 
         # ----- Stage 4: Run BoltzGen -----
+        # BoltzGen's generation + refolding runs as a single long subprocess
+        # (15-45 min). Without a sidecar heartbeat the backend's
+        # STALE_HEARTBEAT_SECONDS (1800s = 30min) cron reaps the job
+        # mid-run. Fire a keepalive heartbeat every 5 min.
         send_heartbeat(webhook_url, job_id, "Running BoltzGen", 0, budget)
         logger.info("=== Running BoltzGen design ===")
 
@@ -613,6 +1299,20 @@ def main():
 
         # Reserve 30 min for pre/post-processing; rest for BoltzGen
         boltzgen_timeout = max(6600, 7200 - 1800)
+        heartbeat_stop = threading.Event()
+
+        def _keepalive() -> None:
+            while not heartbeat_stop.wait(300):  # 5 min
+                try:
+                    send_heartbeat(
+                        webhook_url, job_id,
+                        "Running BoltzGen", 0, budget,
+                    )
+                except Exception as exc:  # pragma: no cover - best-effort
+                    logger.warning("keepalive heartbeat failed: %s", exc)
+
+        keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
+        keepalive_thread.start()
         try:
             run_command(cmd, timeout=boltzgen_timeout, cwd=work_dir)
         except RuntimeError as exc:
@@ -621,6 +1321,8 @@ def main():
                 "error": f"BoltzGen failed: {exc}",
             })
             return
+        finally:
+            heartbeat_stop.set()
 
         send_heartbeat(webhook_url, job_id, "BoltzGen complete", budget, budget)
 
@@ -652,6 +1354,24 @@ def main():
 
         # ----- Filter and rank -----
         passing = filter_and_rank(all_designs)
+        # Pilot tier fallback: E2E pipeline validation must not be gated by
+        # design quality — a pilot with a random target + low num_designs
+        # often produces designs below production thresholds. Upload the top
+        # N by ipTM regardless so the job can COMPLETE with candidates and
+        # prove the MinIO-upload / webhook / parse_results path works. The
+        # filter_status field records that these didn't pass production
+        # thresholds so downstream agents know not to trust the score.
+        if not passing and job_spec.get("job_tier") == "pilot" and all_designs:
+            all_designs.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+            passing = all_designs[: max(1, budget)]
+            for d in passing:
+                d["scores"]["filter_status"] = "fail (pilot fallback)"
+            logger.warning(
+                "No designs passed production thresholds; pilot fallback emitting "
+                "top %d by ipTM (all marked filter_status=fail) so validation "
+                "succeeds.",
+                len(passing),
+            )
         design_files = find_design_files(output_dir, budget)
 
         # Build a lookup from design name stem to file path

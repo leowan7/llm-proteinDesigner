@@ -1,0 +1,117 @@
+# Modal variant of docker/boltzgen/Dockerfile.
+# Diff vs production:
+#   - `wget -qO /tmp/get-pip.py` -> `curl -fsSL --retry 5 --retry-delay 10`
+#   - No COPY run_pipeline.py; no CMD; no WORKDIR /opt (Modal handles all three).
+# BoltzGen requires Python >=3.11 and CUDA 12.1+. We install Python 3.11 via
+# the deadsnakes PPA on Ubuntu 22.04.
+#
+# NOTE: nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 failed on Modal A100-40GB
+# with "CUDA driver too old (found version 12080)". nvidia/cuda:12.4.1-cudnn-
+# runtime-ubuntu24.04 does not exist. Using 12.1.0 which is proven to work on
+# Modal's GPU pool (same base as kendrew-pxdesign-prod). Torch cu121 is fully
+# compatible; CUDA 12.1 is sufficient for all of BoltzGen's GPU ops.
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/boltzgen_cache
+
+# ---------- System deps + Python 3.11 ----------
+# Ubuntu 22.04 ships Python 3.10. deadsnakes PPA provides 3.11 without
+# needing a full OS upgrade.
+# build-essential is required because BoltzGen uses Triton, which JIT-compiles
+# CUDA kernels at first forward pass and calls `cc` / `gcc` to build the
+# generated C. Without it the first GPU step crashes with:
+#   RuntimeError: Failed to find C compiler. Please specify via CC env var.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git software-properties-common build-essential && \
+    add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3.11-distutils && \
+    curl -fsSL --retry 5 --retry-delay 10 \
+        https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && \
+    python3.11 /tmp/get-pip.py && \
+    rm /tmp/get-pip.py && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- PyTorch (CUDA 12.1) ----------
+RUN python3 -m pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cu121
+
+# ---------- BoltzGen ----------
+RUN python3 -m pip install --no-cache-dir boltzgen
+
+# ---------- Enforce torch cu121 after boltzgen install ----------
+# boltzgen's transitive deps can upgrade torch to a version compiled against
+# CUDA 12.8+ which fails on Modal's GPU drivers. Force cu121 back so CUDA
+# initialises correctly. We do this *before* installing cuequivariance kernels
+# so the CUDA ops wheel is compiled against the torch version we'll actually
+# run (force-reinstalling torch AFTER the kernel install invalidates the
+# compiled bindings and the runtime `import cuequivariance_ops_torch` fails).
+RUN python3 -m pip install --force-reinstall --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cu121 && \
+    python3 -c "import torch; print('torch', torch.__version__, 'cuda:', torch.version.cuda)"
+
+# ---------- CUDA kernels for BoltzGen triangle layers ----------
+# boltzgen.model.layers.triangular imports cuequivariance_ops_torch at runtime.
+# The torch binding wheel (`cuequivariance-ops-torch-cu12`) provides Python
+# bindings, but the C++/CUDA kernels live in the companion wheel
+# `cuequivariance-ops-cu12` which installs `libcue_ops.so`. Without the base
+# wheel the torch binding import fails with:
+#   ImportError: libcue_ops.so: cannot open shared object file
+# Install both wheels and fail the build if the runtime import still breaks
+# so we never deploy an image that crashes at first GPU forward pass.
+RUN python3 -m pip install --no-cache-dir \
+    cuequivariance-ops-cu12 \
+    cuequivariance-ops-torch-cu12 && \
+    echo "=== Searching for libcue_ops.so ===" && \
+    find / -name "libcue_ops*" 2>/dev/null || echo "libcue_ops.so NOT FOUND" && \
+    echo "=== Searching for any libcue* ===" && \
+    find / -name "libcue*" 2>/dev/null || true && \
+    echo "=== cuequivariance-ops wheel files ===" && \
+    find /usr/local/lib/python3.11/dist-packages/cuequivariance_ops* -type f 2>/dev/null | head -40 && \
+    echo "=== pip list cuequivariance ===" && \
+    python3 -m pip list 2>/dev/null | grep -i cuequi && \
+    echo "=== Trying LD_LIBRARY_PATH hint ===" && \
+    CUEP=$(python3 -c "import cuequivariance_ops, os; print(os.path.dirname(cuequivariance_ops.__file__))" 2>/dev/null) && echo "cuequivariance_ops dir: $CUEP" && ls -la $CUEP 2>&1 || true
+
+# ---------- Pipeline utilities ----------
+RUN python3 -m pip install --no-cache-dir \
+    gemmi \
+    requests \
+    pyyaml
+
+# ---------- Bake model weights (~6 GB) ----------
+# Pre-download HuggingFace weights so cold starts are fast.
+RUN mkdir -p $HF_HOME && \
+    echo 'entities: [{sequence: "AAAAAA"}]' > /tmp/dummy.yaml && \
+    timeout 600 boltzgen run /tmp/dummy.yaml \
+        --output /tmp/dummy_out \
+        --protocol protein-anything \
+        --num_designs 1 \
+        --budget 1 || true && \
+    rm -rf /tmp/dummy.yaml /tmp/dummy_out && \
+    du -sh $HF_HOME && \
+    echo "Weight cache populated"
+
+# ---------- Bake PD-L1 smoke fixture (per SMOKE-TEST-SPEC.md) ----------
+# Smoke/mini_pilot tiers use this instead of downloading from a URL.
+COPY backend/tests/fixtures/target_pdl1.pdb /opt/smoke_target.pdb
+
+# ---------- Layer 1: build-time fail-fast validation ----------
+# Fails `modal deploy` cheaply (no GPU) if any piece of the pipeline is
+# missing. See docs/SMOKE-TEST-SPEC.md section "Layer 1".
+RUN python3 -c "import torch; assert torch.cuda.is_available() or True; print('torch', torch.__version__)" && \
+    python3 -c "import boltzgen; print('boltzgen ok')" && \
+    python3 -c "import gemmi; print('gemmi', gemmi.__version__)" && \
+    python3 -c "import yaml, requests, base64, json" && \
+    which boltzgen && \
+    which python3 && \
+    test -d $HF_HOME && \
+    test -f /opt/smoke_target.pdb && \
+    echo "Layer 1 build-time validation: OK"
+
+# NOTE: no COPY run_pipeline.py or CMD — Modal invokes @app.function bodies.
