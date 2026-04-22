@@ -1,27 +1,26 @@
-"""Standalone pipeline script for PXDesign on RunPod GPU Pods.
+"""Standalone pipeline script for PXDesign on Modal / RunPod GPU Pods.
 
-Reads job configuration from the JOB_PAYLOAD environment variable,
-runs PXDesign binder generation in basic preset mode, uploads results
-via presigned URLs, and POSTs results to the Kendrew webhook.
+Reads job configuration from the JOB_PAYLOAD environment variable.
+Supports three execution tiers (see docs/SMOKE-TEST-SPEC.md):
+
+  * tier == "smoke"       -> N=1 basic mode, no post-filter.
+                              Writes results inline to /tmp/smoke_results.json.
+  * tier == "mini_pilot"  -> N=2 basic mode, full scoring.
+                              Writes results inline to /tmp/smoke_results.json.
+  * default (webhook)     -> legacy RunPod pilot path: presigned I/O + webhook.
+
+For smoke/mini_pilot when ``input_pdb_url`` is empty, the baked-in
+/opt/smoke_target.pdb fixture is used (PD-L1 IgV, chain A, residues 18-132).
 
 Environment variables:
-    JOB_PAYLOAD     JSON string with job_spec, upload endpoint, and webhook config
-    WEBHOOK_URL     URL to POST results to (Kendrew backend)
+    JOB_PAYLOAD     JSON string with job_spec, tier, input_pdb_url, etc.
+    WEBHOOK_URL     URL to POST results to (webhook mode only)
     JOB_ID          Kendrew job UUID (for webhook identification)
     JOB_TOKEN       Job-specific auth token for requesting upload URLs on-demand
-    RUNPOD_POD_ID   RunPod pod ID (so backend can terminate after completion)
-
-Pipeline stages:
-  1. Download target structure from presigned URL
-  2. Convert to CIF and re-index residues (PXDesign recommends CIF)
-  3. Write PXDesign YAML spec to disk (crop as residue range list)
-  4. Validate input via pxdesign check-input
-  5. Run pxdesign pipeline --preset basic
-  6. Parse summary.csv for ranked candidates (af2_* prefixed columns)
-  7. Upload passing PDBs/CIFs + metrics CSV
-  8. POST results to webhook
+    RUNPOD_POD_ID   RunPod pod ID (webhook mode only)
 """
 
+import base64
 import csv
 import datetime
 import json
@@ -31,7 +30,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import traceback
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -49,68 +50,252 @@ logger = logging.getLogger("pxdesign_pipeline")
 # Paths inside the container
 # ---------------------------------------------------------------------------
 PXDESIGN_DIR = os.environ.get("PXDESIGN_DIR", "/opt/pxdesign")
+SMOKE_TARGET_PATH = "/opt/smoke_target.pdb"
+SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
 
-# Filtering thresholds for PXDesign output
+# Filtering thresholds for PXDesign output (webhook-tier only)
 IPTM_THRESHOLD = 0.70
 PLDDT_THRESHOLD = 80.0
 PAE_THRESHOLD = 10.0
 
 
 # ===========================================================================
-# Startup diagnostics
+# Tier presets (mirrored from backend/pipelines/pxdesign.py)
 # ===========================================================================
 
-def startup_check() -> dict:
-    """Log environment and dependency status at startup.
+def smoke_preset() -> dict:
+    """N=1, no-MSA (``preview``) mode, no post-filter.
 
-    Crashes if CUDA is not available or required env vars are missing.
+    PXDesign CLI names the no-MSA mode ``preview`` (vs ``extended`` which
+    requires MSA). SMOKE-TEST-SPEC.md refers to this as "Basic" mode.
     """
-    checks = {}
+    return {
+        "num_designs": 1,
+        "preset": "preview",
+        "post_filter": False,
+        "binder_length": 80,
+    }
 
-    # Validate required environment variables
-    required_vars = ["WEBHOOK_URL", "JOB_ID", "JOB_PAYLOAD"]
-    missing = [var for var in required_vars if not os.environ.get(var)]
-    if missing:
-        logger.error("Missing required environment variables: %s", missing)
-        sys.exit(1)
 
-    # Check PyTorch and CUDA
+def mini_pilot_preset() -> dict:
+    """N=2, no-MSA (``preview``) mode, full post-scoring. Final success gate."""
+    return {
+        "num_designs": 2,
+        "preset": "preview",
+        "post_filter": True,
+        "binder_length": 80,
+    }
+
+
+# ===========================================================================
+# Smoke-result serialization
+# ===========================================================================
+
+def write_smoke_result(payload: dict) -> None:
+    """Write a smoke/mini_pilot result JSON to /tmp/smoke_results.json.
+
+    The Modal wrapper (infrastructure/modal/pxdesign_app.py::run_tool) reads
+    this file after the subprocess exits and merges it into the return dict
+    under key ``smoke_result``. Failures here are non-fatal.
+    """
+    try:
+        Path(SMOKE_RESULTS_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            json.dump(payload, fh, indent=2, default=str)
+        logger.info(
+            "Wrote smoke_results.json (%d bytes, status=%s)",
+            os.path.getsize(SMOKE_RESULTS_PATH),
+            payload.get("status"),
+        )
+    except Exception as exc:  # pragma: no cover - best-effort
+        logger.error("Failed to write smoke_results.json: %s", exc)
+
+
+def fail_preflight(check: str, detail: str) -> None:
+    """Emit a structured preflight failure to smoke_results.json and exit 1."""
+    write_smoke_result({
+        "status": "FAILED",
+        "error": {
+            "bucket": "preflight",
+            "check": check,
+            "detail": detail[-2000:] if detail else "",
+        },
+    })
+    logger.error("Preflight failed (%s): %s", check, detail[:500])
+    sys.exit(1)
+
+
+def fail_compute(check: str, detail: str) -> None:
+    """Emit a structured compute-stage failure and exit 1."""
+    write_smoke_result({
+        "status": "FAILED",
+        "error": {
+            "bucket": check,
+            "detail": detail[-2000:] if detail else "",
+        },
+    })
+    logger.error("Pipeline failed (%s): %s", check, detail[:500])
+
+
+# ===========================================================================
+# Layer 2: preflight
+# ===========================================================================
+
+def preflight(payload: dict) -> None:
+    """Run fail-fast checks before consuming GPU compute.
+
+    Budget: must complete in <=60s on an A100-80GB.
+
+    Validates:
+      1. Payload parses and required fields are present.
+      2. Target PDB is accessible (local fixture or URL HEAD 200).
+      3. torch.cuda + GPU SKU are visible.
+      4. pxdesign CLI responds to --help with exit 0.
+      5. /tmp/smoke_results.json is writable.
+      6. JAX JIT primed with a tiny matmul so the first real run isn't 3x slower.
+
+    On any failure, writes structured error to SMOKE_RESULTS_PATH and exits 1.
+    """
+    logger.info("=== PREFLIGHT START ===")
+    t0 = time.time()
+
+    tier = payload.get("tier", "")
+
+    # ---- 1. writable results dir ----
+    try:
+        Path(SMOKE_RESULTS_PATH).parent.mkdir(parents=True, exist_ok=True)
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            fh.write("{}")
+        os.remove(SMOKE_RESULTS_PATH)
+    except Exception as exc:
+        fail_preflight("results_writable", f"{SMOKE_RESULTS_PATH} not writable: {exc}")
+
+    # ---- 2. target PDB accessible ----
+    input_url = payload.get("input_pdb_url", "") or ""
+    if tier in ("smoke", "mini_pilot") and not input_url:
+        # Smoke path: use baked fixture.
+        if not os.path.exists(SMOKE_TARGET_PATH):
+            fail_preflight("target_fixture", f"{SMOKE_TARGET_PATH} missing in image")
+        try:
+            size = os.path.getsize(SMOKE_TARGET_PATH)
+            if size < 1000:
+                fail_preflight("target_fixture", f"{SMOKE_TARGET_PATH} too small ({size} bytes)")
+        except OSError as exc:
+            fail_preflight("target_fixture", f"stat failed: {exc}")
+        logger.info("Target PDB fixture: %s (%d bytes)", SMOKE_TARGET_PATH, size)
+    elif input_url:
+        try:
+            head = requests.head(input_url, timeout=15, allow_redirects=True)
+            if head.status_code != 200:
+                fail_preflight(
+                    "target_url",
+                    f"HEAD {input_url} -> HTTP {head.status_code}",
+                )
+        except Exception as exc:
+            fail_preflight("target_url", f"HEAD failed: {exc}")
+
+    # ---- 3. CUDA / torch ----
     try:
         import torch
-        checks["torch"] = torch.__version__
-        checks["cuda_available"] = torch.cuda.is_available()
-        if torch.cuda.is_available():
-            checks["gpu"] = torch.cuda.get_device_name(0)
-            checks["cuda_version"] = torch.version.cuda
-        else:
-            logger.error("CUDA is not available — PXDesign requires GPU")
-            sys.exit(1)
-    except ImportError:
-        logger.error("PyTorch is not installed.")
-        sys.exit(1)
+        if not torch.cuda.is_available():
+            fail_preflight("cuda_available", "torch.cuda.is_available() is False")
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info("CUDA OK: torch=%s cuda=%s gpu=%s",
+                    torch.__version__, torch.version.cuda, gpu_name)
+    except Exception as exc:
+        fail_preflight("torch_import", f"torch import / CUDA check failed: {exc}")
 
-    # Check PXDesign CLI availability
+    # ---- 4. JAX GPU visibility ----
+    try:
+        import jax
+        gpu_devices = jax.devices("gpu")
+        if not gpu_devices:
+            fail_preflight("jax_gpu", "jax.devices('gpu') returned empty")
+        logger.info("JAX OK: %s devices=%s", jax.__version__, gpu_devices)
+    except Exception as exc:
+        # Not all PXDesign execution paths require JAX on the driver process
+        # (AF2-IG runs as a subprocess). Warn but do not abort — the subprocess
+        # will surface any real issue.
+        logger.warning("JAX GPU check warning (non-fatal): %s", exc)
+
+    # ---- 5. pxdesign CLI ----
     try:
         result = subprocess.run(
             ["pxdesign", "--help"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=60,
         )
-        checks["pxdesign_cli"] = result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        checks["pxdesign_cli"] = False
-        logger.warning("pxdesign CLI not found in PATH; will try python -m fallback")
+        if result.returncode != 0:
+            fail_preflight(
+                "pxdesign_cli",
+                f"exit {result.returncode}; stderr: {result.stderr[-800:]}",
+            )
+        logger.info("pxdesign CLI OK (--help exit 0)")
+    except FileNotFoundError:
+        fail_preflight("pxdesign_cli", "pxdesign binary not on PATH")
+    except subprocess.TimeoutExpired:
+        fail_preflight("pxdesign_cli", "pxdesign --help timed out after 60s")
 
-    # Check PXDesign directory and weights
-    checks["pxdesign_dir_exists"] = os.path.isdir(PXDESIGN_DIR)
-    weights_dir = os.path.join(PXDESIGN_DIR, "tool_weights")
-    checks["weights_dir_exists"] = os.path.isdir(weights_dir)
+    # ---- 6. weight presence ----
+    required_paths = [
+        f"{PXDESIGN_DIR}/tool_weights/af2",
+        f"{PXDESIGN_DIR}/tool_weights/mpnn/vanilla_model_weights",
+        f"{PXDESIGN_DIR}/tool_weights/mpnn/ca_model_weights",
+        f"{PXDESIGN_DIR}/tool_weights/ccd/components.cif",
+        f"{PXDESIGN_DIR}/tool_weights/ccd/clusters-by-entity-40.txt",
+    ]
+    for path in required_paths:
+        if not os.path.exists(path):
+            fail_preflight("weights", f"missing: {path}")
+    logger.info("Weights OK: %d paths verified", len(required_paths))
 
-    logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
-    return checks
+    # ---- 7. JAX GPU init (fail-fast) in a CLEAN SUBPROCESS ----
+    # Critical: AF2-IG runs as a subprocess in production, so JAX/cuDNN
+    # must work in a process where torch has NOT been imported (torch 2.3.1
+    # bundles cuDNN 8.9 which conflicts with jaxlib 0.4.29's required cuDNN 9
+    # when both are dlopen'd in the same process).
+    # The driver process here already imported torch above, so run the JAX
+    # init as a subprocess — this mirrors the actual AF2-IG invocation.
+    jax_probe = (
+        "import os, sys, ctypes, glob; "
+        # Diagnostic: show cuDNN lib paths JAX can see
+        "print('=== cuDNN diagnostic ===', file=sys.stderr); "
+        "print('LD_LIBRARY_PATH=', os.environ.get('LD_LIBRARY_PATH',''), file=sys.stderr); "
+        "libs = glob.glob('/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/libcudnn*.so*'); "
+        "print('cuDNN libs:', libs, file=sys.stderr); "
+        "import jax, jax.numpy as jnp; "
+        "devs = jax.devices(); "
+        "print('devs=', devs, file=sys.stderr); "
+        "_ = jax.jit(lambda x: x + 1)(jnp.ones(2)).block_until_ready(); "
+        "_ = jax.jit(lambda x: jnp.dot(x, x.T))"
+        "(jnp.ones((64, 64), dtype=jnp.float32)).block_until_ready(); "
+        "gpu_devs = [d for d in devs if d.platform == 'gpu']; "
+        "assert gpu_devs, f'no GPU devices: {devs}'; "
+        "print('JAX_GPU_OK', jax.__version__, gpu_devs)"
+    )
+    try:
+        # Merge stderr with stdout so we see cuDNN error lines
+        result = subprocess.run(
+            ["python3", "-c", jax_probe],
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "TF_CPP_MIN_LOG_LEVEL": "0"},
+        )
+        if result.returncode != 0:
+            fail_preflight(
+                "jax_gpu_init",
+                f"JAX GPU subprocess exit {result.returncode}\n"
+                f"=== STDOUT (full) ===\n{result.stdout}\n"
+                f"=== STDERR (last 4000) ===\n{result.stderr[-4000:]}",
+            )
+        logger.info("JAX GPU subprocess OK: stdout=%s stderr_tail=%s",
+                    result.stdout.strip(), result.stderr[-500:].strip())
+    except subprocess.TimeoutExpired:
+        fail_preflight("jax_gpu_init", "JAX GPU subprocess timed out after 180s")
+
+    logger.info("=== PREFLIGHT DONE in %.1fs ===", time.time() - t0)
 
 
 # ===========================================================================
-# Helper functions
+# Heartbeat / webhook (unchanged legacy helpers for tier=webhook path)
 # ===========================================================================
 
 def send_heartbeat(
@@ -120,7 +305,9 @@ def send_heartbeat(
     designs_completed: int = 0,
     designs_total: int = 0,
 ) -> None:
-    """Send a heartbeat to the Kendrew backend."""
+    """Send a heartbeat to the Kendrew backend (webhook tier)."""
+    if not webhook_url:
+        return
     parsed = urlparse(webhook_url)
     heartbeat_url = urlunparse(parsed._replace(path="/webhooks/heartbeat"))
     body = {
@@ -184,32 +371,74 @@ def upload_output(url: str, file_path: str) -> None:
 def run_command(
     cmd: list[str], timeout: int = 3600, cwd: str | None = None,
 ) -> str:
-    """Run a subprocess command with timeout and logging."""
+    """Run a subprocess command with timeout, streaming stdout/stderr live.
+
+    PXDesign's ``pipeline`` subcommand can block silently for 10-20 min inside
+    JAX JIT compile + AF2 first forward pass. With ``capture_output=True`` we
+    would see nothing in Modal logs until the subprocess exits or times out,
+    which makes triage impossible. Stream the merged output line-by-line to
+    our stderr so Modal logs show live progress.
+
+    A ring buffer retains the last 4000 chars for the RuntimeError message.
+    """
+    from collections import deque
+
     logger.info("Running: %s", " ".join(cmd[:8]) + ("..." if len(cmd) > 8 else ""))
     start = time.time()
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd,
-    )
-    elapsed = time.time() - start
-    combined_output = (result.stdout or "") + (result.stderr or "")
 
-    output_tail = combined_output[-2000:]
-    logger.info(
-        "Command finished in %.1fs (exit code %d). Output tail:\n%s",
-        elapsed, result.returncode, output_tail,
+    proc = subprocess.Popen(
+        cmd, cwd=cwd,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,  # line-buffered
     )
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Command failed (exit {result.returncode}): {output_tail}"
+    tail: "deque[str]" = deque(maxlen=400)  # ~40k chars max
+    deadline = start + timeout
+
+    try:
+        assert proc.stdout is not None
+        for line in iter(proc.stdout.readline, ""):
+            if time.time() > deadline:
+                proc.kill()
+                proc.wait(timeout=30)
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            tail.append(line)
+            # Stream to stderr so Modal captures it immediately.
+            sys.stderr.write(line)
+            sys.stderr.flush()
+        proc.stdout.close()
+        returncode = proc.wait(timeout=max(1, int(deadline - time.time())))
+    except subprocess.TimeoutExpired:
+        elapsed = time.time() - start
+        output_tail = "".join(tail)[-4000:]
+        logger.error(
+            "Command TIMED OUT after %.1fs. Output tail:\n%s",
+            elapsed, output_tail,
         )
-    return combined_output
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {output_tail[-2000:]}"
+        )
+
+    elapsed = time.time() - start
+    output_tail = "".join(tail)[-4000:]
+    logger.info(
+        "Command finished in %.1fs (exit code %d).",
+        elapsed, returncode,
+    )
+
+    if returncode != 0:
+        raise RuntimeError(
+            f"Command failed (exit {returncode}): {output_tail[-2000:]}"
+        )
+    return output_tail
 
 
 def post_webhook(
     webhook_url: str, job_id: str, pod_id: str, payload: dict,
 ) -> None:
-    """POST results to the Kendrew backend webhook."""
+    """POST results to the Kendrew backend webhook (webhook tier)."""
+    if not webhook_url:
+        return
     body = {
         "id": job_id,
         "pod_id": pod_id,
@@ -236,37 +465,153 @@ def post_webhook(
 # ===========================================================================
 
 def ensure_cif(input_path: str, work_dir: str) -> str:
-    """Ensure input is in CIF format. Convert from PDB if needed.
+    """Convert the downloaded PDB into a PXDesign-ready mmCIF.
 
-    PXDesign strongly recommends CIF to avoid chain/residue ID remapping
-    during internal PDB-to-CIF conversion. Re-indexes chains so residues
-    start at 1 (required for correct crop range interpretation).
+    PXDesign's CIF reader looks up chains by ``label_asym_id``. gemmi's
+    ``make_mmcif_document()`` writes auto-generated subchain labels
+    (``Axp``, ``Ax1``) there when entities are set up, which means
+    PXDesign can't find the caller-provided chain name (``A``).
 
-    Returns:
-        Path to the validated/converted CIF file.
+    The safest fix is to write the CIF manually with ``label_asym_id ==
+    auth_asym_id == chain_name`` and only standard-20-AA polymer
+    residues. MSE, SEP, etc. are remapped to their parent codes first.
     """
     import gemmi
+    from gemmi import cif
+
+    STANDARD_AA = frozenset([
+        "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+        "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    ])
+    MODRES_MAP = {
+        "MSE": ("MET", {"SE": ("SD", "S")}),
+        "CME": ("CYS", {}), "CSO": ("CYS", {}), "SEP": ("SER", {}),
+        "TPO": ("THR", {}), "PTR": ("TYR", {}), "KCX": ("LYS", {}),
+        "HYP": ("PRO", {}), "LLP": ("LYS", {}),
+    }
 
     structure = gemmi.read_structure(input_path)
+    structure.remove_alternative_conformations()
+    structure.remove_hydrogens()
+    structure.remove_ligands_and_waters()
+    structure.remove_empty_chains()
 
-    # Re-index: ensure each chain starts at residue 1 using label_seq_id
+    chains_data: dict[str, list[dict]] = {}
+    modres_renames = 0
+    dropped_counts: dict[str, int] = {}
+
     for model in structure:
         for chain in model:
-            for idx, residue in enumerate(chain):
-                residue.label_seq = idx + 1
-                residue.seqid = gemmi.SeqId(str(idx + 1))
+            chain_residues: list[dict] = []
+            for residue in chain:
+                name = residue.name
+                atom_rename: dict = {}
+                if name in MODRES_MAP:
+                    new_name, atom_fixes = MODRES_MAP[name]
+                    name = new_name
+                    atom_rename = atom_fixes
+                    modres_renames += 1
+                if name not in STANDARD_AA:
+                    dropped_counts[residue.name] = dropped_counts.get(residue.name, 0) + 1
+                    continue
+                atoms = []
+                for atom in residue:
+                    atom_name = atom.name
+                    atom_elem = atom.element.name
+                    if atom_name in atom_rename:
+                        atom_name, atom_elem = atom_rename[atom_name]
+                    if atom_elem == "H":
+                        continue
+                    atoms.append((
+                        atom_name, atom_elem,
+                        atom.pos.x, atom.pos.y, atom.pos.z,
+                    ))
+                if atoms:
+                    chain_residues.append({"resname": name, "atoms": atoms})
+            if chain_residues:
+                chains_data.setdefault(chain.name, []).extend(chain_residues)
+        break  # first model only
+
+    if not chains_data:
+        raise RuntimeError("No standard polymer residues survived cleanup")
+
+    for chain_name, residues in chains_data.items():
+        for idx, res in enumerate(residues, start=1):
+            res["resnum"] = idx
+
+    kept_counts = {c: len(r) for c, r in chains_data.items()}
+    logger.info(
+        "CIF prep: modres_renames=%d, kept_per_chain=%s, dropped=%s",
+        modres_renames, kept_counts, dropped_counts,
+    )
+
+    doc = cif.Document()
+    block = doc.add_new_block("target")
+
+    chain_names = list(chains_data.keys())
+    chain_to_entity = {name: str(i + 1) for i, name in enumerate(chain_names)}
+
+    e_loop = block.init_loop("_entity.", ["id", "type"])
+    for name in chain_names:
+        e_loop.add_row([chain_to_entity[name], "polymer"])
+
+    ep_loop = block.init_loop("_entity_poly.", ["entity_id", "type"])
+    for name in chain_names:
+        ep_loop.add_row([chain_to_entity[name], "polypeptide(L)"])
+
+    eps_loop = block.init_loop(
+        "_entity_poly_seq.", ["entity_id", "num", "mon_id"],
+    )
+    for name in chain_names:
+        eid = chain_to_entity[name]
+        for res in chains_data[name]:
+            eps_loop.add_row([eid, str(res["resnum"]), res["resname"]])
+
+    sa_loop = block.init_loop("_struct_asym.", ["id", "entity_id"])
+    for name in chain_names:
+        sa_loop.add_row([name, chain_to_entity[name]])
+
+    as_loop = block.init_loop("_atom_site.", [
+        "group_PDB", "id", "type_symbol", "label_atom_id",
+        "label_alt_id", "label_comp_id", "label_asym_id",
+        "label_entity_id", "label_seq_id",
+        "pdbx_PDB_ins_code",
+        "Cartn_x", "Cartn_y", "Cartn_z",
+        "occupancy", "B_iso_or_equiv",
+        "auth_asym_id", "auth_seq_id", "auth_comp_id",
+        "pdbx_PDB_model_num",
+    ])
+    atom_id = 0
+    for name in chain_names:
+        eid = chain_to_entity[name]
+        for res in chains_data[name]:
+            resnum = str(res["resnum"])
+            resname = res["resname"]
+            for atom_name, atom_elem, x, y, z in res["atoms"]:
+                atom_id += 1
+                as_loop.add_row([
+                    "ATOM", str(atom_id), atom_elem, atom_name,
+                    ".", resname, name,
+                    eid, resnum,
+                    "?",
+                    f"{x:.3f}", f"{y:.3f}", f"{z:.3f}",
+                    "1.00", "20.00",
+                    name, resnum, resname,
+                    "1",
+                ])
 
     cif_path = os.path.join(work_dir, "target.cif")
-    structure.make_mmcif_document().write_file(cif_path)
-    logger.info("CIF written to %s (%d bytes)", cif_path, os.path.getsize(cif_path))
+    doc.write_file(cif_path)
+    logger.info(
+        "CIF written to %s (%d bytes, %d atoms, %d residues)",
+        cif_path, os.path.getsize(cif_path), atom_id,
+        sum(kept_counts.values()),
+    )
     return cif_path
 
 
 def get_chain_length(cif_path: str, chain_id: str) -> int:
-    """Count residues in a specific chain of a CIF file.
-
-    Used to generate the crop range for PXDesign YAML spec.
-    """
+    """Count residues in a specific chain of a CIF file."""
     import gemmi
 
     structure = gemmi.read_structure(cif_path)
@@ -283,31 +628,23 @@ def get_chain_length(cif_path: str, chain_id: str) -> int:
 # ===========================================================================
 
 def build_yaml_spec(
-    job_spec: dict, target_cif_path: str,
+    job_spec: dict, target_cif_path: str, preset: str = "preview",
+    num_designs: int | None = None, binder_length=None,
 ) -> dict:
     """Build PXDesign YAML task spec from job parameters.
 
     Reads the target CIF to determine chain length for the crop range.
     PXDesign requires crop as a list of string ranges, e.g. ["1-116"].
-
-    Args:
-        job_spec: Deserialized JobSpec dict from JOB_PAYLOAD.
-        target_cif_path: Path to the re-indexed target CIF inside the container.
-
-    Returns:
-        Dict representing the PXDesign YAML spec.
     """
     params = job_spec.get("parameters", {})
     chain = job_spec.get("target_chain", "A")
     hotspots = job_spec.get("hotspot_residues", [])
 
-    binder_length = params.get("binder_length", 80)
-    # PXDesign accepts integer (e.g. 80) or dict (e.g. {"min": 50, "max": 100})
-    if isinstance(binder_length, dict):
-        binder_length = binder_length
-    num_designs = params.get("num_designs", 100)
+    if binder_length is None:
+        binder_length = params.get("binder_length", 80)
+    if num_designs is None:
+        num_designs = params.get("num_designs", 100)
 
-    # Determine chain length from the CIF for crop range
     chain_length = get_chain_length(target_cif_path, chain)
     logger.info("Target chain %s has %d residues", chain, chain_length)
 
@@ -319,18 +656,17 @@ def build_yaml_spec(
     yaml_spec = {
         "target": {
             "file": target_cif_path,
-            "chains": {
-                chain: chain_spec,
-            },
+            "chains": {chain: chain_spec},
         },
         "binder_length": binder_length,
-        "preset": "basic",
+        "preset": preset,
         "N_sample": num_designs,
     }
 
     logger.info(
-        "YAML spec: chain=%s, crop=[1-%d], hotspots=%s, binder_length=%s, N_sample=%d",
-        chain, chain_length, hotspots, binder_length, num_designs,
+        "YAML spec: chain=%s, crop=[1-%d], hotspots=%s, binder_length=%s, "
+        "N_sample=%d, preset=%s",
+        chain, chain_length, hotspots, binder_length, num_designs, preset,
     )
     return yaml_spec
 
@@ -341,7 +677,7 @@ def build_yaml_spec(
 
 def _safe_float(value: str, default: float) -> float:
     """Parse a float from a CSV value, returning default on failure."""
-    if not value or not value.strip():
+    if not value or not str(value).strip():
         return default
     try:
         parsed = float(value)
@@ -353,14 +689,7 @@ def _safe_float(value: str, default: float) -> float:
 
 
 def parse_summary_csv(csv_path: str) -> list[dict]:
-    """Parse PXDesign summary.csv into a list of candidate dicts.
-
-    PXDesign summary.csv uses af2_* prefixed column names for AF2-IG metrics
-    and AF2-IG-success / AF2-IG-easy-success boolean columns for filter status.
-
-    Returns:
-        List of dicts with design_name, scores, and filter status.
-    """
+    """Parse PXDesign summary.csv into a list of candidate dicts."""
     if not os.path.exists(csv_path):
         logger.warning("summary.csv not found at %s", csv_path)
         return []
@@ -371,7 +700,6 @@ def parse_summary_csv(csv_path: str) -> list[dict]:
         columns = reader.fieldnames or []
         logger.info("summary.csv columns: %s", columns)
 
-        # Normalize column names for lookup
         for row in reader:
             row_lower = {k.lower().strip(): v for k, v in row.items()}
 
@@ -382,24 +710,38 @@ def parse_summary_csv(csv_path: str) -> list[dict]:
                 or f"design_{len(results)}"
             )
 
-            scores = {}
-
-            # PXDesign uses af2_* prefixed columns
+            scores: dict = {}
             for metric, keys in [
                 ("ipTM", ["af2_iptm", "af2_ip_tm", "iptm", "iptm_score", "ip_tm"]),
                 ("pLDDT", ["af2_plddt", "af2_mean_plddt", "plddt", "mean_plddt"]),
-                ("pAE", ["af2_ipae", "af2_pae", "ipae", "pae", "i_pae", "mean_pae"]),
+                # Prefer unscaled (Angstrom-scale) pAE over the [0,1] normalized
+                # form that PXDesign reports as af2_pae / af2_ipae.
+                ("pAE", [
+                    "unscaled_i_pae", "unscaled_ipae", "unscaled_pae",
+                    "af2_unscaled_ipae", "af2_unscaled_i_pae",
+                    "af2_ipae", "af2_pae", "ipae", "pae", "i_pae", "mean_pae",
+                ]),
             ]:
                 for key in keys:
                     if key in row_lower and row_lower[key]:
-                        scores[metric] = _safe_float(row_lower[key], 0.0 if metric != "pAE" else 99.0)
+                        scores[metric] = _safe_float(
+                            row_lower[key],
+                            0.0 if metric != "pAE" else 99.0,
+                        )
                         break
 
-            # Filter status from AF2-IG-success column
+            # PXDesign reports pLDDT on the [0,1] scale; SMOKE-TEST-SPEC and
+            # every downstream consumer expects [0,100]. Only scale when the
+            # value looks normalized (0 <= v <= 1) to avoid double-scaling if
+            # a future CSV version ships [0,100] natively.
+            if "pLDDT" in scores and 0.0 <= scores["pLDDT"] <= 1.0:
+                scores["pLDDT"] = scores["pLDDT"] * 100.0
+
             filter_status = "unknown"
-            for key in ["af2-ig-success", "af2-ig-easy-success", "filter_status", "status", "pass"]:
+            for key in ["af2-ig-success", "af2-ig-easy-success",
+                        "filter_status", "status", "pass"]:
                 if key in row_lower and row_lower[key]:
-                    val = row_lower[key].strip().lower()
+                    val = str(row_lower[key]).strip().lower()
                     if val in ("true", "1", "yes", "pass", "passed"):
                         filter_status = "pass"
                     elif val in ("false", "0", "no", "fail", "failed"):
@@ -421,56 +763,77 @@ def parse_summary_csv(csv_path: str) -> list[dict]:
 def find_design_files(output_dir: str) -> dict[str, str]:
     """Map design names to their PDB or CIF file paths in the output directory.
 
-    Searches passing-AF2-IG/ and passing-AF2-IG-easy/ directories first,
-    then falls back to recursive search.
-
-    Returns:
-        Dict mapping design name (stem) to file path.
+    PXDesign's observed output layout is:
+        <output_dir>/global_run_0/<spec_name>/seed_<NNN>/predictions/converted_pdbs/<name>.pdb
+    Documented layouts also use passing-AF2-IG-easy/ and passing-AF2-IG/ subdirs.
+    Summary.csv may reference designs by stem (e.g. ``spec_sample_0``) or by
+    basename without extension. We index both forms.
     """
-    design_files = {}
+    design_files: dict[str, str] = {}
 
-    # Search in priority order: strict filter first, then easy filter
-    for subdir in ["passing-AF2-IG", "passing-AF2-IG-easy", "orig_designed"]:
+    # Layer 1: documented PXDesign passing-* subdirs + orig_designed.
+    # Note passing-AF2-IG-easy is the primary key per PXDesign README.
+    for subdir in ["passing-AF2-IG-easy", "passing-AF2-IG", "orig_designed"]:
         candidate_dir = os.path.join(output_dir, subdir)
         if os.path.isdir(candidate_dir):
             for ext in ("*.pdb", "*.cif"):
                 for path in Path(candidate_dir).rglob(ext):
-                    if path.stem not in design_files:
-                        design_files[path.stem] = str(path)
+                    design_files.setdefault(path.stem, str(path))
+                    design_files.setdefault(path.name, str(path))
 
-    # Fallback: search entire output directory
+    # Layer 2: any converted_pdbs directory, observed live in
+    # global_run_0/<spec>/seed_<NNN>/predictions/converted_pdbs/spec_sample_<M>.pdb.
+    for pred_dir in Path(output_dir).rglob("converted_pdbs"):
+        for path in pred_dir.rglob("*.pdb"):
+            design_files.setdefault(path.stem, str(path))
+            design_files.setdefault(path.name, str(path))
+        for path in pred_dir.rglob("*.cif"):
+            design_files.setdefault(path.stem, str(path))
+            design_files.setdefault(path.name, str(path))
+
+    # Layer 3: last-ditch recursive fallback if nothing above hit.
     if not design_files:
         for ext in ("*.pdb", "*.cif"):
             for path in Path(output_dir).rglob(ext):
-                if path.stem not in design_files:
-                    design_files[path.stem] = str(path)
+                design_files.setdefault(path.stem, str(path))
+                design_files.setdefault(path.name, str(path))
 
-    logger.info("Found %d design structure files in %s", len(design_files), output_dir)
+    logger.info(
+        "Found %d design structure file keys in %s (sample=%s)",
+        len(design_files), output_dir, list(design_files.keys())[:6],
+    )
     return design_files
 
 
+def locate_summary_csv(output_dir: str) -> str | None:
+    """Find summary.csv anywhere under output_dir."""
+    for candidate in (
+        os.path.join(output_dir, "summary.csv"),
+        os.path.join(output_dir, "results", "summary.csv"),
+    ):
+        if os.path.exists(candidate):
+            return candidate
+    matches = list(Path(output_dir).rglob("summary.csv"))
+    return str(matches[0]) if matches else None
+
+
 # ===========================================================================
-# Pipeline execution
+# Pipeline execution helpers
 # ===========================================================================
 
 def validate_input(spec_path: str) -> None:
-    """Run pxdesign check-input to validate the YAML spec before design.
-
-    Raises RuntimeError if validation fails. This catches config errors
-    before consuming GPU time.
-    """
+    """Run pxdesign check-input to validate the YAML spec before design."""
     logger.info("Validating PXDesign input spec: %s", spec_path)
     try:
         run_command(
             ["pxdesign", "check-input", "--yaml", spec_path],
-            timeout=120,
+            timeout=180,
         )
         logger.info("Input validation passed")
     except FileNotFoundError:
-        # CLI not in PATH — try python -m fallback
         run_command(
             ["python3", "-m", "pxdesign", "check-input", "--yaml", spec_path],
-            timeout=120,
+            timeout=180,
         )
         logger.info("Input validation passed (python -m fallback)")
 
@@ -479,28 +842,27 @@ def run_pxdesign(
     spec_path: str,
     output_dir: str,
     num_designs: int,
+    preset: str = "preview",
+    timeout: int = 5400,
 ) -> None:
-    """Run the PXDesign pipeline in basic preset mode.
+    """Run the PXDesign pipeline.
 
     Tries the pxdesign CLI first; falls back to python -m pxdesign.
     """
     cmd = [
         "pxdesign", "pipeline",
-        "--preset", "basic",
+        "--preset", preset,
         "-i", spec_path,
         "-o", output_dir,
         "--N_sample", str(num_designs),
         "--dtype", "bf16",
     ]
-
-    # Reserve 30 min for pre/post processing
-    pxdesign_timeout = max(5400, 7200 - 1800)
     try:
-        run_command(cmd, timeout=pxdesign_timeout, cwd=PXDESIGN_DIR)
+        run_command(cmd, timeout=timeout, cwd=PXDESIGN_DIR)
     except FileNotFoundError:
         logger.warning("pxdesign CLI not found, trying python -m fallback")
         fallback_cmd = ["python3", "-m", "pxdesign", "pipeline"] + cmd[2:]
-        run_command(fallback_cmd, timeout=pxdesign_timeout, cwd=PXDESIGN_DIR)
+        run_command(fallback_cmd, timeout=timeout, cwd=PXDESIGN_DIR)
 
 
 def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
@@ -524,25 +886,284 @@ def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
 
 
 # ===========================================================================
-# Main pipeline
+# Smoke / mini_pilot main
 # ===========================================================================
 
-def main():
-    """Run the full PXDesign pipeline."""
-    startup_check()
+def _resolve_preset_params(tier: str, job_spec: dict) -> dict:
+    """Merge caller params with the tier's preset."""
+    if tier == "smoke":
+        preset = smoke_preset()
+    elif tier == "mini_pilot":
+        preset = mini_pilot_preset()
+    else:
+        return job_spec.get("parameters", {})
+    caller = dict(job_spec.get("parameters", {}))
+    caller.update(preset)
+    return caller
 
-    # Read configuration from environment
-    job_payload_str = os.environ.get("JOB_PAYLOAD")
+
+def _candidate_from_design(
+    rank: int, design_name: str, local_path: str | None, scores: dict,
+) -> dict:
+    """Build a candidate dict compliant with SMOKE-TEST-SPEC.md."""
+    if local_path and os.path.exists(local_path):
+        content_b64 = base64.b64encode(Path(local_path).read_bytes()).decode()
+        ext = Path(local_path).suffix
+    else:
+        content_b64 = ""
+        ext = ".pdb"
+    return {
+        "rank": rank,
+        "pdb_key": f"design_{rank:03d}{ext}",
+        "pdb_content_b64": content_b64,
+        "scores": scores,
+    }
+
+
+def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
+    """Run PXDesign in smoke or mini_pilot tier and serialize results.
+
+    Writes /tmp/smoke_results.json per docs/SMOKE-TEST-SPEC.md layer-3 shape.
+    Always exits 0 on completion (success OR handled failure serialized).
+    """
+    logger.info("=== TIER=%s START ===", tier)
+    pipeline_start = time.time()
+    job_spec = job_payload.get("job_spec", {}) or {}
+    input_url = job_payload.get("input_pdb_url", "") or ""
+
+    preset_params = _resolve_preset_params(tier, job_spec)
+    preset = preset_params.get("preset", "basic")
+    num_designs = int(preset_params.get("num_designs", 1))
+    binder_length = preset_params.get("binder_length", 80)
+
+    work_dir = tempfile.mkdtemp(prefix=f"pxdesign_{tier}_")
+    output_dir = os.path.join(work_dir, "pxdesign_output")
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        # ----- Resolve target PDB (fixture or URL) -----
+        if input_url:
+            target_input = os.path.join(work_dir, "target_input.pdb")
+            download_input(input_url, target_input)
+        else:
+            target_input = os.path.join(work_dir, "target_input.pdb")
+            shutil.copyfile(SMOKE_TARGET_PATH, target_input)
+            logger.info("Using baked smoke fixture %s", SMOKE_TARGET_PATH)
+
+        # ----- Convert to CIF -----
+        try:
+            target_cif = ensure_cif(target_input, work_dir)
+        except Exception as exc:
+            fail_compute("cif_conversion", f"{exc}\n{traceback.format_exc()}")
+            return
+
+        # ----- YAML spec -----
+        try:
+            yaml_spec = build_yaml_spec(
+                job_spec, target_cif,
+                preset=preset,
+                num_designs=num_designs,
+                binder_length=binder_length,
+            )
+        except Exception as exc:
+            fail_compute("yaml_build", f"{exc}\n{traceback.format_exc()}")
+            return
+
+        spec_path = os.path.join(work_dir, "spec.yaml")
+        with open(spec_path, "w") as fh:
+            yaml.dump(yaml_spec, fh, default_flow_style=False)
+        logger.info("YAML spec written to %s", spec_path)
+        with open(spec_path) as fh:
+            logger.info("Spec contents:\n%s", fh.read())
+
+        # ----- Validate input -----
+        try:
+            validate_input(spec_path)
+        except Exception as exc:
+            fail_compute("check_input", f"{exc}\n{traceback.format_exc()}")
+            return
+
+        # ----- Run PXDesign -----
+        # First-run JAX JIT + AF2 compile alone takes 10-15 min on A100-80.
+        # Smoke (N=1) completes in ~17 min wall / ~1000 gpu_seconds on a cold
+        # container, so 1700s leaves ~12 min of headroom. Mini-pilot (N=2 +
+        # post_filter) roughly doubles the diffusion + AF2-IG cost; bump the
+        # internal timeout to 4500s so the full pipeline has room to finish
+        # without tripping our own guard well before Modal's function timeout.
+        timeout_s = 1700 if tier == "smoke" else 4500
+        try:
+            run_pxdesign(
+                spec_path, output_dir, num_designs,
+                preset=preset, timeout=timeout_s,
+            )
+        except Exception as exc:
+            # Log output tree to aid triage
+            try:
+                for root, _dirs, files in os.walk(output_dir):
+                    for fname in files:
+                        logger.info(
+                            "Output file: %s",
+                            os.path.relpath(os.path.join(root, fname), output_dir),
+                        )
+            except Exception:
+                pass
+            fail_compute("pxdesign_run", f"{exc}\n{traceback.format_exc()}")
+            return
+
+        # ----- Log output tree for debugging -----
+        for root, _dirs, files in os.walk(output_dir):
+            rel_root = os.path.relpath(root, output_dir)
+            for fname in files:
+                logger.info("Output file: %s/%s", rel_root, fname)
+
+        # ----- Parse results -----
+        summary_csv = locate_summary_csv(output_dir)
+        if summary_csv is None:
+            all_files = [str(p.name) for p in Path(output_dir).rglob("*")][:80]
+            fail_compute(
+                "missing_summary_csv",
+                f"no summary.csv under {output_dir}; files={all_files}",
+            )
+            return
+
+        parsed_results = parse_summary_csv(summary_csv)
+        design_files = find_design_files(output_dir)
+
+        if not parsed_results:
+            fail_compute(
+                "empty_summary",
+                f"summary.csv at {summary_csv} had zero rows",
+            )
+            return
+
+        # ----- Rank by ipTM descending -----
+        parsed_results.sort(
+            key=lambda r: r["scores"].get("ipTM", 0.0), reverse=True,
+        )
+
+        # Match requested N (or all if fewer were produced)
+        top_results = parsed_results[:num_designs]
+
+        # ----- Assemble candidates with inline base64 PDBs -----
+        candidates: list[dict] = []
+        for rank_idx, result in enumerate(top_results):
+            rank = rank_idx + 1
+            design_name = result["design_name"]
+
+            local_path = design_files.get(design_name)
+            if not local_path:
+                # Try stem-based matching.
+                local_path = design_files.get(Path(design_name).stem)
+            if not local_path:
+                # Substring match both directions.
+                for key, fpath in design_files.items():
+                    if design_name in key or key in design_name:
+                        local_path = fpath
+                        break
+            if not local_path:
+                # PXDesign fallback: summary rows may be named by spec/seed; the
+                # actual PDB is spec_sample_<rank_idx>.pdb in converted_pdbs/.
+                # Try rank-indexed fallback on spec_sample_<N>.
+                sample_key = f"spec_sample_{rank_idx}"
+                local_path = design_files.get(sample_key)
+                if not local_path:
+                    # Try any .pdb whose stem starts with "spec_sample_"
+                    candidates_sample = sorted(
+                        (k for k in design_files if k.startswith("spec_sample_")),
+                        key=lambda s: int(s.rsplit("_", 1)[-1])
+                        if s.rsplit("_", 1)[-1].isdigit() else 9999,
+                    )
+                    if rank_idx < len(candidates_sample):
+                        local_path = design_files[candidates_sample[rank_idx]]
+
+            if not local_path:
+                logger.warning(
+                    "No structure file for design %s; available=%s",
+                    design_name, list(design_files.keys())[:10],
+                )
+
+            # If CIF only, try to sibling .pdb or leave CIF (spec says pdb_content_b64;
+            # we still base64 whatever structural output exists — orchestrator's
+            # Bio.PDB.PDBParser may need a PDB; convert CIF -> PDB via gemmi.
+            final_path = local_path
+            if local_path and local_path.endswith(".cif"):
+                try:
+                    import gemmi
+                    pdb_out = os.path.join(work_dir, f"design_{rank:03d}.pdb")
+                    gemmi.read_structure(local_path).write_pdb(pdb_out)
+                    final_path = pdb_out
+                    logger.info("Converted %s -> %s", local_path, pdb_out)
+                except Exception as exc:
+                    logger.warning("CIF->PDB convert failed (%s); keeping CIF", exc)
+
+            candidates.append(_candidate_from_design(
+                rank=rank,
+                design_name=design_name,
+                local_path=final_path,
+                scores=result["scores"],
+            ))
+
+        # ----- Sanity: required shape per SMOKE-TEST-SPEC.md -----
+        if tier == "mini_pilot":
+            for c in candidates:
+                for k in ("ipTM", "pLDDT"):
+                    v = c["scores"].get(k)
+                    if not isinstance(v, (int, float)) or v != v or v == 0.0:
+                        logger.warning(
+                            "mini_pilot candidate rank=%d has suspect %s=%r",
+                            c["rank"], k, v,
+                        )
+
+        gpu_seconds = int(time.time() - pipeline_start)
+        write_smoke_result({
+            "status": "COMPLETED",
+            "output": {"candidates": candidates},
+            "tier": tier,
+            "gpu_seconds": gpu_seconds,
+        })
+        logger.info(
+            "=== TIER=%s DONE: %d candidates in %ds ===",
+            tier, len(candidates), gpu_seconds,
+        )
+
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ===========================================================================
+# Legacy webhook-tier main
+# ===========================================================================
+
+def startup_check_legacy() -> dict:
+    """Validate env vars for webhook tier only."""
+    checks: dict = {}
+    required_vars = ["WEBHOOK_URL", "JOB_ID", "JOB_PAYLOAD"]
+    missing = [var for var in required_vars if not os.environ.get(var)]
+    if missing:
+        logger.error("Missing required environment variables: %s", missing)
+        sys.exit(1)
+
+    try:
+        import torch
+        checks["torch"] = torch.__version__
+        checks["cuda_available"] = torch.cuda.is_available()
+        if not torch.cuda.is_available():
+            logger.error("CUDA not available")
+            sys.exit(1)
+    except ImportError:
+        logger.error("PyTorch is not installed.")
+        sys.exit(1)
+    return checks
+
+
+def run_webhook_tier(job_payload: dict) -> None:
+    """Legacy RunPod pilot path: presigned I/O + webhook."""
+    startup_check_legacy()
     webhook_url = os.environ.get("WEBHOOK_URL", "")
     job_id = os.environ.get("JOB_ID", "unknown")
     pod_id = os.environ.get("RUNPOD_POD_ID", os.environ.get("POD_ID", "unknown"))
     job_token = os.environ.get("JOB_TOKEN", "")
 
-    if not job_payload_str:
-        logger.error("JOB_PAYLOAD environment variable not set")
-        sys.exit(1)
-
-    job_payload = json.loads(job_payload_str)
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
@@ -554,109 +1175,63 @@ def main():
     output_dir = os.path.join(work_dir, "pxdesign_output")
     os.makedirs(output_dir, exist_ok=True)
 
-    # Determine input file extension from URL
     input_ext = ".pdb"
-    input_url_path = urlparse(input_url).path
-    if input_url_path.endswith(".cif"):
+    if urlparse(input_url).path.endswith(".cif"):
         input_ext = ".cif"
     target_input = os.path.join(work_dir, f"target_input{input_ext}")
 
     try:
-        # ----- Stage 1: Download input -----
         download_input(input_url, target_input)
         send_heartbeat(webhook_url, job_id, "Input downloaded", 0, num_designs)
 
-        # ----- Stage 2: Convert to CIF and re-index -----
-        send_heartbeat(webhook_url, job_id, "Preparing CIF", 0, num_designs)
-        try:
-            target_cif = ensure_cif(target_input, work_dir)
-        except Exception as exc:
-            logger.error("CIF conversion failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"CIF conversion failed: {exc}",
-            })
-            return
+        target_cif = ensure_cif(target_input, work_dir)
 
-        # ----- Stage 3: Build YAML spec -----
-        try:
-            yaml_spec = build_yaml_spec(job_spec, target_cif)
-        except ValueError as exc:
-            logger.error("YAML spec generation failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"YAML spec generation failed: {exc}",
-            })
-            return
-
+        yaml_spec = build_yaml_spec(
+            job_spec, target_cif,
+            preset="preview",
+            num_designs=num_designs,
+        )
         spec_path = os.path.join(work_dir, "spec.yaml")
         with open(spec_path, "w") as fh:
             yaml.dump(yaml_spec, fh, default_flow_style=False)
-        logger.info("YAML spec written to %s", spec_path)
-        with open(spec_path) as fh:
-            logger.info("Spec contents:\n%s", fh.read())
 
-        # ----- Stage 4: Validate input -----
-        try:
-            validate_input(spec_path)
-        except RuntimeError as exc:
-            logger.error("Input validation failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"PXDesign input validation failed: {exc}",
-            })
-            return
+        validate_input(spec_path)
 
-        # ----- Stage 5: Run PXDesign -----
         send_heartbeat(webhook_url, job_id, "Running PXDesign", 0, num_designs)
+        heartbeat_stop = threading.Event()
+
+        def _keepalive() -> None:
+            while not heartbeat_stop.wait(300):
+                try:
+                    send_heartbeat(
+                        webhook_url, job_id,
+                        "Running PXDesign", 0, num_designs,
+                    )
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("keepalive heartbeat failed: %s", exc)
+
+        keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
+        keepalive_thread.start()
         try:
-            run_pxdesign(spec_path, output_dir, num_designs)
-        except RuntimeError as exc:
-            logger.error("PXDesign pipeline failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"PXDesign pipeline failed: {exc}",
-            })
-            return
+            run_pxdesign(
+                spec_path, output_dir, num_designs,
+                preset="preview", timeout=5400,
+            )
+        finally:
+            heartbeat_stop.set()
 
         send_heartbeat(webhook_url, job_id, "PXDesign complete", num_designs, num_designs)
 
-        # ----- Log output tree for debugging -----
-        for root, dirs, files in os.walk(output_dir):
-            rel_root = os.path.relpath(root, output_dir)
-            for fname in files:
-                logger.info("Output file: %s/%s", rel_root, fname)
-
-        # ----- Stage 6: Parse results -----
-        summary_csv = None
-        for candidate_path in [
-            os.path.join(output_dir, "summary.csv"),
-            os.path.join(output_dir, "results", "summary.csv"),
-        ]:
-            if os.path.exists(candidate_path):
-                summary_csv = candidate_path
-                break
-
-        # Fallback: recursive search
+        summary_csv = locate_summary_csv(output_dir)
         if summary_csv is None:
-            csv_matches = list(Path(output_dir).rglob("summary.csv"))
-            if csv_matches:
-                summary_csv = str(csv_matches[0])
-
-        if summary_csv is None:
-            logger.error("No summary.csv found in PXDesign output")
-            all_files = list(Path(output_dir).rglob("*"))
-            logger.info(
-                "PXDesign output contents (%d files): %s",
-                len(all_files),
-                [str(f.name) for f in all_files[:50]],
-            )
             post_webhook(webhook_url, job_id, pod_id, {
                 "error": "PXDesign produced no summary.csv",
-                "output_files": [str(f.name) for f in all_files[:50]],
             })
             return
 
         parsed_results = parse_summary_csv(summary_csv)
         design_files = find_design_files(output_dir)
 
-        # ----- Filter and rank -----
         passing = []
         for result in parsed_results:
             scores = result["scores"]
@@ -664,55 +1239,31 @@ def main():
             plddt = scores.get("pLDDT", 0.0)
             pae = scores.get("pAE", 99.0)
 
-            # Accept designs that pass PXDesign's AF2-IG filter OR meet our thresholds
             pxdesign_passed = scores.get("filter_status", "") == "pass"
             threshold_passed = (
                 iptm >= IPTM_THRESHOLD
                 and plddt >= PLDDT_THRESHOLD
                 and pae <= PAE_THRESHOLD
             )
-
             if pxdesign_passed or threshold_passed:
                 passing.append(result)
 
-        passing.sort(
-            key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True,
-        )
+        passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
-        logger.info(
-            "Filtering: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, pAE<=%.0f or AF2-IG=pass)",
-            len(passing), len(parsed_results),
-            IPTM_THRESHOLD, PLDDT_THRESHOLD, PAE_THRESHOLD,
-        )
-
-        # ----- Prepare upload list -----
         candidates = []
         filenames_to_upload = []
-
         for rank_idx, result in enumerate(passing):
             rank = rank_idx + 1
             design_name = result["design_name"]
-
-            # Try exact match, then fuzzy match
             local_path = design_files.get(design_name)
             if not local_path:
                 for key, fpath in design_files.items():
                     if design_name in key or key in design_name:
                         local_path = fpath
                         break
-
-            if local_path:
-                ext = Path(local_path).suffix
-            else:
-                ext = ".pdb"
-                logger.warning(
-                    "No structure file found for design %s (available: %s)",
-                    design_name, list(design_files.keys())[:10],
-                )
-
+            ext = Path(local_path).suffix if local_path else ".pdb"
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
-
             candidates.append({
                 "rank": rank,
                 "pdb_key": f"designs/{design_name}{ext}",
@@ -720,15 +1271,8 @@ def main():
                 "local_file": local_path,
                 "upload_filename": upload_filename,
             })
-
         if filenames_to_upload:
             filenames_to_upload.append("metrics.csv")
-
-        # ----- Upload outputs -----
-        send_heartbeat(
-            webhook_url, job_id, "Uploading results",
-            len(candidates), len(candidates),
-        )
 
         upload_urls = {}
         if upload_endpoint and job_token and filenames_to_upload:
@@ -739,7 +1283,6 @@ def main():
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
 
-        failed_uploads = []
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate.get("local_file")
@@ -747,12 +1290,8 @@ def main():
                 try:
                     upload_output(upload_urls[upload_filename], local_file)
                 except RuntimeError as exc:
-                    logger.warning(
-                        "Failed to upload %s: %s", upload_filename, exc,
-                    )
-                    failed_uploads.append(upload_filename)
+                    logger.warning("Upload failed: %s", exc)
 
-        # ----- Upload metrics CSV -----
         if candidates:
             metrics_csv_path = os.path.join(work_dir, "metrics.csv")
             write_metrics_csv(metrics_csv_path, candidates)
@@ -760,56 +1299,58 @@ def main():
                 try:
                     upload_output(upload_urls["metrics.csv"], metrics_csv_path)
                 except RuntimeError as exc:
-                    logger.warning("Failed to upload metrics CSV: %s", exc)
+                    logger.warning("Metrics CSV upload failed: %s", exc)
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
-        logger.info(
-            "Pipeline complete: %d candidates in %.1f minutes",
-            len(candidates), elapsed_minutes,
-        )
-
-        # ----- POST results to webhook -----
-        result_payload = {
+        post_webhook(webhook_url, job_id, pod_id, {
             "candidates": [
-                {
-                    "rank": c["rank"],
-                    "pdb_key": c["pdb_key"],
-                    "scores": c["scores"],
-                }
+                {"rank": c["rank"], "pdb_key": c["pdb_key"], "scores": c["scores"]}
                 for c in candidates
             ],
             "candidate_count": len(candidates),
             "total_designs": num_designs,
-            "parsed_results": len(parsed_results),
             "runtime_minutes": round(elapsed_minutes, 1),
-            "next_steps": (
-                "PXDesign uses multi-predictor confidence filtering (AF2-IG) "
-                "which achieves 20-73% experimental hit rates in published benchmarks. "
-                "Recommend SPR or BLI binding assay for top candidates, followed by "
-                "counter-screen for specificity. Consider extended mode (with MSA) "
-                "for Protenix-level confidence filtering on the best hits."
-            ),
-        }
-        if failed_uploads:
-            result_payload["failed_uploads"] = failed_uploads
-
-        post_webhook(webhook_url, job_id, pod_id, result_payload)
-
-    except KeyError as exc:
-        logger.error("Missing required key in job payload: %s", exc)
-        post_webhook(webhook_url, job_id, pod_id, {
-            "error": f"Missing required key in job payload: {exc}",
         })
+
     except Exception as exc:
-        logger.exception("Unhandled pipeline error: %s", exc)
+        logger.exception("Webhook-tier pipeline failed: %s", exc)
         try:
             post_webhook(webhook_url, job_id, pod_id, {
                 "error": f"Pipeline crashed: {exc}",
             })
         except Exception:
-            logger.error("Failed to send error webhook")
+            pass
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+# ===========================================================================
+# Entry point
+# ===========================================================================
+
+def main() -> None:
+    """Dispatch on JOB_PAYLOAD['tier']."""
+    job_payload_str = os.environ.get("JOB_PAYLOAD")
+    if not job_payload_str:
+        logger.error("JOB_PAYLOAD environment variable not set")
+        fail_preflight("job_payload", "JOB_PAYLOAD not set")
+
+    try:
+        job_payload = json.loads(job_payload_str)
+    except json.JSONDecodeError as exc:
+        fail_preflight("job_payload_json", f"{exc}")
+        return
+
+    tier = (job_payload.get("tier") or "").strip().lower()
+    logger.info("Dispatching tier=%r", tier)
+
+    # Preflight runs for every tier — fail fast cheaply.
+    preflight(job_payload)
+
+    if tier in ("smoke", "mini_pilot"):
+        run_smoke_or_mini_pilot(tier, job_payload)
+    else:
+        run_webhook_tier(job_payload)
 
 
 if __name__ == "__main__":

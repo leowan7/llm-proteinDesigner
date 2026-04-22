@@ -1,0 +1,155 @@
+# Modal variant of docker/pxdesign/Dockerfile.
+# Diff vs production:
+#   - `wget -q --show-progress` (AF2, CCD, clusters) -> `curl -fsSL --retry 5 --retry-delay 10`
+#   - No COPY run_pipeline.py; no CMD; no WORKDIR /opt.
+# PXDesign requires CUDA 12.1+ and Python >=3.10. Devel image for CUTLASS + DeepSpeed kernels.
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PXDESIGN_DIR=/opt/pxdesign \
+    CUTLASS_PATH=/opt/cutlass
+
+# ---------- System deps ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git cmake python3-pip python3-dev build-essential \
+    libffi-dev && \
+    ln -sf /usr/bin/python3 /usr/bin/python && \
+    python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- PyTorch 2.3.1 (CUDA 12.1) ----------
+RUN python3 -m pip install --no-cache-dir \
+    torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
+
+# ---------- CUTLASS v3.5.1 (header-only, for DeepSpeed Evo attention) ----------
+RUN git clone --depth 1 --branch v3.5.1 \
+    https://github.com/NVIDIA/cutlass.git $CUTLASS_PATH
+
+# ---------- Clone PXDesign ----------
+RUN git clone --depth 1 https://github.com/bytedance/PXDesign.git $PXDESIGN_DIR
+
+# ---------- Install PXDesign deps ----------
+RUN pip --no-cache-dir install git+https://github.com/bytedance/Protenix.git@v0.5.0+pxd
+
+RUN pip install --no-cache-dir git+https://github.com/sokrypton/ColabDesign.git --no-deps && \
+    pip install --no-cache-dir \
+    posix_ipc einops transformers==4.51.3 optax==0.2.5 dm-haiku==0.0.13
+
+RUN pip install --no-cache-dir "jax[cuda12]==0.4.29" && \
+    python3 -c "import jax; print('jax', jax.__version__, 'cuda plugin installed')"
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+
+# Verify torch still imports cleanly after the JAX install may have pulled
+# cuDNN 9 into site-packages. Torch 2.3.1's bundled cuDNN 8.9 is loaded via
+# earlier ld search order so this should be safe.
+RUN python3 -c "import torch; assert torch.cuda.is_available() or True; print('torch', torch.__version__, 'import OK')"
+
+RUN pip install --no-cache-dir \
+    numpy==1.26.3 natsort dm-tree \
+    biopython==1.83 modelcif==0.7 biotite==1.0.1 \
+    scipy scikit-learn scikit-learn-extra \
+    "deepspeed>=0.12.0,<0.13.0" protobuf==3.20.2 \
+    matplotlib==3.9.2 rdkit-pypi \
+    pyyaml ml_collections tqdm pandas
+
+RUN pip install --no-cache-dir git+https://github.com/bytedance/PXDesignBench.git@v0.1.2 --no-deps
+
+RUN cd $PXDESIGN_DIR && pip install --no-cache-dir -e .
+
+# ---------- Enforce torch==2.3.1 + deepspeed<0.13 after all installs ----------
+# Protenix and PXDesign's own setup.py (`pip install -e .`) upgrade torch
+# AND deepspeed during their install. deepspeed >=0.14 uses
+# torch.amp.custom_fwd(device_type=...) which only exists in torch 2.4+;
+# at torch 2.3.1 the import fails with:
+#   AttributeError: module 'torch.amp' has no attribute 'custom_fwd'
+# Force both torch 2.3.1 AND deepspeed 0.12.x back here so the runtime
+# matches the Dockerfile header.
+RUN pip install --force-reinstall --no-cache-dir \
+    torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121 && \
+    pip install --force-reinstall --no-cache-dir --no-deps \
+    "deepspeed>=0.12.0,<0.13.0" && \
+    python3 -c "import torch, deepspeed; print('torch', torch.__version__, 'deepspeed', deepspeed.__version__)"
+
+# ---------- Restore cuDNN 9.1 AFTER torch reinstall ----------
+# torch==2.3.1 depends on nvidia-cudnn-cu12==8.9.2.26 and re-installing torch
+# pulls cuDNN 8 back into /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/,
+# overwriting the cuDNN 9.1.1.17 that jax[cuda12]==0.4.29 needs. Force cuDNN
+# 9.1.1.17 again with --no-deps so jaxlib can find a matching DNN library.
+# torch will still find cuDNN 9 too, but torch is used only in subprocesses that
+# don't share a process with JAX.
+RUN pip install --no-cache-dir --force-reinstall --no-deps \
+        "nvidia-cudnn-cu12==9.1.1.17" && \
+    ls -la /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/ | head -20 && \
+    python3 -c "import ctypes; ctypes.CDLL('libcudnn.so.9'); print('libcudnn.so.9 loadable')"
+
+# ---------- Download tool weights (AF2, ProteinMPNN, CCD cache) — PATCHED ----------
+# AF2 weights (Google Cloud — global)
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/af2 && \
+    curl -fsSL --retry 5 --retry-delay 10 \
+        "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar" \
+        -o /tmp/af2_params.tar && \
+    tar -xf /tmp/af2_params.tar -C $PXDESIGN_DIR/tool_weights/af2 && \
+    rm /tmp/af2_params.tar && \
+    echo "AF2 weights OK: $(ls $PXDESIGN_DIR/tool_weights/af2/ | wc -l) files"
+
+# ProteinMPNN weights (GitHub — global)
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/mpnn && \
+    git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /tmp/ProteinMPNN && \
+    cp -r /tmp/ProteinMPNN/ca_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    cp -r /tmp/ProteinMPNN/vanilla_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    rm -rf /tmp/ProteinMPNN && \
+    echo "ProteinMPNN weights OK"
+
+# CCD cache (wwPDB — global; China CDN in production Dockerfile is unreachable from Modal)
+RUN mkdir -p $PXDESIGN_DIR/tool_weights/ccd && \
+    curl -fsSL --retry 5 --retry-delay 10 \
+        "https://files.wwpdb.org/pub/pdb/data/monomers/components.cif.gz" \
+        -o $PXDESIGN_DIR/tool_weights/ccd/components.cif.gz && \
+    gunzip $PXDESIGN_DIR/tool_weights/ccd/components.cif.gz && \
+    echo "CCD source: $(du -sh $PXDESIGN_DIR/tool_weights/ccd/components.cif)" && \
+    curl -fsSL --retry 5 --retry-delay 10 \
+        "https://cdn.rcsb.org/resources/sequence/clusters/clusters-by-entity-40.txt" \
+        -o $PXDESIGN_DIR/tool_weights/ccd/clusters-by-entity-40.txt && \
+    echo "Clusters file OK"
+
+# Validate weights
+RUN echo "=== Weight validation ===" && \
+    ls -lh $PXDESIGN_DIR/tool_weights/af2/ && \
+    ls -lh $PXDESIGN_DIR/tool_weights/mpnn/ && \
+    ls -lh $PXDESIGN_DIR/tool_weights/ccd/ && \
+    echo "Weight download complete"
+
+# ---------- Pipeline utilities ----------
+RUN python3 -m pip install --no-cache-dir \
+    gemmi \
+    requests
+
+# ---------- Smoke-test fixture (PD-L1 IgV, chain A, residues 18-132) ----------
+# See docs/SMOKE-TEST-SPEC.md. When JOB_PAYLOAD has tier=smoke|mini_pilot and no
+# input_pdb_url, run_pipeline.py reads this baked target instead of downloading.
+COPY backend/tests/fixtures/target_pdl1.pdb /opt/smoke_target.pdb
+
+# ---------- Layer 1: fail-fast build-time checks ----------
+# If any check fails here, `modal deploy` aborts before any GPU-minute is spent.
+#   1. Every Python package the pipeline imports.
+#   2. Every weight file / fixture exists.
+#   3. PXDesign CLI on $PATH.
+# JAX JIT is primed separately below (needs an active CUDA device at build time
+# which is not available in Modal's CPU builder — deferred to preflight).
+RUN python3 -c "import protenix; print('protenix OK')" && \
+    python3 -c "import pxdesign; print('pxdesign OK')" && \
+    python3 -c "import jax; print('jax', jax.__version__)" && \
+    python3 -c "import torch; assert torch.__version__.startswith('2.3'), torch.__version__; print('torch', torch.__version__)" && \
+    python3 -c "import deepspeed; assert deepspeed.__version__.startswith('0.12'), deepspeed.__version__; print('deepspeed', deepspeed.__version__)" && \
+    python3 -c "from protenix.model.protenix import Protenix; print('Protenix model importable')" && \
+    python3 -c "import yaml, gemmi, requests, numpy, biopython" 2>/dev/null || python3 -c "import yaml, gemmi, requests, numpy; from Bio import PDB; print('yaml/gemmi/requests/numpy/biopython OK')" && \
+    test -f /opt/smoke_target.pdb && echo "smoke_target OK" && \
+    test -d $PXDESIGN_DIR/tool_weights/af2 && echo "af2 weights OK" && \
+    test -d $PXDESIGN_DIR/tool_weights/mpnn/vanilla_model_weights && echo "mpnn weights OK" && \
+    test -d $PXDESIGN_DIR/tool_weights/mpnn/ca_model_weights && echo "mpnn ca weights OK" && \
+    test -f $PXDESIGN_DIR/tool_weights/ccd/components.cif && echo "ccd OK" && \
+    test -f $PXDESIGN_DIR/tool_weights/ccd/clusters-by-entity-40.txt && echo "clusters OK" && \
+    which pxdesign && echo "pxdesign CLI on PATH"
+
+# NOTE: no COPY run_pipeline.py or CMD — Modal invokes @app.function bodies.
