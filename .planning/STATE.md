@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Ready to plan
-stopped_at: Phase 9 context gathered
-last_updated: "2026-04-10T21:31:28.256Z"
+stopped_at: Phase 4 closed (4-pipeline launch scope); Phase 9 context gathered
+last_updated: "2026-04-22T22:00:00.000Z"
 progress:
   total_phases: 13
-  completed_phases: 6
+  completed_phases: 7
   total_plans: 40
   completed_plans: 33
   percent: 83
@@ -20,7 +20,7 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 04 — pipeline-validation
+**Current focus:** Phase 09 — testing-ci-cd (Phase 4 closed 2026-04-22; RFdiffusion deferred post-launch; Kendrew ships with 4 pipelines: BoltzGen, RFantibody, PXDesign, BindCraft)
 
 ## Current Position
 
