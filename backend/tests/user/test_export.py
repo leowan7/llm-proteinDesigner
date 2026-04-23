@@ -196,3 +196,58 @@ async def test_get_data_export_status_pending_when_url_not_yet_written():
 
     assert response.status_code == 200
     assert response.json() == {"status": "pending"}
+
+
+async def test_get_data_export_status_failed_when_sentinel_stamp_present():
+    """WR-08: GET /user/data-export returns failed when the background task
+    wrote the failure-sentinel stamp (last_export_expires_at in the past,
+    last_export_url still NULL). Without this branch the UI would keep
+    polling "pending" forever when the build raised.
+    """
+    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
+    past_expires = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={
+        "last_export_requested_at": past_request,
+        "last_export_url": None,          # build never completed
+        "last_export_expires_at": past_expires,  # sentinel stamp
+    })
+
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
+
+    with patch("user.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/user/data-export")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "failed"}
+
+
+async def test_build_and_deliver_export_stamps_sentinel_on_failure():
+    """WR-08: if the inner build raises, the outer wrapper stamps the
+    failure sentinel (last_export_expires_at in the past) so GET /user/data-export
+    resolves to "failed" rather than staying on "pending" forever.
+    """
+    from user.export import build_and_deliver_export
+
+    conn = AsyncMock()
+    conn.execute = AsyncMock()
+
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
+
+    with patch("user.export.get_db_pool", new_callable=AsyncMock, return_value=mock_pool), \
+         patch(
+             "user.export._build_and_deliver_export_inner",
+             new=AsyncMock(side_effect=RuntimeError("R2 outage")),
+         ):
+        with pytest.raises(RuntimeError, match="R2 outage"):
+            await build_and_deliver_export("user-123", "user@example.com")
+
+    # Sentinel UPDATE executed with user_id.
+    assert conn.execute.await_count == 1
+    sql = conn.execute.await_args.args[0]
+    assert "last_export_expires_at = now() - interval '1 second'" in sql
+    assert conn.execute.await_args.args[1] == "user-123"

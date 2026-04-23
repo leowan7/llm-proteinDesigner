@@ -354,9 +354,15 @@ async def request_data_export(
 async def get_data_export_status(user_id: str = Depends(get_current_user)):
     """Return the status of the most recent data export request.
 
-    Resolves to one of ``none`` (never requested), ``pending`` (requested but
-    the background task has not yet written the presigned URL), ``ready`` (URL
-    still within its 24hr TTL), or ``expired`` (URL is past its expiry).
+    Resolves to one of:
+      - ``none`` — never requested.
+      - ``pending`` — requested but the background task has not yet written
+        the presigned URL, and the request is still young (<1 hr).
+      - ``ready`` — URL still within its TTL.
+      - ``expired`` — URL is past its expiry.
+      - ``failed`` (WR-08) — background task failed; last_export_expires_at is
+        in the past and last_export_url is still NULL. Stamped by the
+        failure-sentinel branch in ``build_and_deliver_export``.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -379,8 +385,13 @@ async def get_data_export_status(user_id: str = Depends(get_current_user)):
             "url": row["last_export_url"],
             "expires_at": row["last_export_expires_at"].isoformat(),
         }
+    # WR-08: distinguish "pending-but-failed" (sentinel stamp: expires_at in
+    # past + url still NULL) from "still-building" (both NULL). Without this
+    # the UI would stay on "pending" forever when the background task died.
     if row["last_export_url"] is None:
-        # Requested but not yet built (background task still running).
+        if row["last_export_expires_at"] and row["last_export_expires_at"] <= now:
+            return {"status": "failed"}
+        # Still building — background task is in flight.
         return {"status": "pending"}
     return {"status": "expired"}
 

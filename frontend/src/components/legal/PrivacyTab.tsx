@@ -285,6 +285,13 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
             Your previous export link has expired. Request a new one above.
           </p>
         )}
+
+        {exportStatus && exportStatus.status === "failed" && (
+          <p role="alert" className="text-sm text-destructive">
+            Your previous export could not be built. Request a new one above
+            or contact support@ranomics.com if this repeats.
+          </p>
+        )}
       </section>
 
       {/* ------------------------------------------------------------------- */}

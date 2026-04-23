@@ -52,10 +52,45 @@ async def build_and_deliver_export(user_id: str, user_email: str) -> None:
       5. ``UPDATE public.users`` with last_export_url + last_export_expires_at.
       6. Email the user the presigned URL.
 
+    WR-08: the whole flow is wrapped in try/except. On any failure (DB,
+    R2, email) we stamp ``last_export_expires_at = now() - 1s`` as a sentinel
+    so ``GET /user/data-export`` can surface a ``failed`` status instead of
+    leaving the UI on ``pending`` forever. The exception is re-raised so the
+    FastAPI BackgroundTask framework logs the traceback.
+
     Args:
         user_id: Application user UUID (matches public.users.id).
         user_email: Destination email address — captured at request time so we
             still hold it even if the row is mid-modification.
+    """
+    try:
+        await _build_and_deliver_export_inner(user_id, user_email)
+    except Exception as exc:
+        logger.error("Export failed for user=%s: %s", user_id, exc)
+        # Sentinel stamp: last_export_expires_at in the past marks the request
+        # as failed without clobbering last_export_requested_at (which remains
+        # NULL or the original request timestamp, letting GET return "failed").
+        try:
+            pool = await get_db_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE public.users "
+                    "SET last_export_expires_at = now() - interval '1 second', "
+                    "    updated_at = now() "
+                    "WHERE id = $1",
+                    user_id,
+                )
+        except Exception as stamp_exc:  # pragma: no cover
+            logger.error(
+                "Export failure sentinel stamp also failed for user=%s: %s",
+                user_id, stamp_exc,
+            )
+        raise
+
+
+async def _build_and_deliver_export_inner(user_id: str, user_email: str) -> None:
+    """Core export flow — extracted from ``build_and_deliver_export`` so the
+    outer wrapper owns the WR-08 failure-sentinel try/except block.
     """
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     key = f"users/{user_id}/exports/export-{ts}.zip"

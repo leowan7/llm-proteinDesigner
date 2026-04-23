@@ -27,9 +27,14 @@ export interface UserSettings {
   deletion_requested_at?: string | null;
 }
 
-/** Status of the most recent GDPR Art. 20 data export (Plan 10-04). */
+/** Status of the most recent GDPR Art. 20 data export (Plan 10-04).
+ *
+ * ``failed`` (WR-08) indicates the background build task raised and stamped
+ * the failure sentinel (last_export_expires_at in the past, URL still NULL).
+ * The UI should surface a retryable error state rather than keep polling.
+ */
 export interface ExportStatus {
-  status: "none" | "pending" | "ready" | "expired";
+  status: "none" | "pending" | "ready" | "expired" | "failed";
   url?: string;
   expires_at?: string;
 }
