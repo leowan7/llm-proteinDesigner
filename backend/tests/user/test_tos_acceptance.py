@@ -67,6 +67,8 @@ async def test_get_settings_includes_tos_version_and_current_and_retention():
         "is_admin": False,
         "tos_version": "2026-04-23",
         "data_retention_days": 90,
+        # Plan 10-04: /settings now also selects deletion_requested_at.
+        "deletion_requested_at": None,
     }
 
     conn = AsyncMock()
@@ -87,9 +89,10 @@ async def test_get_settings_includes_tos_version_and_current_and_retention():
     assert data["data_retention_days"] == 90
 
 
-async def test_get_settings_does_not_include_deletion_requested_at():
-    """Plan 10-04 owns `deletion_requested_at` — this plan's response shape must not
-    leak that field. Asserting its absence locks the contract for wave 1."""
+async def test_get_settings_includes_deletion_requested_at():
+    """Plan 10-04 adds `deletion_requested_at` to the /settings response so the
+    Privacy tab can render the pending-deletion banner + Cancel button. This
+    test locks that contract (previously 10-02 asserted its ABSENCE)."""
     user_row = {
         "email": "user@example.com",
         "display_name": "",
@@ -97,6 +100,7 @@ async def test_get_settings_does_not_include_deletion_requested_at():
         "is_admin": False,
         "tos_version": None,
         "data_retention_days": 90,
+        "deletion_requested_at": None,
     }
 
     conn = AsyncMock()
@@ -112,7 +116,9 @@ async def test_get_settings_does_not_include_deletion_requested_at():
 
     assert response.status_code == 200
     data = response.json()
-    assert "deletion_requested_at" not in data
+    # Key is present; value is None when the user has no pending deletion.
+    assert "deletion_requested_at" in data
+    assert data["deletion_requested_at"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -155,7 +155,7 @@ async def get_settings(user_id: str = Depends(get_current_user)):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT email, display_name, notification_preferences, is_admin,
-                      tos_version, data_retention_days
+                      tos_version, data_retention_days, deletion_requested_at
                FROM public.users
                WHERE id = $1""",
             user_id,
@@ -178,9 +178,9 @@ async def get_settings(user_id: str = Depends(get_current_user)):
         # asyncpg may return a dict directly for jsonb columns.
         notification_preferences = dict(raw_prefs)
 
-    # NOTE: `deletion_requested_at` is intentionally NOT included in this
-    # response. Plan 10-04 (GDPR export + deletion, wave 2) owns adding that
-    # field to both this payload and the frontend UserSettings interface.
+    # Plan 10-04 owns `deletion_requested_at` in this response — it drives the
+    # Privacy tab's pending-deletion banner + Cancel Deletion button in the UI.
+    deletion_requested_at = row["deletion_requested_at"]
     return {
         "email": row["email"],
         "display_name": row["display_name"] or "",
@@ -189,6 +189,9 @@ async def get_settings(user_id: str = Depends(get_current_user)):
         "tos_version": row["tos_version"],
         "tos_current": settings.tos_current_version,
         "data_retention_days": row["data_retention_days"],
+        "deletion_requested_at": (
+            deletion_requested_at.isoformat() if deletion_requested_at else None
+        ),
     }
 
 

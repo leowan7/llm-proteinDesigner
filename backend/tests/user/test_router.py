@@ -140,6 +140,8 @@ async def test_get_settings():
         # Plan 10-02: /user/settings now also selects tos_version + data_retention_days.
         "tos_version": "2026-04-23",
         "data_retention_days": 90,
+        # Plan 10-04: deletion_requested_at added to SELECT.
+        "deletion_requested_at": None,
     }
 
     conn = AsyncMock()
@@ -187,6 +189,8 @@ async def test_get_settings_null_preferences_uses_default():
         # Plan 10-02 additions.
         "tos_version": None,
         "data_retention_days": 90,
+        # Plan 10-04: deletion_requested_at added to SELECT.
+        "deletion_requested_at": None,
     }
 
     conn = AsyncMock()

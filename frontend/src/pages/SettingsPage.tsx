@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { PrivacyTab } from "@/components/legal/PrivacyTab";
 import {
   getSettings,
   updateSettings,
@@ -529,17 +530,12 @@ export function SettingsPage() {
 
         <TabsContent value="privacy">
           {/*
-            Privacy tab scaffold (Plan 10-06). Plan 10-04 replaces this
-            placeholder with Export Data + Delete Account controls wired to
-            the GDPR endpoints. Keeping the TabsTrigger + empty TabsContent
-            in place now lets the /settings?tab=privacy deep-link from the
-            Plan 10-04 cancel-deletion email resolve to a visible tab even
-            before 10-04 lands.
+            Plan 10-04 replaces the Plan 10-06 placeholder with the real
+            Privacy controls — Export Data (GDPR Art. 20), Delete Account
+            (GDPR Art. 17), and the pending-deletion banner + Cancel button
+            when deletion_requested_at is non-null.
           */}
-          <div className="pt-4 text-sm text-muted-foreground">
-            Privacy controls are being rolled out. Data export and account
-            deletion will appear here soon.
-          </div>
+          <PrivacyTab initialSettings={settings} onChanged={loadSettings} />
         </TabsContent>
 
         <TabsContent value="usage">
