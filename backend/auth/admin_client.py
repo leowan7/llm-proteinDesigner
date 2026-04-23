@@ -27,10 +27,23 @@ def get_admin_supabase() -> Client:
 def delete_auth_user(user_id: str) -> None:
     """Permanently delete the Supabase ``auth.users`` row for ``user_id``.
 
-    Cascades to ``public.users`` (and every FK child of it — sessions, jobs,
-    session_messages, billing rows, audit_log entries whose admin_user_id
-    matches) via the ``ON DELETE CASCADE`` defined on the public.users.id
-    reference in migration ``20260318000000_init.sql``.
+    Cascades to ``public.users`` (and its FK children — sessions, jobs,
+    session_messages, billing rows) via the ``ON DELETE CASCADE`` on the
+    public.users.id reference in migration ``20260318000000_init.sql``.
+
+    **audit_log behaviour (CR-01, migration 20260424000004_audit_log_fk.sql):**
+    ``audit_log`` rows are NOT removed by this cascade. The FK
+    ``audit_log.admin_user_id → public.users(id)`` is declared
+    ``ON DELETE SET NULL``, so the deleting user's audit rows survive as
+    orphans with ``admin_user_id = NULL``. This is deliberate — the audit
+    trail is non-repudiation data (who requested what, when) and must outlive
+    the user's right-to-erasure. The row's original ``metadata`` JSONB still
+    carries the IP and user-agent captured at request time.
+
+    Before migration 20260424000004 was applied, ``admin_user_id`` was
+    ``NOT NULL`` with no cascade policy, causing this cascade to abort with a
+    foreign-key violation. The post-migration behaviour documented above is
+    the current production state.
 
     Args:
         user_id: Supabase auth user UUID (same as public.users.id).
