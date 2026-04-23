@@ -21,7 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 7: Admin Dashboard** - Admin auth, user management, job monitoring, revenue overview, system health, audit log
 - [ ] **Phase 8: Post-Run Analysis Agent** - Agent-assisted result analysis, candidate ranking, shortlisting, and report generation
 - [ ] **Phase 9: Testing & CI/CD** - Automated test suite (unit, integration, E2E), CI pipeline, pre-deploy gates
-- [ ] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness
+- [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness (completed 2026-04-23)
 - [ ] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL
 - [ ] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer)
 - [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
@@ -286,7 +286,7 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 9. Testing & CI/CD | Tests, GitHub Actions, Docker CI | 0/4 | In Progress | Phase 5 (done) |
-| 10. Legal & Compliance | ToS, privacy, GDPR | 0/TBD | Not started | Phase 5 (done) |
+| 10. Legal & Compliance | ToS, privacy, GDPR | 6/6 | Complete    | 2026-04-23 |
 | 11. Deployment | Vercel, Railway, Supabase Cloud | 0/TBD | Not started | Phases 9, 10 |
 
 **Post-launch:**
