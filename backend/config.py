@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_jwt_secret: str = ""
 
+    # Legal / Compliance (Phase 10)
+    tos_current_version: str = "2026-04-23"
+    privacy_current_version: str = "2026-04-23"
+
     # Database (Supabase local Postgres)
     database_url: str = "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
 
