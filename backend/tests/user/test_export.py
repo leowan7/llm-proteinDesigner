@@ -110,7 +110,7 @@ async def test_get_data_export_status_none_when_never_requested():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": None,
-        "last_export_url": None,
+        "last_export_key": None,
         "last_export_expires_at": None,
     })
 
@@ -127,20 +127,21 @@ async def test_get_data_export_status_none_when_never_requested():
 
 
 async def test_get_data_export_status_ready_when_url_not_expired():
-    """GET /user/data-export returns ready + url + expires_at while the URL is live."""
-    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=12)
-    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
+    """GET /user/data-export re-presigns the key on each GET and returns ready + url."""
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
-        "last_export_url": "https://r2.example/presigned",
+        "last_export_key": "users/test-user-uuid/exports/export-20260423T000000Z.zip",
         "last_export_expires_at": future,
     })
 
     mock_pool = AsyncMock()
     mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
 
-    with patch("user.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool):
+    with patch("user.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool), \
+         patch("user.router.generate_presigned_get_url", return_value="https://r2.example/fresh") as mock_presign:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/user/data-export")
@@ -148,8 +149,9 @@ async def test_get_data_export_status_ready_when_url_not_expired():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "ready"
-    assert data["url"] == "https://r2.example/presigned"
+    assert data["url"] == "https://r2.example/fresh"
     assert "expires_at" in data
+    mock_presign.assert_called_once()
 
 
 async def test_get_data_export_status_expired_when_url_past_ttl():
@@ -159,7 +161,7 @@ async def test_get_data_export_status_expired_when_url_past_ttl():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
-        "last_export_url": "https://r2.example/old",
+        "last_export_key": "users/test-user-uuid/exports/export-20260421T000000Z.zip",
         "last_export_expires_at": past_expiry,
     })
 
@@ -182,7 +184,7 @@ async def test_get_data_export_status_pending_when_url_not_yet_written():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
-        "last_export_url": None,
+        "last_export_key": None,
         "last_export_expires_at": None,
     })
 
@@ -209,7 +211,7 @@ async def test_get_data_export_status_failed_when_sentinel_stamp_present():
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
-        "last_export_url": None,          # build never completed
+        "last_export_key": None,          # build never completed
         "last_export_expires_at": past_expires,  # sentinel stamp
     })
 

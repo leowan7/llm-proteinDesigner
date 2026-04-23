@@ -13,6 +13,7 @@ import datetime
 import io
 import json
 import logging
+import uuid
 import zipfile
 from typing import Any
 
@@ -23,7 +24,7 @@ from storage.client import generate_presigned_get_url, get_s3_client
 
 logger = logging.getLogger(__name__)
 
-EXPORT_URL_TTL_SECONDS = 24 * 3600  # 24 hours
+EXPORT_URL_TTL_SECONDS = 3600  # 1 hour per CR-02
 
 
 def _json_default(o: Any) -> Any:
@@ -35,8 +36,7 @@ def _json_default(o: Any) -> Any:
     """
     if isinstance(o, (datetime.datetime, datetime.date)):
         return o.isoformat()
-    # UUID objects have a .hex attribute; use str() for the canonical form.
-    if hasattr(o, "hex") and callable(getattr(o, "hex", None)):
+    if isinstance(o, uuid.UUID):
         return str(o)
     return str(o)
 
@@ -48,8 +48,8 @@ async def build_and_deliver_export(user_id: str, user_email: str) -> None:
       1. Pull user profile (all Phase-10 columns per W9), sessions, session_messages, jobs.
       2. Serialize to JSON files in an in-memory ZIP with a manifest.json.
       3. Upload to ``users/{user_id}/exports/export-{ts}.zip``.
-      4. Presign GET URL (24 hours).
-      5. ``UPDATE public.users`` with last_export_url + last_export_expires_at.
+      4. Presign GET URL (1 hour) for the notification email only.
+      5. ``UPDATE public.users`` with last_export_key + last_export_expires_at (CR-02: key only, not URL).
       6. Email the user the presigned URL.
 
     WR-08: the whole flow is wrapped in try/except. On any failure (DB,
@@ -172,20 +172,23 @@ async def _build_and_deliver_export_inner(user_id: str, user_email: str) -> None
         Body=buf.getvalue(),
         ContentType="application/zip",
     )
-    presigned_url = generate_presigned_get_url(key, expires_in=EXPORT_URL_TTL_SECONDS)
+    # CR-02: persist only the object key, not the presigned URL (bearer credential).
+    # The router re-presigns on each authenticated GET. We still presign here once
+    # so the email link works immediately — email URLs are unavoidable per the review.
+    email_url = generate_presigned_get_url(key, expires_in=EXPORT_URL_TTL_SECONDS)
 
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE public.users
                SET last_export_requested_at = now(),
-                   last_export_url = $2,
+                   last_export_key = $2,
                    last_export_expires_at = $3,
                    updated_at = now()
                WHERE id = $1""",
             user_id,
-            presigned_url,
+            key,
             expires_at,
         )
 
-    await send_export_ready_email(user_email, presigned_url, expires_at.isoformat())
+    await send_export_ready_email(user_email, email_url, expires_at.isoformat())
     logger.info("Export delivered for user=%s key=%s", user_id, key)

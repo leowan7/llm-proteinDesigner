@@ -24,7 +24,8 @@ from config import settings
 from db.connection import get_db_pool
 from jobs.notifications import send_deletion_scheduled_email
 from middleware.rate_limit import limiter, get_rate_limit_key  # T-10.04-06: slowapi limiter
-from user.export import build_and_deliver_export
+from storage.client import generate_presigned_get_url
+from user.export import EXPORT_URL_TTL_SECONDS, build_and_deliver_export
 
 router = APIRouter(prefix="/user", tags=["user"])
 
@@ -367,7 +368,7 @@ async def get_data_export_status(user_id: str = Depends(get_current_user)):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT last_export_requested_at, last_export_url, last_export_expires_at
+            """SELECT last_export_requested_at, last_export_key, last_export_expires_at
                FROM public.users WHERE id = $1""",
             user_id,
         )
@@ -380,15 +381,18 @@ async def get_data_export_status(user_id: str = Depends(get_current_user)):
         return {"status": "none"}
     now = datetime.datetime.now(datetime.timezone.utc)
     if row["last_export_expires_at"] and row["last_export_expires_at"] > now:
+        # CR-02: re-presign on each authenticated GET — never read URL from DB.
+        remaining = int((row["last_export_expires_at"] - now).total_seconds())
+        ttl = min(remaining, EXPORT_URL_TTL_SECONDS)
+        presigned = generate_presigned_get_url(row["last_export_key"], expires_in=ttl)
         return {
             "status": "ready",
-            "url": row["last_export_url"],
+            "url": presigned,
             "expires_at": row["last_export_expires_at"].isoformat(),
         }
     # WR-08: distinguish "pending-but-failed" (sentinel stamp: expires_at in
-    # past + url still NULL) from "still-building" (both NULL). Without this
-    # the UI would stay on "pending" forever when the background task died.
-    if row["last_export_url"] is None:
+    # past + key still NULL) from "still-building" (both NULL).
+    if row["last_export_key"] is None:
         if row["last_export_expires_at"] and row["last_export_expires_at"] <= now:
             return {"status": "failed"}
         # Still building — background task is in flight.

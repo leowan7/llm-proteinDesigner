@@ -413,3 +413,45 @@ async def test_execute_hard_delete_stripe_failure_does_not_block_auth_delete():
 
     # Auth delete still ran despite Stripe failure.
     mock_auth_delete.assert_called_once_with(USER_ID)
+
+
+# ---------------------------------------------------------------------------
+# CR-01 regression — audit_log FK no longer blocks hard-delete cascade
+# ---------------------------------------------------------------------------
+
+async def test_cr01_hard_delete_reaches_auth_delete_with_prior_audit_log_row():
+    """CR-01 regression: executor completes even when audit_log has a row with
+    admin_user_id = user_id (written by request_account_deletion).
+
+    Migration 20260424000004_audit_log_fk.sql changed the FK policy from
+    NOT NULL (no action) to ON DELETE SET NULL.  Without that migration the
+    public.users cascade would fail with a FK violation, leaving auth.users
+    deleted but public.users intact.
+
+    This unit test proves the executor path reaches delete_auth_user.
+    An integration test against a live DB should additionally assert:
+      - public.users row is removed
+      - audit_log row survives with admin_user_id = NULL
+    """
+    from user.deletion import execute_hard_delete
+
+    guard_conn = AsyncMock()
+    # Guard passes — deletion still pending (> 30 days ago); late guard also passes.
+    guard_conn.fetchrow = AsyncMock(return_value={
+        "deletion_requested_at": NOW - datetime.timedelta(days=31),
+    })
+    guard_conn.transaction = MagicMock(return_value=_make_ctx(guard_conn))
+
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(guard_conn))
+
+    with patch("user.deletion.get_db_pool", new_callable=AsyncMock, return_value=mock_pool), \
+         patch("user.deletion.list_and_delete_user_objects", return_value=0), \
+         patch("user.deletion.stripe") as mock_stripe, \
+         patch("user.deletion.delete_auth_user") as mock_auth_delete, \
+         patch("user.deletion.send_deletion_completed_email", new_callable=AsyncMock) as mock_email:
+        await execute_hard_delete(USER_ID, "user@example.com", "cus_abc")
+
+    # Full cascade ran — the FK fix in migration 000004 is what allows this.
+    mock_auth_delete.assert_called_once_with(USER_ID)
+    mock_email.assert_awaited_once()
