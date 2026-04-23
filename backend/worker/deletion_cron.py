@@ -32,12 +32,16 @@ async def process_pending_deletions(ctx: dict | None = None) -> int:
         and remain pending for the next cron cycle.
     """
     pool = await get_db_pool()
+    # WR-06 (10-REVIEW): parameterized interval pattern instead of f-string
+    # interpolation. Uniform with retention_cron.py — user-supplied or module
+    # constants route through proper asyncpg parameter binding.
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            f"""SELECT id, email, stripe_customer_id
-                FROM public.users
-                WHERE deletion_requested_at IS NOT NULL
-                  AND deletion_requested_at < NOW() - INTERVAL '{GRACE_PERIOD_DAYS} days'"""
+            """SELECT id, email, stripe_customer_id
+               FROM public.users
+               WHERE deletion_requested_at IS NOT NULL
+                 AND deletion_requested_at < NOW() - ($1 || ' days')::interval""",
+            str(GRACE_PERIOD_DAYS),
         )
     if not rows:
         return 0

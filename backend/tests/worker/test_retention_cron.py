@@ -161,8 +161,9 @@ async def test_warning_pass_filters_by_policy_effective_from():
     query = fetch_args[0]
     assert "j.created_at > $1" in query
     assert fetch_args[1] == POLICY_RECENT
-    # W8: WARNING_DAYS_BEFORE is interpolated into the query text as an integer.
-    assert f"INTERVAL '{WARNING_DAYS_BEFORE} days'" in query
+    # WR-06: WARNING_DAYS_BEFORE flows through a $2 parameter binding, not f-string.
+    assert "($2 || ' days')::interval" in query
+    assert fetch_args[2] == str(WARNING_DAYS_BEFORE)
 
 
 # ---------------------------------------------------------------------------

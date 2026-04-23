@@ -29,9 +29,10 @@ Policy guards (all enforced in SQL, not in Python):
   job row against its owner's ``users.data_retention_days`` (default 90,
   min 30, max 365) — global defaults are not inlined.
 
-``WARNING_DAYS_BEFORE`` is interpolated into the query text with an f-string
-(W8) because asyncpg does not expand parameters inside ``INTERVAL`` literals.
-The constant is a module-level int — no untrusted input reaches the query.
+``WARNING_DAYS_BEFORE`` flows through a proper parameter binding using the
+``($N || ' days')::interval`` pattern (WR-06 10-REVIEW). This is uniform with
+the per-user retention window pattern elsewhere in the module and eliminates
+the f-string SQL that previously interpolated the Python integer directly.
 
 **UUID/str convention (W2):** row IDs are coerced to ``str`` at the top of each
 per-row loop and the stringified form is used for all downstream operations
@@ -103,10 +104,14 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
     pool = await get_db_pool()
     effective_from = await _fetch_policy_effective_from(pool)
 
-    # W8: WARNING_DAYS_BEFORE is an int module constant — safe to interpolate
-    # into the INTERVAL literal. All other values flow through $1 parameter
-    # binding.
-    query = f"""
+    # WR-06 (10-REVIEW): use the parameterized interval pattern
+    # ``($N || ' days')::interval`` to carry the warning window through a
+    # proper SQL parameter binding rather than Python f-string interpolation.
+    # Uniform with the ``(u.data_retention_days || ' days')::interval`` pattern
+    # already used for the per-user retention column below. WARNING_DAYS_BEFORE
+    # is still a module-level int today, but the pattern now holds even if a
+    # future refactor routes a user-supplied value through the same path.
+    query = """
         SELECT j.id, j.user_id, j.name, j.created_at,
                u.email, u.data_retention_days
         FROM public.jobs j
@@ -115,12 +120,12 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
           AND j.retention_deleted_at IS NULL
           AND j.created_at > $1
           AND j.created_at + (u.data_retention_days || ' days')::interval
-              < NOW() + INTERVAL '{WARNING_DAYS_BEFORE} days'
+              < NOW() + ($2 || ' days')::interval
           AND j.created_at + (u.data_retention_days || ' days')::interval > NOW()
     """
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(query, effective_from)
+        rows = await conn.fetch(query, effective_from, str(WARNING_DAYS_BEFORE))
 
     sent = 0
     for row in rows:
