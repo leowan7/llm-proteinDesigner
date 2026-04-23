@@ -254,12 +254,19 @@ async def exchange_token(body: ExchangeTokenRequest, response: Response):
 
 
 @router.post("/update-password")
+@limiter.limit("5/minute")
 async def update_password(
+    request: Request,  # required by slowapi to extract the rate-limit key
     body: UpdatePasswordRequest,
     response: Response,
     access_token: str | None = Cookie(default=None),
 ):
-    """AUTH-03: Set new password after clicking reset link. Requires valid access token from exchange-token endpoint."""
+    """AUTH-03: Set new password after clicking reset link. Requires valid access token from exchange-token endpoint.
+
+    Rate limit (WR-04): 5/minute to throttle recovery-flow brute-forcing in
+    line with /auth/login (5/minute) and /auth/reset-password (3/minute).
+    The global CSRF middleware applies on top of the rate limit.
+    """
     if access_token is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
