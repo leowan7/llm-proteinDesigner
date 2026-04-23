@@ -167,3 +167,58 @@ def list_and_delete_user_objects(user_id: str) -> int:
             )
     logger.info("list_and_delete_user_objects: user=%s deleted=%d", user_id, deleted)
     return deleted
+
+
+def delete_job_objects(user_id: str, job_id: str) -> int:
+    """Delete all R2 objects under ``users/{user_id}/jobs/{job_id}/``.
+
+    Used by the Plan 10-05 retention cron to purge per-job object storage
+    (input PDBs, output results) once a job crosses its retention deadline.
+    Scoped to a single job prefix so the cron cannot fan out beyond the row
+    it's processing.
+
+    Uses the same ``list_objects_v2`` paginator + batched ``delete_objects``
+    pattern as :func:`list_and_delete_user_objects`. Safe on an empty/missing
+    prefix — returns 0.
+
+    Args:
+        user_id: Owner's user UUID string.
+        job_id:  Target job UUID string.
+
+    Returns:
+        Count of S3 objects deleted.
+
+    Raises:
+        RuntimeError: If any object key returned an error in the
+            ``Errors`` section of the ``delete_objects`` response. The cron
+            per-row try/except catches this and leaves ``retention_deleted_at``
+            NULL so the next cron run retries.
+    """
+    client = get_s3_client()
+    prefix = f"users/{user_id}/jobs/{job_id}/"
+    deleted = 0
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=settings.s3_bucket_name, Prefix=prefix):
+        contents = page.get("Contents") or []
+        if not contents:
+            continue
+        keys = [{"Key": obj["Key"]} for obj in contents]
+        resp = client.delete_objects(
+            Bucket=settings.s3_bucket_name,
+            Delete={"Objects": keys, "Quiet": True},
+        )
+        deleted += len(keys)
+        errors = resp.get("Errors") or []
+        if errors:
+            logger.error(
+                "delete_job_objects errors job=%s user=%s: %s",
+                job_id, user_id, errors,
+            )
+            raise RuntimeError(
+                f"delete_objects reported {len(errors)} errors for job {job_id}; see log"
+            )
+    logger.info(
+        "delete_job_objects: user=%s job=%s deleted=%d",
+        user_id, job_id, deleted,
+    )
+    return deleted

@@ -247,6 +247,43 @@ async def send_deletion_scheduled_email(
     _send_email_safely(params, purpose="deletion_scheduled")
 
 
+async def send_retention_warning_email(
+    to_email: str,
+    job_id: str,
+    job_name: str | None,
+    deletion_date_iso: str,
+    retention_days: int,
+) -> None:
+    """7-day warning before automatic retention deletion (Plan 10-05).
+
+    Args:
+        to_email: Recipient email.
+        job_id: Kendrew job UUID string.
+        job_name: User-chosen job name (if any) for subject clarity.
+        deletion_date_iso: When the hard delete will occur (ISO date).
+        retention_days: The user's current retention window (default 90).
+    """
+    label = job_name or f"Job {job_id[:8]}"
+    settings_url = f"{settings.app_base_url}/settings?tab=privacy"
+    job_url = f"{settings.app_base_url}/jobs/{job_id}"
+    # Uniform f-string block — mixed quote styles previously caused a SyntaxError
+    # on import (W11); every anchor uses double-quoted HTML attributes, and the
+    # f-string itself is a single concatenated expression.
+    html = (
+        f"<p>Your Kendrew retention policy ({retention_days} days) will permanently delete "
+        f"<strong>{label}</strong> on <strong>{deletion_date_iso}</strong>.</p>"
+        f'<p>To keep this run, download the outputs now: <a href="{job_url}">View job</a>.</p>'
+        f'<p>To change your retention window (30-365 days), visit <a href="{settings_url}">Settings &rarr; Privacy</a>.</p>'
+    )
+    params: resend.Emails.SendParams = {
+        "from": settings.resend_from_email,
+        "to": [to_email],
+        "subject": f"'{label}' will be deleted on {deletion_date_iso} (retention policy)",
+        "html": html,
+    }
+    _send_email_safely(params, purpose="retention_warning")
+
+
 async def send_deletion_completed_email(to_email: str) -> None:
     """Final notification that the hard-delete has executed.
 
