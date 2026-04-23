@@ -137,6 +137,9 @@ async def test_get_settings():
         "display_name": "Test User",
         "notification_preferences": json.dumps({"job_complete": True, "job_failure": True}),
         "is_admin": False,
+        # Plan 10-02: /user/settings now also selects tos_version + data_retention_days.
+        "tos_version": "2026-04-23",
+        "data_retention_days": 90,
     }
 
     conn = AsyncMock()
@@ -181,6 +184,9 @@ async def test_get_settings_null_preferences_uses_default():
         "display_name": "",
         "notification_preferences": None,  # NULL in DB
         "is_admin": False,
+        # Plan 10-02 additions.
+        "tos_version": None,
+        "data_retention_days": 90,
     }
 
     conn = AsyncMock()

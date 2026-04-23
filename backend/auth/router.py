@@ -1,14 +1,20 @@
 """Auth endpoints. All authentication routes through FastAPI -- frontend never calls Supabase directly."""
 
+import asyncio
+import logging
+
 import jwt
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 
 from config import settings
 from auth.dependencies import get_current_user
+from db.connection import get_db_pool
 from middleware.rate_limit import limiter
 
 from supabase import create_client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -21,6 +27,7 @@ def _get_supabase():
 class SignUpRequest(BaseModel):
     email: EmailStr
     password: str
+    tos_version: str  # Must match settings.tos_current_version
 
 
 class LoginRequest(BaseModel):
@@ -72,19 +79,73 @@ def _clear_auth_cookies(response: Response) -> None:
 @router.post("/signup")
 @limiter.limit("3/minute;10/hour")
 async def signup(request: Request, body: SignUpRequest, response: Response):
-    """AUTH-01: Create account with email and password via Supabase Auth."""
+    """AUTH-01: Create account with email and password via Supabase Auth.
+
+    Plan 10-02: Rejects requests whose `tos_version` does not match
+    `settings.tos_current_version`, and persists the acceptance (timestamp +
+    version) in ``public.users`` immediately after Supabase sign-up succeeds.
+    """
+    # Reject stale / spoofed ToS versions BEFORE touching Supabase. The backend
+    # constant is the source of truth; frontend always sends the compiled
+    # TOS_VERSION from versions.ts.
+    if body.tos_version != settings.tos_current_version:
+        raise HTTPException(
+            status_code=400,
+            detail="Terms of Service version mismatch; refresh and try again.",
+        )
+
     try:
         supabase = _get_supabase()
         result = supabase.auth.sign_up({"email": body.email, "password": body.password})
         if result.user is None:
             raise HTTPException(status_code=400, detail="Signup failed")
-        # With email verification enabled, no session is returned until email is confirmed
-        return {"message": "Account created. Check your email for a verification link."}
+    except HTTPException:
+        raise
     except Exception as exc:
         error_msg = str(exc)
         if "already registered" in error_msg.lower() or "already been registered" in error_msg.lower():
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
         raise HTTPException(status_code=400, detail=f"Signup failed: {error_msg}")
+
+    # Record ToS acceptance against public.users. A database trigger creates
+    # the row from auth.users; on rare races we may arrive before the trigger,
+    # so retry once after a short sleep.
+    new_user_id = result.user.id
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            update_result = await conn.execute(
+                """UPDATE public.users
+                   SET tos_accepted_at = now(),
+                       tos_version = $2,
+                       updated_at = now()
+                   WHERE id = $1""",
+                new_user_id,
+                body.tos_version,
+            )
+            if update_result == "UPDATE 0":
+                # Trigger race — wait briefly, then upsert.
+                await asyncio.sleep(0.2)
+                await conn.execute(
+                    """INSERT INTO public.users (id, email, tos_accepted_at, tos_version)
+                       VALUES ($1, $2, now(), $3)
+                       ON CONFLICT (id) DO UPDATE
+                           SET tos_accepted_at = EXCLUDED.tos_accepted_at,
+                               tos_version     = EXCLUDED.tos_version,
+                               updated_at      = now()""",
+                    new_user_id,
+                    body.email,
+                    body.tos_version,
+                )
+    except Exception as exc:  # pragma: no cover - persistence should not fail signup UX
+        logger.warning(
+            "Signup succeeded for user %s but ToS acceptance write failed: %s",
+            new_user_id,
+            exc,
+        )
+
+    # With email verification enabled, no session is returned until email is confirmed
+    return {"message": "Account created. Check your email for a verification link."}
 
 
 @router.post("/login")

@@ -1,9 +1,10 @@
 """User API endpoints.
 
 Provides:
-- GET  /user/usage    — current billing period summary (spend, job count)
-- GET  /user/settings — user profile and notification preferences
-- PUT  /user/settings — update display_name and notification preferences
+- GET  /user/usage       — current billing period summary (spend, job count)
+- GET  /user/settings    — user profile and notification preferences
+- PUT  /user/settings    — update display_name and notification preferences
+- POST /user/accept-tos  — record ToS re-acceptance (Plan 10-02)
 """
 
 import json
@@ -13,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from auth.dependencies import get_current_user
+from config import settings
 from db.connection import get_db_pool
 
 router = APIRouter(prefix="/user", tags=["user"])
@@ -127,7 +129,8 @@ async def get_settings(user_id: str = Depends(get_current_user)):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT email, display_name, notification_preferences, is_admin
+            """SELECT email, display_name, notification_preferences, is_admin,
+                      tos_version, data_retention_days
                FROM public.users
                WHERE id = $1""",
             user_id,
@@ -150,11 +153,17 @@ async def get_settings(user_id: str = Depends(get_current_user)):
         # asyncpg may return a dict directly for jsonb columns.
         notification_preferences = dict(raw_prefs)
 
+    # NOTE: `deletion_requested_at` is intentionally NOT included in this
+    # response. Plan 10-04 (GDPR export + deletion, wave 2) owns adding that
+    # field to both this payload and the frontend UserSettings interface.
     return {
         "email": row["email"],
         "display_name": row["display_name"] or "",
         "notification_preferences": notification_preferences,
         "is_admin": bool(row["is_admin"]),
+        "tos_version": row["tos_version"],
+        "tos_current": settings.tos_current_version,
+        "data_retention_days": row["data_retention_days"],
     }
 
 
@@ -212,3 +221,38 @@ async def update_settings(
         "display_name": updated["display_name"] or "",
         "notification_preferences": notification_preferences,
     }
+
+
+@router.post("/accept-tos")
+async def accept_tos(user_id: str = Depends(get_current_user)):
+    """Record ToS re-acceptance for an authenticated user (Plan 10-02).
+
+    Called by the re-acceptance modal when a user whose stored ``tos_version``
+    has drifted from ``settings.tos_current_version`` clicks "I accept".
+    Writes ``tos_accepted_at = now()`` and ``tos_version = <current>``.
+
+    Returns:
+        Dict with ``accepted=True`` and the canonical ``tos_version``.
+
+    Raises:
+        HTTPException 404: If the authenticated user has no row in public.users.
+    """
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """UPDATE public.users
+               SET tos_accepted_at = now(),
+                   tos_version = $2,
+                   updated_at = now()
+               WHERE id = $1""",
+            user_id,
+            settings.tos_current_version,
+        )
+
+    if result == "UPDATE 0":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    return {"accepted": True, "tos_version": settings.tos_current_version}
