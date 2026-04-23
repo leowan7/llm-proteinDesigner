@@ -100,6 +100,27 @@ async def execute_hard_delete(
 
     # 3. Supabase auth + cascade — removes auth.users, which cascades public.users
     #    and every FK child (sessions, jobs, session_messages, billing rows).
+    #
+    # WR-07: re-check deletion_requested_at one last time under FOR UPDATE just
+    # before the irreversible Supabase admin call. The step-0 guard released
+    # its row lock after the leading transaction committed; in the window
+    # between that and here a user could have hit /user/cancel-deletion. R2
+    # and Stripe are already purged at this point, but skipping the auth
+    # delete leaves the DB/auth row intact for manual review — preferable to
+    # completing an irreversible wipe on a user who cancelled.
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            late_guard = await conn.fetchrow(
+                "SELECT deletion_requested_at FROM public.users WHERE id = $1 FOR UPDATE",
+                user_id,
+            )
+            if late_guard is None or late_guard["deletion_requested_at"] is None:
+                logger.error(
+                    "Hard-delete: user=%s cancelled mid-execute after R2/Stripe ran. "
+                    "R2 and Stripe were already purged; leaving DB row for manual review.",
+                    user_id,
+                )
+                return
     delete_auth_user(user_id)
     logger.info("Hard-delete: Supabase auth user deleted %s", user_id)
 

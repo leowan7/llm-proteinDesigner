@@ -368,8 +368,10 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
           </h2>
           <p className="text-sm text-foreground">
             Your account and all associated data will be permanently deleted on{" "}
-            <strong>{formatDate(scheduledFor)}</strong>. You can cancel any time
-            before then.
+            <strong>{formatDate(scheduledFor)}</strong>. You can cancel at any
+            point during the 30-day grace period. Once the scheduled deletion
+            cron begins executing on the final day, a late cancel may not reach
+            us in time.
           </p>
           {cancelError && (
             <p role="alert" className="text-sm text-destructive">

@@ -356,6 +356,41 @@ async def test_execute_hard_delete_happy_path_runs_r2_stripe_auth():
     mock_email.assert_awaited_once()
 
 
+async def test_execute_hard_delete_late_cancel_aborts_before_auth_delete():
+    """WR-07: a late cancel that lands after R2/Stripe but before auth delete
+    must stop the flow. R2 and Stripe are already purged; skipping auth delete
+    leaves the DB/auth row for manual review rather than completing an
+    irreversible wipe on a user who cancelled.
+    """
+    from user.deletion import execute_hard_delete
+
+    # Step-0 guard passes (deletion pending); late guard returns NULL as if
+    # /user/cancel-deletion landed between R2/Stripe and the auth delete.
+    guard_conn = AsyncMock()
+    guard_conn.fetchrow = AsyncMock(side_effect=[
+        {"deletion_requested_at": NOW - datetime.timedelta(days=31)},  # step-0
+        {"deletion_requested_at": None},                                # WR-07 late guard
+    ])
+    guard_conn.transaction = MagicMock(return_value=_make_ctx(guard_conn))
+
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(guard_conn))
+
+    with patch("user.deletion.get_db_pool", new_callable=AsyncMock, return_value=mock_pool), \
+         patch("user.deletion.list_and_delete_user_objects", return_value=5) as mock_r2, \
+         patch("user.deletion.stripe") as mock_stripe, \
+         patch("user.deletion.delete_auth_user") as mock_auth_delete, \
+         patch("user.deletion.send_deletion_completed_email", new_callable=AsyncMock) as mock_email:
+        await execute_hard_delete(USER_ID, "user@example.com", "cus_abc")
+
+    # R2 and Stripe ran (they're before the late guard in the flow).
+    mock_r2.assert_called_once_with(USER_ID)
+    mock_stripe.Customer.delete.assert_called_once_with("cus_abc")
+    # Late guard triggered abort — auth delete and completion email never run.
+    mock_auth_delete.assert_not_called()
+    mock_email.assert_not_called()
+
+
 async def test_execute_hard_delete_stripe_failure_does_not_block_auth_delete():
     """Stripe failure must NOT abort the flow — invoice-retention on Stripe's
     side cannot hold the DB row hostage."""
