@@ -65,3 +65,46 @@ describe("SettingsPage (smoke test)", () => {
     expect(usageTab).toBeInTheDocument();
   });
 });
+
+/**
+ * Plan 10-06 Task 3 — deep-link coverage.
+ *
+ * Hardens the `/settings?tab=privacy` URL embedded in the cancel-deletion
+ * email sent by Plan 10-04 Task 3. If this deep-link ever regresses (tab
+ * param ignored, Privacy tab removed, or the validation whitelist drops
+ * "privacy"), the email CTA silently breaks. These tests catch that at CI.
+ */
+describe("SettingsPage deep-link ?tab=", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderAt(url: string) {
+    return render(
+      <MemoryRouter initialEntries={[url]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+  }
+
+  it("activates the Privacy tab when rendered at /settings?tab=privacy", () => {
+    renderAt("/settings?tab=privacy");
+    const privacyTab = screen.getByRole("tab", { name: /^privacy$/i });
+    expect(privacyTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("activates the Account tab (default) when rendered at /settings with no query param", () => {
+    renderAt("/settings");
+    const accountTab = screen.getByRole("tab", { name: /^account$/i });
+    expect(accountTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("falls back to the Account tab when ?tab=<invalid> is supplied", () => {
+    renderAt("/settings?tab=bogus");
+    const accountTab = screen.getByRole("tab", { name: /^account$/i });
+    expect(accountTab).toHaveAttribute("aria-selected", "true");
+    // Privacy tab is present but not selected.
+    const privacyTab = screen.getByRole("tab", { name: /^privacy$/i });
+    expect(privacyTab).toHaveAttribute("aria-selected", "false");
+  });
+});
