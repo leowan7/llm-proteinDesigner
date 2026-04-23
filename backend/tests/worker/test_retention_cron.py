@@ -111,7 +111,8 @@ async def test_warning_pass_sends_email_and_stamps_row():
     assert conn.execute.await_count == 1
     update_sql = conn.execute.await_args.args[0]
     assert "retention_warning_sent_at" in update_sql
-    assert conn.execute.await_args.args[1] == job_id
+    # W2: cron binds str(uuid) for consistency with deletion_cron convention.
+    assert conn.execute.await_args.args[1] == str(job_id)
 
 
 async def test_warning_pass_does_not_resend_when_already_stamped():
@@ -204,7 +205,8 @@ async def test_deletion_pass_deletes_objects_and_stamps_row():
     assert conn.execute.await_count == 1
     update_sql, row_id, new_status = conn.execute.await_args.args
     assert "retention_deleted_at = now()" in update_sql
-    assert row_id == job_id
+    # W2: cron binds str(uuid) for consistency with deletion_cron convention.
+    assert row_id == str(job_id)
     assert new_status == "expired"
 
 

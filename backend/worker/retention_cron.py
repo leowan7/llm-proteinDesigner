@@ -32,6 +32,12 @@ Policy guards (all enforced in SQL, not in Python):
 ``WARNING_DAYS_BEFORE`` is interpolated into the query text with an f-string
 (W8) because asyncpg does not expand parameters inside ``INTERVAL`` literals.
 The constant is a module-level int — no untrusted input reaches the query.
+
+**UUID/str convention (W2):** row IDs are coerced to ``str`` at the top of each
+per-row loop and the stringified form is used for all downstream operations
+(SQL bindings, log lines, email payloads, storage client calls). This matches
+``deletion_cron.py``. asyncpg accepts ``str`` for ``uuid`` columns so no
+PostgreSQL-side type coercion is required.
 """
 import datetime
 import logging
@@ -118,6 +124,11 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
 
     sent = 0
     for row in rows:
+        # W2 (10-REVIEW): coerce the UUID to str at the top of the loop and use
+        # the stringified form for ALL downstream operations — SQL bindings, email
+        # payloads, log lines. asyncpg accepts str for uuid columns. Convention:
+        # IDs are handled as str throughout cron paths (matches deletion_cron.py).
+        job_id = str(row["id"])
         deletion_date = row["created_at"] + datetime.timedelta(
             days=row["data_retention_days"]
         )
@@ -126,7 +137,7 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
             # the row stays unstamped and the next cron retries it (T-10.05-06).
             await send_retention_warning_email(
                 to_email=row["email"],
-                job_id=str(row["id"]),
+                job_id=job_id,
                 job_name=row["name"],
                 deletion_date_iso=deletion_date.date().isoformat(),
                 retention_days=row["data_retention_days"],
@@ -137,13 +148,13 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
                     "UPDATE public.jobs "
                     "SET retention_warning_sent_at = now(), updated_at = now() "
                     "WHERE id = $1",
-                    row["id"],
+                    job_id,
                 )
             sent += 1
         except Exception as exc:
             logger.error(
                 "send_retention_warnings: job=%s email failed: %s",
-                row["id"], exc,
+                job_id, exc,
             )
             # Swallow — the next cron run retries this row.
 
@@ -218,7 +229,7 @@ async def execute_retention_deletions(ctx: dict | None = None) -> int:
                            status = $2,
                            updated_at = now()
                        WHERE id = $1""",
-                    row["id"],
+                    job_id,  # W2: str form, consistent with send_retention_warnings
                     new_status,
                 )
             logger.info(
