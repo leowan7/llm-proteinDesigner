@@ -1,4 +1,5 @@
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card";
+import { AppFooter } from "@/components/layout/AppFooter";
 
 interface AuthLayoutProps {
   title: string;
@@ -24,31 +25,34 @@ interface AuthLayoutProps {
  */
 export function AuthLayout({ title, subtitle, footer, children }: AuthLayoutProps) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <Card className="w-full max-w-[400px]">
-        <CardHeader className="space-y-2 p-6">
-          <div className="flex items-center gap-2.5 mb-2">
-            <div className="size-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-xs">
-              K
+    <div className="flex min-h-screen flex-col bg-background">
+      <div className="flex flex-1 items-center justify-center px-4 py-8">
+        <Card className="w-full max-w-[400px]">
+          <CardHeader className="space-y-2 p-6">
+            <div className="flex items-center gap-2.5 mb-2">
+              <div className="size-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-xs">
+                K
+              </div>
+              <span className="font-display text-lg tracking-tight text-foreground">Kendrew<span className="text-primary">.AI</span></span>
             </div>
-            <span className="font-display text-lg tracking-tight text-foreground">Kendrew<span className="text-primary">.AI</span></span>
-          </div>
-          <h1 className="font-display text-xl font-semibold leading-[1.2] tracking-tight">
-            {title}
-          </h1>
-          <p className="text-base font-normal leading-[1.5] text-muted-foreground">
-            {subtitle}
-          </p>
-        </CardHeader>
-        <CardContent className="px-6 pb-6">
-          {children}
-        </CardContent>
-        {footer && (
-          <CardFooter className="flex flex-col items-center gap-2 px-4 py-4 text-center text-sm text-muted-foreground">
-            {footer}
-          </CardFooter>
-        )}
-      </Card>
+            <h1 className="font-display text-xl font-semibold leading-[1.2] tracking-tight">
+              {title}
+            </h1>
+            <p className="text-base font-normal leading-[1.5] text-muted-foreground">
+              {subtitle}
+            </p>
+          </CardHeader>
+          <CardContent className="px-6 pb-6">
+            {children}
+          </CardContent>
+          {footer && (
+            <CardFooter className="flex flex-col items-center gap-2 px-4 py-4 text-center text-sm text-muted-foreground">
+              {footer}
+            </CardFooter>
+          )}
+        </Card>
+      </div>
+      <AppFooter />
     </div>
   );
 }

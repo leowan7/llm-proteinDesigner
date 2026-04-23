@@ -13,6 +13,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import { CreditCard } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -458,9 +459,30 @@ function NotificationsTab({ initialPrefs, onSaved }: NotificationsTabProps) {
 // SettingsPage root
 // ---------------------------------------------------------------------------
 
+/** Tabs surfaced by SettingsPage. "privacy" scaffold added in Plan 10-06;
+ *  Plan 10-04 fills in the Privacy tab content (Export + Delete buttons). */
+const VALID_SETTINGS_TABS = [
+  "account",
+  "billing",
+  "privacy",
+  "usage",
+  "notifications",
+] as const;
+
 export function SettingsPage() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Plan 10-06: deep-link support for /settings?tab=<name>. Hardens the
+  // cancel-deletion email link from Plan 10-04 Task 3 — invalid values fall
+  // back silently to "account" so a mangled URL never 404s the user.
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const initialTab = (VALID_SETTINGS_TABS as readonly string[]).includes(
+    tabParam ?? "",
+  )
+    ? (tabParam as string)
+    : "account";
 
   const loadSettings = useCallback(async () => {
     try {
@@ -485,10 +507,11 @@ export function SettingsPage() {
         </p>
       )}
 
-      <Tabs defaultValue="account">
+      <Tabs defaultValue={initialTab}>
         <TabsList>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
+          <TabsTrigger value="privacy">Privacy</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
         </TabsList>
@@ -502,6 +525,21 @@ export function SettingsPage() {
 
         <TabsContent value="billing">
           <BillingTab />
+        </TabsContent>
+
+        <TabsContent value="privacy">
+          {/*
+            Privacy tab scaffold (Plan 10-06). Plan 10-04 replaces this
+            placeholder with Export Data + Delete Account controls wired to
+            the GDPR endpoints. Keeping the TabsTrigger + empty TabsContent
+            in place now lets the /settings?tab=privacy deep-link from the
+            Plan 10-04 cancel-deletion email resolve to a visible tab even
+            before 10-04 lands.
+          */}
+          <div className="pt-4 text-sm text-muted-foreground">
+            Privacy controls are being rolled out. Data export and account
+            deletion will appear here soon.
+          </div>
         </TabsContent>
 
         <TabsContent value="usage">

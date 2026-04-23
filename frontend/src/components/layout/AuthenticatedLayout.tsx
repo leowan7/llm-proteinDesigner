@@ -28,6 +28,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "./AppSidebar";
 import { AppHeader } from "./AppHeader";
+import { AppFooter } from "./AppFooter";
 import { ReAcceptanceModal } from "@/components/legal/ReAcceptanceModal";
 import { listSessions } from "@/lib/sessions";
 import { api } from "@/lib/api";
@@ -155,9 +156,10 @@ export function AuthenticatedLayout() {
             className="flex-1 flex flex-col min-h-screen overflow-hidden"
           >
             <AppHeader sessionTitle={sessionTitle} />
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-auto">
               <Outlet context={{ refreshSessions } satisfies LayoutContext} />
             </div>
+            <AppFooter />
           </main>
         </div>
       </SidebarProvider>
