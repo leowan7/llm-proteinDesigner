@@ -29,6 +29,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -110,6 +111,68 @@ def startup_check():
 # ===========================================================================
 # Helper functions
 # ===========================================================================
+
+class _HeartbeatThread:
+    """Background thread that emits heartbeats during long subprocess runs.
+
+    BindCraft's main subprocess can block Python for 5–15 min inside JAX
+    compile + AF2 first-forward-pass before it streams any output. Without
+    a background heartbeat, the Kendrew stale-detection cron kills a
+    perfectly healthy job. See cleanup.py:STALE_HEARTBEAT_SECONDS.
+    """
+
+    def __init__(
+        self,
+        webhook_url: str,
+        job_id: str,
+        stage: str,
+        designs_completed: int = 0,
+        designs_total: int = 0,
+        interval_seconds: int = 60,
+    ) -> None:
+        import threading
+        self._webhook_url = webhook_url
+        self._job_id = job_id
+        self._stage = stage
+        self._done = designs_completed
+        self._total = designs_total
+        self._interval = interval_seconds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def _run(self) -> None:
+        # Fire one immediately so the backend's last_heartbeat_at updates right
+        # away, then keep pinging every ``interval_seconds`` until stopped.
+        while not self._stop.is_set():
+            try:
+                send_heartbeat(
+                    self._webhook_url, self._job_id, self._stage,
+                    self._done, self._total,
+                )
+            except Exception as exc:
+                logger.warning("Background heartbeat emit failed: %s", exc)
+            # Sleep on the event so stop() returns promptly.
+            self._stop.wait(self._interval)
+
+    def start(self) -> None:
+        import threading
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="heartbeat",
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def __enter__(self) -> "_HeartbeatThread":
+        self.start()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.stop()
+
 
 def send_heartbeat(
     webhook_url: str,
@@ -341,62 +404,77 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
         logger.info("BindCraft returned zero passing candidates (expected behavior)")
         return []
 
-    # Parse metrics CSV if available
+    # Parse metrics CSV if available.
+    # BindCraft writes final_design_stats.csv with columns:
+    #   Rank, Design, Length, ... Average_i_pTM, Average_pLDDT,
+    #   Average_Binder_pAE, Average_Binder_RMSD, Average_Hotspot_RMSD, ...
+    # The Design column value (e.g. "design_l100_s354445_mpnn2") is the MPNN
+    # design name; the Accepted/*.pdb filename adds a "_modelN" suffix
+    # (the top AF2 model picked for that design). We key by Design.
     metrics_by_name = {}
     if os.path.exists(csv_path):
         try:
             with open(csv_path) as fh:
                 reader = csv.DictReader(fh)
                 for row in reader:
-                    # BindCraft CSV uses the design name (without .pdb) as key
-                    name = row.get("design_name", row.get("name", ""))
-                    if not name:
-                        # Try to extract from the first column
-                        first_val = list(row.values())[0] if row else ""
-                        name = first_val
-                    metrics_by_name[name] = row
+                    name = row.get("Design", "") or row.get("design_name", "") or row.get("name", "")
+                    if name:
+                        metrics_by_name[name] = row
             logger.info("Parsed metrics for %d designs from CSV", len(metrics_by_name))
         except Exception as exc:
             logger.warning("Failed to parse results CSV: %s", exc)
     else:
         logger.warning("No final_design_stats.csv found at %s", csv_path)
 
+    # Map from BindCraft CSV column -> canonical Kendrew score key.
+    # We prefer the "Average_*" aggregate across AF2 models since Accepted/
+    # PDBs correspond to the highest-scoring model but downstream display
+    # uses the aggregate for ranking parity with other tools.
+    _METRIC_MAP = {
+        "Average_i_pTM": "ipTM",
+        "Average_pLDDT": "pLDDT",
+        "Average_pTM": "pTM",
+        "Average_Binder_pAE": "i_pAE",
+        "Average_Binder_RMSD": "Binder_RMSD",
+        "Average_Hotspot_RMSD": "Hotspot_RMSD",
+        "Average_Target_RMSD": "Target_RMSD",
+        "ShapeComplementarity": "shape_complementarity",
+        "HydrophobicityScore": "SAP",
+    }
+
     candidates = []
     for rank_idx, pdb_path in enumerate(pdb_files):
-        pdb_name = Path(pdb_path).stem  # e.g. "design_1"
+        pdb_name = Path(pdb_path).stem  # e.g. "design_l100_s354445_mpnn2_model1"
         rank = rank_idx + 1
 
-        # Extract scores from CSV metrics
-        row = metrics_by_name.get(pdb_name, {})
-        scores = {}
-        for metric_key in ["ipTM", "iptm", "pLDDT", "plddt", "RMSD", "rmsd",
-                           "shape_complementarity", "SAP", "sap",
-                           "i_pAE", "ipae", "i_pae"]:
-            if metric_key in row:
-                try:
-                    scores[metric_key] = float(row[metric_key])
-                except (ValueError, TypeError):
-                    scores[metric_key] = row[metric_key]
+        # Strip the "_modelN" suffix to match the Design column.
+        design_key = re.sub(r"_model\d+$", "", pdb_name)
+        row = metrics_by_name.get(design_key, {})
 
-        # Normalize metric key casing for consistency
-        normalized_scores = {}
-        for key, val in scores.items():
-            if key.lower() == "iptm":
-                normalized_scores["ipTM"] = val
-            elif key.lower() == "plddt":
-                normalized_scores["pLDDT"] = val
-            elif key.lower() == "rmsd":
-                normalized_scores["RMSD"] = val
-            elif key.lower() in ("i_pae", "ipae"):
-                normalized_scores["i_pAE"] = val
-            else:
-                normalized_scores[key] = val
+        scores: dict[str, float | str] = {}
+        for csv_col, canonical in _METRIC_MAP.items():
+            if csv_col in row and row[csv_col] not in ("", None):
+                try:
+                    scores[canonical] = float(row[csv_col])
+                except (ValueError, TypeError):
+                    scores[canonical] = row[csv_col]
+
+        if not scores and row:
+            logger.warning(
+                "Found CSV row for %s but no expected metric columns matched. Columns: %s",
+                design_key, list(row.keys())[:10],
+            )
+        elif not row:
+            logger.warning(
+                "No CSV row matched design %s (looked up key=%s). Available: %s",
+                pdb_name, design_key, list(metrics_by_name.keys()),
+            )
 
         candidates.append({
             "rank": rank,
             "pdb_path": pdb_path,
             "pdb_name": pdb_name,
-            "scores": normalized_scores,
+            "scores": scores,
         })
 
     logger.info("Parsed %d BindCraft candidates", len(candidates))
@@ -424,6 +502,7 @@ def main():
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
 
     num_designs = job_spec.get("parameters", {}).get("num_designs", 10)
+    job_tier = job_spec.get("job_tier", "pilot")
     pipeline_start = time.time()
 
     work_dir = tempfile.mkdtemp(prefix="bindcraft_job_")
@@ -439,6 +518,26 @@ def main():
         settings_path = write_bindcraft_settings(job_spec, target_pdb, output_dir)
         send_heartbeat(webhook_url, job_id, "Running BindCraft", 0, num_designs)
 
+        # ----- Resolve advanced settings JSON -----
+        # FreeBindCraft's default advanced JSON has max_trajectories=false
+        # (unbounded). On hard targets a pilot can grind for 4h and hit the
+        # Modal timeout with zero accepted designs. For pilots, copy the
+        # default into work_dir and JSON-patch max_trajectories=10 so the
+        # main loop exits cleanly after ~10 × 5 min = 50 min worst case.
+        # Never mutate the default file on disk.
+        advanced_path = BINDCRAFT_ADVANCED
+        if job_tier == "pilot":
+            advanced_path = os.path.join(work_dir, "advanced_pilot.json")
+            with open(BINDCRAFT_ADVANCED) as fh:
+                advanced_cfg = json.load(fh)
+            advanced_cfg["max_trajectories"] = 10
+            with open(advanced_path, "w") as fh:
+                json.dump(advanced_cfg, fh, indent=2)
+            logger.info(
+                "Pilot tier: wrote patched advanced settings to %s (max_trajectories=10)",
+                advanced_path,
+            )
+
         # ----- Run FreeBindCraft -----
         # FreeBindCraft handles the full pipeline internally:
         #   1. Diffusion-based binder backbone generation
@@ -452,13 +551,22 @@ def main():
             sys.executable, "-u", BINDCRAFT_SCRIPT,
             "--settings", settings_path,
             "--filters", BINDCRAFT_FILTERS,
-            "--advanced", BINDCRAFT_ADVANCED,
+            "--advanced", advanced_path,
             "--no-pyrosetta",
             "--no-plots",
             "--no-animations",
         ]
 
-        run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
+        # Background heartbeat every 60s so Kendrew's stale-detection cron
+        # doesn't kill a healthy job while BindCraft is inside its multi-minute
+        # JAX compile + AF2 init phase (during which no stdout is emitted).
+        with _HeartbeatThread(
+            webhook_url, job_id,
+            stage="Running BindCraft - 0/{} designs".format(num_designs),
+            designs_completed=0, designs_total=num_designs,
+            interval_seconds=60,
+        ):
+            run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
 
         send_heartbeat(webhook_url, job_id, "BindCraft complete, parsing results", 0, num_designs)
 
