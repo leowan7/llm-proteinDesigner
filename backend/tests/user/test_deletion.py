@@ -202,9 +202,15 @@ async def test_delete_account_unauthenticated_returns_401():
 # ---------------------------------------------------------------------------
 
 async def test_cancel_deletion_clears_column():
-    """POST /user/cancel-deletion when deletion is pending clears the column and returns cancelled."""
+    """WR-01: POST /user/cancel-deletion runs a single atomic conditional UPDATE.
+
+    The conditional UPDATE ``WHERE id = $1 AND deletion_requested_at IS NOT NULL
+    RETURNING id`` returns a row on success. On success an audit_log INSERT is
+    also issued for symmetry with the deletion-request audit trail.
+    """
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"deletion_requested_at": NOW - datetime.timedelta(days=1)})
+    # First fetchrow is the conditional UPDATE — returns RETURNING id on success.
+    conn.fetchrow = AsyncMock(return_value={"id": USER_ID})
     conn.execute = AsyncMock()
 
     mock_pool = AsyncMock()
@@ -217,16 +223,27 @@ async def test_cancel_deletion_clears_column():
 
     assert response.status_code == 200
     assert response.json() == {"cancelled": True}
-    # UPDATE issued with deletion_requested_at = NULL.
-    assert conn.execute.await_count == 1
-    update_sql = conn.execute.await_args_list[0].args[0]
+    # Conditional UPDATE ran (single fetchrow).
+    assert conn.fetchrow.await_count == 1
+    update_sql = conn.fetchrow.await_args.args[0]
     assert "deletion_requested_at = NULL" in update_sql
+    assert "deletion_requested_at IS NOT NULL" in update_sql
+    # Symmetric audit_log row written on cancel.
+    assert conn.execute.await_count == 1
+    audit_sql = conn.execute.await_args.args[0]
+    assert "audit_log" in audit_sql
+    assert "user_deletion_cancelled" in audit_sql
 
 
 async def test_cancel_deletion_when_none_pending_returns_404():
-    """POST /user/cancel-deletion returns 404 when no deletion is pending."""
+    """POST /user/cancel-deletion returns 404 when no deletion is pending.
+
+    Conditional UPDATE returns None (no rows matched), disambiguation SELECT
+    finds the row but with deletion_requested_at IS NULL.
+    """
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value={"deletion_requested_at": None})
+    # fetchrow 1: conditional UPDATE → None; fetchrow 2: SELECT → row exists.
+    conn.fetchrow = AsyncMock(side_effect=[None, {"deletion_requested_at": None}])
 
     mock_pool = AsyncMock()
     mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
@@ -241,9 +258,13 @@ async def test_cancel_deletion_when_none_pending_returns_404():
 
 
 async def test_cancel_deletion_missing_user_returns_404():
-    """POST /user/cancel-deletion returns 404 when user row is missing entirely."""
+    """POST /user/cancel-deletion returns 404 when user row is missing entirely.
+
+    Conditional UPDATE returns None, disambiguation SELECT also None.
+    """
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value=None)
+    # fetchrow 1: UPDATE → None; fetchrow 2: SELECT → None.
+    conn.fetchrow = AsyncMock(side_effect=[None, None])
 
     mock_pool = AsyncMock()
     mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
@@ -254,6 +275,7 @@ async def test_cancel_deletion_missing_user_returns_404():
             response = await client.post("/user/cancel-deletion")
 
     assert response.status_code == 404
+    assert "User not found" in response.text
 
 
 # ---------------------------------------------------------------------------

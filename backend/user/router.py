@@ -459,29 +459,64 @@ async def request_account_deletion(
 
 
 @router.post("/cancel-deletion")
-async def cancel_account_deletion(user_id: str = Depends(get_current_user)):
-    """Clear a pending ``deletion_requested_at`` — works at any point during the grace period."""
+async def cancel_account_deletion(
+    request: Request,
+    user_id: str = Depends(get_current_user),
+):
+    """Clear a pending ``deletion_requested_at`` — works at any point during the grace period.
+
+    WR-01: the clear is performed with a single atomic conditional UPDATE
+    (``WHERE id = $1 AND deletion_requested_at IS NOT NULL``) mirroring
+    :func:`request_account_deletion`. This eliminates the check-then-write
+    race where two concurrent cancel calls could both observe the pending
+    deletion and both report success. Also writes an ``audit_log`` row on
+    cancel for symmetry with the deletion-request audit trail.
+
+    Note: a successful cancel does NOT guarantee the hard-delete cron has
+    not already begun executing for this user — the executor holds its own
+    ``SELECT ... FOR UPDATE`` re-check just before ``delete_auth_user``
+    (WR-07) to catch the very-late cancel.
+    """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT deletion_requested_at FROM public.users WHERE id = $1",
+        updated = await conn.fetchrow(
+            """UPDATE public.users
+               SET deletion_requested_at = NULL, updated_at = now()
+               WHERE id = $1 AND deletion_requested_at IS NOT NULL
+               RETURNING id""",
             user_id,
         )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-    if row["deletion_requested_at"] is None:
+
+    if updated is None:
+        # Either user missing or no pending deletion. Disambiguate for the UI.
+        async with pool.acquire() as conn:
+            existing = await conn.fetchrow(
+                "SELECT deletion_requested_at FROM public.users WHERE id = $1",
+                user_id,
+            )
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found",
+            )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No pending deletion",
         )
+
+    # Symmetric audit_log row — mirrors the one written on deletion request.
+    audit_metadata = {
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+    }
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE public.users SET deletion_requested_at = NULL, updated_at = now() WHERE id = $1",
+            """INSERT INTO public.audit_log (admin_user_id, action, metadata)
+               VALUES ($1, 'user_deletion_cancelled', $2::jsonb)""",
             user_id,
+            json.dumps(audit_metadata),
         )
+
     return {"cancelled": True}
 
 
