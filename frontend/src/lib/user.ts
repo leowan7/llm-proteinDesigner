@@ -156,3 +156,30 @@ export async function requestAccountDeletion(
 export async function cancelAccountDeletion(): Promise<{ cancelled: boolean }> {
   return api("/user/cancel-deletion", { method: "POST" });
 }
+
+// ---------------------------------------------------------------------------
+// Plan 10-05 — per-user retention window override
+// ---------------------------------------------------------------------------
+
+/**
+ * Updates the authenticated user's data retention window (Plan 10-05).
+ *
+ * The value must satisfy `30 <= days <= 365`. The backend returns HTTP 400
+ * for out-of-range values; the Privacy tab duplicates the range check for
+ * a faster UX, but the server remains the source of truth.
+ *
+ * Shortening retention may expose older jobs to deletion on the next
+ * daily cron run (04:45 UTC) — the Privacy tab surfaces this via the
+ * T-10.05-07 warning copy.
+ *
+ * @param days Retention window in days (30-365 inclusive).
+ * @returns The persisted value echoed back from the server.
+ */
+export async function updateRetentionDays(
+  days: number,
+): Promise<{ data_retention_days: number }> {
+  return api("/user/retention", {
+    method: "PUT",
+    body: { data_retention_days: days },
+  });
+}

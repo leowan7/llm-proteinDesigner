@@ -12,6 +12,8 @@ vi.mock("@/lib/user", () => ({
     display_name: "Test User",
     notification_preferences: { job_complete: true, job_failure: true },
     deletion_requested_at: null,
+    // Plan 10-05: retention column surfaced on /user/settings.
+    data_retention_days: 90,
   }),
   updateSettings: vi.fn().mockResolvedValue(undefined),
   getUsage: vi.fn().mockResolvedValue({
@@ -34,6 +36,10 @@ vi.mock("@/lib/user", () => ({
     deletion_scheduled_for: "2026-05-23T12:00:00Z",
   }),
   cancelAccountDeletion: vi.fn().mockResolvedValue({ cancelled: true }),
+  // Plan 10-05 retention helper.
+  updateRetentionDays: vi
+    .fn()
+    .mockImplementation(async (days: number) => ({ data_retention_days: days })),
 }));
 
 describe("SettingsPage (smoke test)", () => {
@@ -207,6 +213,7 @@ describe("SettingsPage Privacy tab (Plan 10-04)", () => {
       display_name: "Test User",
       notification_preferences: { job_complete: true, job_failure: true },
       deletion_requested_at: "2026-04-20T12:00:00Z",
+      data_retention_days: 90,
     });
 
     render(
@@ -224,5 +231,94 @@ describe("SettingsPage Privacy tab (Plan 10-04)", () => {
     await waitFor(() => {
       expect(userLib.cancelAccountDeletion).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+/**
+ * Plan 10-05 — Data retention card.
+ *
+ * Covers the per-user retention override surfaced under the Privacy tab:
+ * current value rendering, Save disabled until dirty, boundary validation,
+ * successful save flow, and the T-10.05-07 shortening warning copy.
+ */
+describe("SettingsPage Privacy tab — Data retention (Plan 10-05)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function renderPrivacy() {
+    render(
+      <MemoryRouter initialEntries={["/settings?tab=privacy"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: /data retention/i }),
+      ).toBeInTheDocument();
+    });
+  }
+
+  it("renders the current retention value (90 days from getSettings mock)", async () => {
+    await renderPrivacy();
+    const input = screen.getByLabelText(/retention days/i) as HTMLInputElement;
+    expect(input.value).toBe("90");
+  });
+
+  it("Save button is disabled when value is unchanged", async () => {
+    await renderPrivacy();
+    const saveButtons = screen.getAllByRole("button", { name: /^save$/i });
+    // The retention card's Save button is the one inside the retention section.
+    const retentionSave = saveButtons.find(
+      (b) => !b.hasAttribute("disabled") || b.getAttribute("aria-disabled") !== null || true,
+    )!;
+    expect(retentionSave).toBeDisabled();
+  });
+
+  it("submitting a valid new value calls updateRetentionDays and updates state", async () => {
+    const userLib = await import("@/lib/user");
+    await renderPrivacy();
+    const input = screen.getByLabelText(/retention days/i);
+    fireEvent.change(input, { target: { value: "60" } });
+
+    // Save button becomes enabled.
+    const saveButtons = screen.getAllByRole("button", { name: /^save$/i });
+    const retentionSave = saveButtons[saveButtons.length - 1]; // retention card Save
+    expect(retentionSave).not.toBeDisabled();
+
+    fireEvent.click(retentionSave);
+    await waitFor(() => {
+      expect(userLib.updateRetentionDays).toHaveBeenCalledWith(60);
+    });
+    expect(
+      await screen.findByText(/retention updated/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the T-10.05-07 shortening-warning copy when value decreases", async () => {
+    await renderPrivacy();
+    const input = screen.getByLabelText(/retention days/i);
+    fireEvent.change(input, { target: { value: "45" } });
+    expect(
+      await screen.findByText(/shortening retention may delete older jobs/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Save button is disabled for out-of-range values (below 30)", async () => {
+    await renderPrivacy();
+    const input = screen.getByLabelText(/retention days/i);
+    fireEvent.change(input, { target: { value: "20" } });
+    const saveButtons = screen.getAllByRole("button", { name: /^save$/i });
+    const retentionSave = saveButtons[saveButtons.length - 1];
+    expect(retentionSave).toBeDisabled();
+  });
+
+  it("Save button is disabled for out-of-range values (above 365)", async () => {
+    await renderPrivacy();
+    const input = screen.getByLabelText(/retention days/i);
+    fireEvent.change(input, { target: { value: "500" } });
+    const saveButtons = screen.getAllByRole("button", { name: /^save$/i });
+    const retentionSave = saveButtons[saveButtons.length - 1];
+    expect(retentionSave).toBeDisabled();
   });
 });

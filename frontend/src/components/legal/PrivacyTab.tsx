@@ -30,11 +30,19 @@ import {
   getExportStatus,
   requestAccountDeletion,
   requestDataExport,
+  updateRetentionDays,
   type ExportStatus,
   type UserSettings,
 } from "@/lib/user";
 
 const CONFIRMATION_PHRASE = "DELETE MY ACCOUNT";
+
+// Plan 10-05 — retention window bounds mirror the backend CHECK constraint
+// (`data_retention_days BETWEEN 30 AND 365`). Duplicated here for fast client
+// feedback; the server remains the source of truth.
+const RETENTION_MIN_DAYS = 30;
+const RETENTION_MAX_DAYS = 365;
+const RETENTION_DEFAULT_DAYS = 90;
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -74,6 +82,34 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
   // ---- Cancel section state ----
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
+
+  // ---- Retention section state (Plan 10-05) ----
+  // `initialRetentionDays` tracks the server's last-known value so the Save
+  // button can remain disabled until the user actually changes something. It
+  // updates after a successful PUT so a second click is a no-op.
+  const serverRetention =
+    initialSettings?.data_retention_days ?? RETENTION_DEFAULT_DAYS;
+  const [retentionDays, setRetentionDays] = useState<number>(serverRetention);
+  const [initialRetentionDays, setInitialRetentionDays] =
+    useState<number>(serverRetention);
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionError, setRetentionError] = useState<string | null>(null);
+  const [retentionSaved, setRetentionSaved] = useState(false);
+
+  // Sync the server baseline when /user/settings resolves or re-fetches. We
+  // only update the EDITABLE value if the user hasn't touched it yet (i.e. the
+  // current value still matches the prior baseline) — otherwise a late-arriving
+  // settings response would stomp an in-progress edit.
+  useEffect(() => {
+    const serverValue = initialSettings?.data_retention_days;
+    if (serverValue == null) return;
+    setInitialRetentionDays((prevBaseline) => {
+      setRetentionDays((prevInput) =>
+        prevInput === prevBaseline ? serverValue : prevInput,
+      );
+      return serverValue;
+    });
+  }, [initialSettings?.data_retention_days]);
 
   const deletionRequestedAt = initialSettings?.deletion_requested_at ?? null;
   const deletionPending = Boolean(deletionRequestedAt);
@@ -144,7 +180,49 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
     }
   }
 
+  async function handleSaveRetention() {
+    // Client-side range guard — fast feedback before the round-trip.
+    // The backend duplicates this check and is the source of truth.
+    if (
+      retentionDays < RETENTION_MIN_DAYS ||
+      retentionDays > RETENTION_MAX_DAYS ||
+      !Number.isFinite(retentionDays)
+    ) {
+      setRetentionError(
+        `Retention must be between ${RETENTION_MIN_DAYS} and ${RETENTION_MAX_DAYS} days.`,
+      );
+      return;
+    }
+    setRetentionSaving(true);
+    setRetentionError(null);
+    setRetentionSaved(false);
+    try {
+      const resp = await updateRetentionDays(retentionDays);
+      setInitialRetentionDays(resp.data_retention_days);
+      setRetentionDays(resp.data_retention_days);
+      setRetentionSaved(true);
+      onChanged();
+      setTimeout(() => setRetentionSaved(false), 3000);
+    } catch (err) {
+      const msg = err instanceof Error
+        ? err.message
+        : "Unable to update retention. Try again.";
+      setRetentionError(msg);
+    } finally {
+      setRetentionSaving(false);
+    }
+  }
+
   const canSubmitDelete = confirmationInput === CONFIRMATION_PHRASE;
+  const retentionDirty = retentionDays !== initialRetentionDays;
+  const retentionOutOfRange =
+    !Number.isFinite(retentionDays) ||
+    retentionDays < RETENTION_MIN_DAYS ||
+    retentionDays > RETENTION_MAX_DAYS;
+  const retentionShortening =
+    retentionDirty &&
+    !retentionOutOfRange &&
+    retentionDays < initialRetentionDays;
 
   return (
     <div className="space-y-8 pt-4">
@@ -210,7 +288,75 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
       </section>
 
       {/* ------------------------------------------------------------------- */}
-      {/* Section 2: Delete account OR pending-deletion banner                  */}
+      {/* Section 2: Data retention (Plan 10-05)                                */}
+      {/* ------------------------------------------------------------------- */}
+      <section aria-labelledby="privacy-retention-heading" className="space-y-3">
+        <h2
+          id="privacy-retention-heading"
+          className="text-base font-semibold text-foreground"
+        >
+          Data retention
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          Job outputs and uploaded structures are automatically deleted after
+          the period below. Minimum {RETENTION_MIN_DAYS} days, maximum{" "}
+          {RETENTION_MAX_DAYS} days. We email you 7 days before any deletion.
+        </p>
+
+        <div className="flex items-center gap-3">
+          <Label htmlFor="retention-days" className="sr-only">
+            Retention days
+          </Label>
+          <Input
+            id="retention-days"
+            type="number"
+            min={30}
+            max={365}
+            value={Number.isFinite(retentionDays) ? retentionDays : ""}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setRetentionDays(
+                Number.isFinite(parsed) ? parsed : RETENTION_DEFAULT_DAYS,
+              );
+              setRetentionSaved(false);
+              setRetentionError(null);
+            }}
+            className="w-24"
+            aria-label="Retention days"
+            aria-describedby="retention-hint"
+          />
+          <span id="retention-hint" className="text-sm text-muted-foreground">
+            days
+          </span>
+          <Button
+            onClick={handleSaveRetention}
+            disabled={!retentionDirty || retentionOutOfRange || retentionSaving}
+          >
+            {retentionSaving ? "Saving..." : "Save"}
+          </Button>
+        </div>
+
+        {retentionShortening && (
+          <p role="alert" className="text-xs text-yellow-400">
+            Shortening retention may delete older jobs at the next daily run.
+          </p>
+        )}
+
+        {retentionError && (
+          <p role="alert" className="text-sm text-destructive">
+            {retentionError}
+          </p>
+        )}
+
+        {retentionSaved && (
+          <p role="status" className="text-sm text-green-400">
+            Retention updated.
+          </p>
+        )}
+      </section>
+
+      {/* ------------------------------------------------------------------- */}
+      {/* Section 3: Delete account OR pending-deletion banner                  */}
       {/* ------------------------------------------------------------------- */}
       {deletionPending ? (
         <section

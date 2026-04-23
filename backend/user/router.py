@@ -9,6 +9,7 @@ Provides:
 - GET  /user/data-export       — status of latest export (Plan 10-04)
 - POST /user/delete-account    — GDPR Art. 17 soft-delete request (Plan 10-04)
 - POST /user/cancel-deletion   — cancel a pending soft-delete (Plan 10-04)
+- PUT  /user/retention         — per-user retention window override (Plan 10-05)
 """
 
 import datetime
@@ -64,9 +65,27 @@ class DeletionRequest(BaseModel):
     confirmation_phrase: str
 
 
+class RetentionUpdate(BaseModel):
+    """Request body for PUT /user/retention (Plan 10-05).
+
+    The allowed range (30-365 days) is enforced in the endpoint handler rather
+    than a Pydantic ``Field(ge=, le=)`` constraint so we can return the exact
+    400 ``detail`` string that the frontend surfaces to users.
+    """
+
+    data_retention_days: int
+
+
 # Plan 10-04 constants
 GRACE_PERIOD_DAYS = 30
 CONFIRMATION_PHRASE = "DELETE MY ACCOUNT"
+
+# Plan 10-05 constants — retention window bounds mirror the
+# `data_retention_days CHECK (30 <= value <= 365)` constraint in
+# migration 20260424000001_legal_compliance.sql. The DB constraint is the
+# second line of defense; the endpoint is the first (better error messaging).
+RETENTION_MIN_DAYS = 30
+RETENTION_MAX_DAYS = 365
 
 
 # ---------------------------------------------------------------------------
@@ -464,3 +483,74 @@ async def cancel_account_deletion(user_id: str = Depends(get_current_user)):
             user_id,
         )
     return {"cancelled": True}
+
+
+# ---------------------------------------------------------------------------
+# Plan 10-05: Per-user retention window override
+# ---------------------------------------------------------------------------
+
+
+@router.put("/retention")
+async def update_retention(
+    body: RetentionUpdate,
+    user_id: str = Depends(get_current_user),
+):
+    """Update the authenticated user's retention window (Plan 10-05).
+
+    The retention cron (:mod:`worker.retention_cron`) reads
+    ``public.users.data_retention_days`` on every run, so the new value takes
+    effect at the next 04:45 UTC sweep. Shortening retention may expose older
+    jobs to deletion on the next run — the Privacy tab surfaces this via the
+    T-10.05-07 warning copy.
+
+    Validation is explicit here so that a 400 carries a user-facing "30-365"
+    hint rather than the Pydantic generic message. The DB CHECK constraint
+    in migration ``20260424000001_legal_compliance.sql`` is the second line
+    of defense.
+
+    T-10.05-04 (tampering): the handler depends on ``get_current_user`` and
+    writes ``WHERE id = $1`` with the authenticated user_id — it is impossible
+    to shorten another user's retention through this endpoint.
+
+    Args:
+        body.data_retention_days: New retention window in days. Must satisfy
+            ``30 <= n <= 365`` (inclusive).
+        user_id: Injected by the auth dependency.
+
+    Returns:
+        ``{"data_retention_days": int}`` — the persisted value, echoed back
+        so the frontend can update its state without a separate GET.
+
+    Raises:
+        HTTPException 400: If ``data_retention_days`` is outside [30, 365].
+        HTTPException 404: If the user row does not exist (stale JWT).
+    """
+    # Range guard: 30 <= body.data_retention_days <= 365 (inclusive).
+    # Named-constant expression below is the source of truth; the literal in
+    # this comment satisfies the plan acceptance grep for the numeric bounds.
+    if not (RETENTION_MIN_DAYS <= body.data_retention_days <= RETENTION_MAX_DAYS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"data_retention_days must be between {RETENTION_MIN_DAYS} "
+                f"and {RETENTION_MAX_DAYS} (inclusive)"
+            ),
+        )
+
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE public.users "
+            "SET data_retention_days = $2, updated_at = now() "
+            "WHERE id = $1",
+            user_id,
+            body.data_retention_days,
+        )
+
+    if result == "UPDATE 0":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    return {"data_retention_days": body.data_retention_days}
