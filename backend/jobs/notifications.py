@@ -16,8 +16,15 @@ long-running full-design jobs:
 Neither fires on pilot jobs by default (pilots are short — the completion
 email is enough). Both are opt-in configurable per user in the Phase 5
 settings page (``frontend/src/pages/settings/notifications.tsx``).
+
+WR-09: ``resend.Emails.send`` is a synchronous HTTP call. This module's
+public senders are ``async`` functions called from the request path (FastAPI
+BackgroundTasks) and the arq cron workers — running the sync call directly
+would block the event loop for the duration of each Resend round-trip. All
+sends are dispatched via ``asyncio.to_thread`` so the event loop stays free.
 """
 
+import asyncio
 import logging
 
 import resend
@@ -29,12 +36,16 @@ logger = logging.getLogger(__name__)
 resend.api_key = settings.resend_api_key
 
 
-def _send_email_safely(params: "resend.Emails.SendParams", purpose: str) -> None:
+async def _send_email_safely(params: "resend.Emails.SendParams", purpose: str) -> None:
     """Send an email via Resend, swallowing any error with a warning log.
 
     The job flow (completion/failure webhook, daily progress cron) must never
     break just because email delivery failed — missing API key in local dev,
     Resend rate limits, recipient domain misconfig, etc. Log loudly and move on.
+
+    WR-09: the underlying ``resend.Emails.send`` is sync HTTP. Wrap in
+    ``asyncio.to_thread`` so the event loop is not blocked for the duration
+    of the Resend call — serializes under cron load otherwise.
 
     Args:
         params: Resend ``SendParams`` dict.
@@ -44,7 +55,7 @@ def _send_email_safely(params: "resend.Emails.SendParams", purpose: str) -> None
         logger.info("Skipping %s email: RESEND_API_KEY not configured", purpose)
         return
     try:
-        resend.Emails.send(params)
+        await asyncio.to_thread(resend.Emails.send, params)
     except Exception as exc:
         logger.warning(
             "Failed to send %s email (to=%s): %s",
@@ -79,7 +90,7 @@ async def send_completion_email(
             f'<p><a href="{job_url}">View results</a></p>'
         ),
     }
-    _send_email_safely(params, purpose="completion")
+    await _send_email_safely(params, purpose="completion")
 
 
 async def send_failure_email(
@@ -104,7 +115,7 @@ async def send_failure_email(
             f'<p><a href="{job_url}">View details</a></p>'
         ),
     }
-    _send_email_safely(params, purpose="failure")
+    await _send_email_safely(params, purpose="failure")
 
 
 async def send_daily_progress_email(
@@ -149,7 +160,7 @@ async def send_daily_progress_email(
             f'<p><a href="{job_url}">Open the live progress page</a></p>'
         ),
     }
-    _send_email_safely(params, purpose="daily_progress")
+    await _send_email_safely(params, purpose="daily_progress")
 
 
 async def send_first_filter_pass_email(
@@ -187,7 +198,7 @@ async def send_first_filter_pass_email(
             f'<p><a href="{job_url}">Preview the candidate</a></p>'
         ),
     }
-    _send_email_safely(params, purpose="first_filter_pass")
+    await _send_email_safely(params, purpose="first_filter_pass")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +229,7 @@ async def send_export_ready_email(
             "<p>If you did not request this export, contact privacy@ranomics.com immediately.</p>"
         ),
     }
-    _send_email_safely(params, purpose="data_export")
+    await _send_email_safely(params, purpose="data_export")
 
 
 async def send_deletion_scheduled_email(
@@ -244,7 +255,7 @@ async def send_deletion_scheduled_email(
             "<p>If you did not request deletion, sign in now and cancel immediately, then change your password.</p>"
         ),
     }
-    _send_email_safely(params, purpose="deletion_scheduled")
+    await _send_email_safely(params, purpose="deletion_scheduled")
 
 
 async def send_retention_warning_email(
@@ -281,7 +292,7 @@ async def send_retention_warning_email(
         "subject": f"'{label}' will be deleted on {deletion_date_iso} (retention policy)",
         "html": html,
     }
-    _send_email_safely(params, purpose="retention_warning")
+    await _send_email_safely(params, purpose="retention_warning")
 
 
 async def send_deletion_completed_email(to_email: str) -> None:
@@ -302,4 +313,4 @@ async def send_deletion_completed_email(to_email: str) -> None:
             "<p>This is our final communication. Thank you for using Kendrew.</p>"
         ),
     }
-    _send_email_safely(params, purpose="deletion_completed")
+    await _send_email_safely(params, purpose="deletion_completed")
