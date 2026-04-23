@@ -23,7 +23,7 @@ from auth.dependencies import get_current_user
 from config import settings
 from db.connection import get_db_pool
 from jobs.notifications import send_deletion_scheduled_email
-from middleware.rate_limit import limiter  # T-10.04-06: slowapi limiter
+from middleware.rate_limit import limiter, get_rate_limit_key  # T-10.04-06: slowapi limiter
 from user.export import build_and_deliver_export
 
 router = APIRouter(prefix="/user", tags=["user"])
@@ -311,7 +311,12 @@ async def accept_tos(user_id: str = Depends(get_current_user)):
 
 
 @router.post("/data-export", status_code=202)
-@limiter.limit("1/hour")  # T-10.04-06 — GDPR Art. 12(5) permits rate-limiting excessive requests
+# WR-03: bind the rate-limit key explicitly to the user_id-aware key function.
+# The limiter's default key_func already resolves to user_id from the access_token
+# cookie (middleware/rate_limit.py get_rate_limit_key), but we pin it per-decorator
+# so a future limiter-instance swap cannot silently degrade the key to remote IP
+# (which would cause spurious 429s when two users share a NAT).
+@limiter.limit("1/hour", key_func=get_rate_limit_key)
 async def request_data_export(
     request: Request,  # required by slowapi to extract the rate-limit key
     background_tasks: BackgroundTasks,
@@ -324,7 +329,8 @@ async def request_data_export(
 
     Rate limit (T-10.04-06): one request per hour per authenticated user. GDPR
     Article 12(5) explicitly permits rate-limiting "manifestly unfounded or
-    excessive" requests.
+    excessive" requests. Key is derived from the access_token (user_id), not
+    remote IP (WR-03) — two users behind the same NAT retain independent budgets.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
