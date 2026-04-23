@@ -1,3 +1,4 @@
+// Cookie consent banner is mounted inside App.tsx via CookieConsentProvider (Plan 10-03).
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "@fontsource/inter/400.css";

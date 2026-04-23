@@ -18,6 +18,7 @@ import { AdminJobsPage } from "./pages/admin/AdminJobsPage";
 import { AdminRevenuePage } from "./pages/admin/AdminRevenuePage";
 import { AdminSystemPage } from "./pages/admin/AdminSystemPage";
 import { AdminAuditPage } from "./pages/admin/AdminAuditPage";
+import { CookieConsentProvider } from "./components/legal/CookieConsentProvider";
 
 /**
  * Detects Supabase auth redirects with tokens in the URL hash fragment
@@ -59,37 +60,39 @@ function App() {
   return (
     <BrowserRouter>
       <HashRedirectHandler />
-      <div className="dark min-h-screen bg-background font-sans text-foreground antialiased">
-        <Routes>
-          {/* Public auth routes — no sidebar layout */}
-          <Route path="/signup" element={<SignUp />} />
-          <Route path="/login" element={<Login />} />
-          <Route path="/verify-email" element={<VerifyEmail />} />
-          <Route path="/email-confirmed" element={<EmailConfirmed />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
-          <Route path="/reset-password/confirm" element={<ResetPasswordConfirm />} />
+      <CookieConsentProvider>
+        <div className="dark min-h-screen bg-background font-sans text-foreground antialiased">
+          <Routes>
+            {/* Public auth routes — no sidebar layout */}
+            <Route path="/signup" element={<SignUp />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/verify-email" element={<VerifyEmail />} />
+            <Route path="/email-confirmed" element={<EmailConfirmed />} />
+            <Route path="/reset-password" element={<ResetPassword />} />
+            <Route path="/reset-password/confirm" element={<ResetPasswordConfirm />} />
 
-          {/* Admin routes — separate layout, admin auth guard */}
-          <Route element={<AdminLayout />}>
-            <Route path="/admin" element={<AdminUsersPage />} />
-            <Route path="/admin/users" element={<AdminUsersPage />} />
-            <Route path="/admin/jobs" element={<AdminJobsPage />} />
-            <Route path="/admin/revenue" element={<AdminRevenuePage />} />
-            <Route path="/admin/system" element={<AdminSystemPage />} />
-            <Route path="/admin/audit" element={<AdminAuditPage />} />
-          </Route>
+            {/* Admin routes — separate layout, admin auth guard */}
+            <Route element={<AdminLayout />}>
+              <Route path="/admin" element={<AdminUsersPage />} />
+              <Route path="/admin/users" element={<AdminUsersPage />} />
+              <Route path="/admin/jobs" element={<AdminJobsPage />} />
+              <Route path="/admin/revenue" element={<AdminRevenuePage />} />
+              <Route path="/admin/system" element={<AdminSystemPage />} />
+              <Route path="/admin/audit" element={<AdminAuditPage />} />
+            </Route>
 
-          {/* Authenticated routes — wrapped in sidebar layout */}
-          <Route element={<AuthenticatedLayout />}>
-            <Route path="/chat" element={<ChatPage />} />
-            <Route path="/chat/:sessionId" element={<ChatPage />} />
-            <Route path="/jobs" element={<JobHistoryPage />} />
-            <Route path="/jobs/:id" element={<JobPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/" element={<HomePage />} />
-          </Route>
-        </Routes>
-      </div>
+            {/* Authenticated routes — wrapped in sidebar layout */}
+            <Route element={<AuthenticatedLayout />}>
+              <Route path="/chat" element={<ChatPage />} />
+              <Route path="/chat/:sessionId" element={<ChatPage />} />
+              <Route path="/jobs" element={<JobHistoryPage />} />
+              <Route path="/jobs/:id" element={<JobPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/" element={<HomePage />} />
+            </Route>
+          </Routes>
+        </div>
+      </CookieConsentProvider>
     </BrowserRouter>
   );
 }
