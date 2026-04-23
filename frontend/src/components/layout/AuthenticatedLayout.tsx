@@ -28,8 +28,11 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "./AppSidebar";
 import { AppHeader } from "./AppHeader";
+import { ReAcceptanceModal } from "@/components/legal/ReAcceptanceModal";
 import { listSessions } from "@/lib/sessions";
 import { api } from "@/lib/api";
+import { getSettings } from "@/lib/user";
+import { needsReAcceptance } from "@/lib/legal";
 import type { SessionSummary } from "@/lib/sessions";
 
 /** Context shape exposed to child routes via Outlet */
@@ -57,6 +60,10 @@ export function AuthenticatedLayout() {
 
   // Auth check state — null means not yet checked
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+
+  // Plan 10-02: blocking re-acceptance modal when users.tos_version drifts
+  // from settings.tos_current_version.
+  const [reAcceptanceOpen, setReAcceptanceOpen] = useState(false);
 
   // Session title for header — resolved from active session in list
   const activeSessionId = params.sessionId;
@@ -88,6 +95,20 @@ export function AuthenticatedLayout() {
         setIsAuthenticated(false);
         navigate("/login", { replace: true });
         return;
+      }
+
+      // Plan 10-02: pull settings to check tos_version drift. Settings
+      // failures must not break the authenticated layout — log and move on.
+      try {
+        const settings = await getSettings();
+        if (
+          !cancelled &&
+          needsReAcceptance(settings.tos_version, settings.tos_current)
+        ) {
+          setReAcceptanceOpen(true);
+        }
+      } catch (err) {
+        console.error("Failed to load user settings:", err);
       }
 
       // Fetch sessions
@@ -140,6 +161,10 @@ export function AuthenticatedLayout() {
           </main>
         </div>
       </SidebarProvider>
+      <ReAcceptanceModal
+        open={reAcceptanceOpen}
+        onAccepted={() => setReAcceptanceOpen(false)}
+      />
     </TooltipProvider>
   );
 }

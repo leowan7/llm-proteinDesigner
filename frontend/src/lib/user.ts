@@ -14,6 +14,15 @@ export interface UserSettings {
     job_complete: boolean;
     job_failure: boolean;
   };
+  is_admin?: boolean;
+  /** Version string the user most recently accepted (Plan 10-02). */
+  tos_version?: string | null;
+  /** Current backend TOS version (Plan 10-02). */
+  tos_current?: string;
+  /** Per-user retention window in days, 30-365 (Plan 10-02). */
+  data_retention_days?: number;
+  // NOTE: `deletion_requested_at` is NOT added here. Plan 10-04 owns that
+  // field (both the backend response and this TS interface).
 }
 
 export interface UsageData {
