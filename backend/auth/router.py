@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 
 import jwt
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
@@ -228,29 +229,46 @@ async def exchange_token(body: ExchangeTokenRequest, response: Response):
     access_token and refresh_token in the URL hash fragment. The frontend cannot
     set HTTP-only cookies, so it calls this endpoint to exchange the tokens.
     The backend sets them as HTTP-only cookies, making /auth/update-password work.
+
+    WR-05: verify the token signature with ``settings.supabase_jwt_secret`` and
+    derive the cookie ``max_age`` from the token's ``exp`` claim rather than
+    hardcoding 3600 seconds. Supabase recovery tokens are typically short-lived
+    (e.g. 5 minutes) — setting a 60-minute cookie would extend the window the
+    recovery session remains active on the device.
     """
     try:
-        # Basic structure check — decode without verification since the token
-        # comes from Supabase's own redirect and will be validated by Supabase
-        # when used for the password update call.
-        jwt.decode(
+        # Verify signature + audience + exp. jwt.decode raises
+        # ExpiredSignatureError on expired tokens; we surface it as 401.
+        payload = jwt.decode(
             body.access_token,
-            options={"verify_signature": False},
+            settings.supabase_jwt_secret,
+            algorithms=["HS256"],
             audience="authenticated",
         )
-        # Set the access_token as an HTTP-only cookie
-        response.set_cookie(
-            key="access_token",
-            value=body.access_token,
-            httponly=True,
-            secure=settings.cookie_secure,
-            samesite="lax",
-            max_age=3600,
-            path="/",
-        )
-        return {"message": "Token exchanged"}
-    except Exception as exc:
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Recovery token has expired; request a new reset link.")
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid recovery token")
+
+    # Derive max_age from exp so the cookie lifetime tracks the token lifetime.
+    # Clamp at 0 so an already-expired token never produces a negative max_age.
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)):
+        raise HTTPException(status_code=401, detail="Invalid recovery token")
+    exp_seconds = max(0, int(exp - time.time()))
+    if exp_seconds == 0:
+        raise HTTPException(status_code=401, detail="Recovery token has expired; request a new reset link.")
+
+    response.set_cookie(
+        key="access_token",
+        value=body.access_token,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="lax",
+        max_age=exp_seconds,
+        path="/",
+    )
+    return {"message": "Token exchanged"}
 
 
 @router.post("/update-password")
