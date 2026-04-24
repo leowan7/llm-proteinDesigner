@@ -1,0 +1,185 @@
+name: Deploy Modal apps
+
+# Live workflow (Stream E, 2026-04-22; enabled Phase 11 D-07, 2026-04-24).
+#
+# On pull_request (paths filtered below):
+#   - Deploys all five Kendrew Modal apps to the `staging` Modal environment.
+#   - Captures FunctionCall / deploy output per app.
+#   - Posts a single PR comment with the deploy summary.
+#
+# On push to main (paths filtered below):
+#   - Deploys all five Kendrew Modal apps to the `main` Modal environment (prod).
+#
+# Prerequisites (operator-owned; see Plan 11-03 Block D):
+#   - Modal `staging` environment exists (`modal environment create staging`).
+#   - Repository secrets MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set.
+#   - The five app paths below exist at HEAD.
+#
+# Matrix strategy: one job per app so a single-app failure does not abort the
+# other four. `fail-fast: false` is required — prod deploys must be attempted
+# independently.
+
+on:
+  pull_request:
+    paths:
+      - 'infrastructure/modal/**'
+      - 'docker/**'
+      - 'backend/pipelines/**'
+      - '.github/workflows/deploy-modal.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infrastructure/modal/**'
+      - 'docker/**'
+      - 'backend/pipelines/**'
+      - '.github/workflows/deploy-modal.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target Modal environment (staging | main). Defaults to staging on PR, main on push to main, and this input otherwise.'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - main
+
+concurrency:
+  group: deploy-modal-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write  # required to post the deploy summary comment
+
+jobs:
+  deploy:
+    # Guard removed 2026-04-24 (Phase 11 D-07). Workflow is now live.
+    name: Deploy ${{ matrix.app }} to ${{ github.event_name == 'pull_request' && 'staging' || (github.event_name == 'push' && 'main' || inputs.environment) }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - bindcraft
+          - boltzgen
+          - pxdesign
+          - rfantibody
+          - rfdiffusion
+
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      MODAL_ENVIRONMENT: ${{ github.event_name == 'pull_request' && 'staging' || (github.event_name == 'push' && 'main' || inputs.environment) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Modal client
+        run: |
+          python -m pip install --upgrade pip
+          # Pin to a known-working Modal client version; bump deliberately.
+          pip install 'modal>=1.4,<2'
+
+      - name: Verify Modal auth
+        run: |
+          modal token current
+
+      - name: Deploy ${{ matrix.app }}
+        id: deploy
+        run: |
+          set -euo pipefail
+          app_file="infrastructure/modal/${{ matrix.app }}_app.py"
+          if [ ! -f "$app_file" ]; then
+            echo "::error::$app_file not found"
+            exit 1
+          fi
+          echo "Deploying $app_file to env=$MODAL_ENVIRONMENT"
+          modal deploy --env "$MODAL_ENVIRONMENT" "$app_file" | tee "deploy-${{ matrix.app }}.log"
+
+      - name: Extract deployment summary
+        id: summary
+        if: always()
+        run: |
+          log="deploy-${{ matrix.app }}.log"
+          if [ -f "$log" ]; then
+            # Modal prints the app URL and deployment ID; capture the last 20 lines.
+            {
+              echo "summary<<EOF"
+              tail -n 20 "$log"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "summary=(no deploy log produced)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload deploy log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: modal-deploy-log-${{ matrix.app }}
+          path: deploy-${{ matrix.app }}.log
+          if-no-files-found: warn
+
+  comment-on-pr:
+    name: Post deploy summary to PR
+    needs: deploy
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all deploy logs
+        uses: actions/download-artifact@v4
+        with:
+          path: deploy-logs
+          pattern: modal-deploy-log-*
+          merge-multiple: true
+
+      - name: Build comment body
+        id: body
+        run: |
+          {
+            echo "body<<EOF"
+            echo "### Modal staging deploy — PR #${{ github.event.pull_request.number }}"
+            echo
+            echo "Commit: \`${{ github.event.pull_request.head.sha }}\`"
+            echo "Environment: \`staging\`"
+            echo
+            for app in bindcraft boltzgen pxdesign rfantibody rfdiffusion; do
+              echo "<details><summary><code>kendrew-${app}-prod</code></summary>"
+              echo
+              echo '```'
+              if [ -f "deploy-logs/deploy-${app}.log" ]; then
+                tail -n 20 "deploy-logs/deploy-${app}.log"
+              else
+                echo "(no log produced — job may have failed before deploy)"
+              fi
+              echo '```'
+              echo
+              echo '</details>'
+            done
+            echo
+            echo "FunctionCall IDs appear in the individual log tails above. Smoke-test the staging deploy with:"
+            echo '```'
+            echo 'modal run --env staging infrastructure/modal/<app>_app.py::run_tool --payload ''{"tier":"smoke",...}'''
+            echo '```'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `${{ steps.body.outputs.body }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });

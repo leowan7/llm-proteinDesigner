@@ -81,6 +81,17 @@ jobs:
       - name: Run Vitest
         run: npm run test
 
+      - name: Build frontend bundle (prerequisite for secret-leak grep)
+        run: npm run build
+
+      - name: "Guard: no server secrets in frontend bundle (Phase 11 SC 7 + Pitfall 5)"
+        run: |
+          if grep -rE "SUPABASE_SERVICE_ROLE_KEY|STRIPE_SECRET_KEY|ANTHROPIC_API_KEY|MODAL_TOKEN_SECRET|WEBHOOK_HMAC_SECRET" dist/ ; then
+            echo "::error::Server-side secret leaked into frontend bundle. Fix before merge."
+            exit 1
+          fi
+          echo "PASS: no server secrets found in frontend/dist/"
+
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest

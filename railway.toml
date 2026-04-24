@@ -1,0 +1,16 @@
+# Phase 11 D-06: Railway config-as-code.
+# preDeployCommand runs Supabase SQL migrations before traffic shifts.
+# Dockerfile bundles Supabase CLI (Plan 11-01 Task 1).
+# Failed migration aborts the rollout.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+preDeployCommand = ["supabase", "db", "push", "--db-url", "$DATABASE_URL", "--yes"]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+numReplicas = 2
+restartPolicyType = "ON_FAILURE"
