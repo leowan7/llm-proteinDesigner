@@ -106,6 +106,11 @@ app.include_router(user_router)
 from admin.router import router as admin_router
 app.include_router(admin_router)
 
+# Phase 11 SC 8: synthetic-error endpoint for Sentry verification (dev only).
+if settings.debug or settings.testing:
+    from debug_routes import router as debug_router
+    app.include_router(debug_router)
+
 
 @app.get("/health")
 async def health():
