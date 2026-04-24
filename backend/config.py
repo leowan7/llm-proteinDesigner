@@ -65,8 +65,33 @@ class Settings(BaseSettings):
     stripe_webhook_secret: str = ""
     stripe_meter_event_name: str = "gpu_seconds"
 
-    # RunPod
+    # GPU provider selection. Values:
+    #   "modal" (default) — ModalProvider; the current production path.
+    #   "runpod_emergency" — RunPodProvider; break-glass rollback only.
+    # A bare "runpod" is intentionally rejected by gpu/__init__.py to prevent
+    # accidental RunPod use. See .claude/plans/i-have-been-building-typed-whistle.md.
+    gpu_provider: str = "modal"
+
+    # Modal
+    modal_token_id: str = ""
+    modal_token_secret: str = ""
+    modal_workspace: str = ""        # e.g. "leowan7" (Modal workspace slug)
+    modal_environment: str = "main"  # Modal environment within the workspace
+
+    # RunPod (quarantined — retained for emergency rollback only)
     runpod_api_key: str = ""
+
+    # Dual-secret webhook rotation (Phase 11 D-10, amended 2026-04-24).
+    # Single shared secret covers both Modal and RunPod webhook HMAC — see
+    # .planning/phases/11-deployment/11-CONTEXT.md §D-10.
+    # Backend tries webhook_hmac_secret first, falls back to webhook_hmac_secret_prev
+    # during rotation grace windows. Rotation runbook in docs/deploy.md (Plan 11-05).
+    webhook_hmac_secret: str = ""
+    webhook_hmac_secret_prev: str = ""
+
+    # DEPRECATED — retained for one release cycle as a backwards-compat alias.
+    # Reads are resolved to webhook_hmac_secret below via model_post_init.
+    # Remove after next phase once Railway Variables are fully migrated to WEBHOOK_HMAC_SECRET.
     runpod_webhook_secret: str = ""
 
     # RunPod Pod configuration (replaces per-tool serverless endpoint IDs)
@@ -105,9 +130,21 @@ class Settings(BaseSettings):
     gpu_price_per_second: float = 0.0000917
     gpu_markup_percent: float = 30.0
 
+    def model_post_init(self, __context) -> None:
+        """Resolve deprecated runpod_webhook_secret to webhook_hmac_secret if the new one is empty.
+
+        Phase 11 D-10 rename: Railway Variables may still be set as
+        RUNPOD_WEBHOOK_SECRET during the rotation grace window. If the operator
+        set only the old env var, fall back to it so webhook validation keeps
+        working. Remove this hook after next phase.
+        """
+        if not self.webhook_hmac_secret and self.runpod_webhook_secret:
+            self.webhook_hmac_secret = self.runpod_webhook_secret
+
     class Config:
-        env_file = ".env.local"
+        env_file = ("../.env.local", ".env.local")
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()

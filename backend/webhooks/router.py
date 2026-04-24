@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException, Request
 from billing.stripe_client import record_gpu_usage
 from config import settings
 from db.connection import get_db_pool
-from gpu.runpod import RunPodProvider
+from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
 from worker.tasks import publish_status, update_job_status
 
@@ -47,32 +47,62 @@ _RUNPOD_STATUS_MAP: dict[str, str] = {
 }
 
 
-def validate_runpod_signature(body: bytes, signature: str | None) -> None:
-    """Validate the HMAC-SHA256 signature sent in the request header.
+def validate_webhook_signature(
+    body: bytes,
+    signature: str | None,
+    current_secret: str,
+    prev_secret: str | None = None,
+) -> str:
+    """Validate HMAC-SHA256 signature against the current secret, then _PREV.
 
-    Skipped when runpod_webhook_secret is not configured (local dev).
+    Dual-secret rotation per Phase 11 D-10: during a rotation grace window,
+    the backend accepts signatures made with either the current or previous
+    secret. When the _PREV secret matches, a WARNING is logged so the rotation
+    runbook operator knows traffic is still flowing against the old secret.
 
     Args:
         body: Raw request body bytes.
-        signature: Value of the X-RunPod-Signature header (may be None).
+        signature: Value of the signature header (X-RunPod-Signature or X-Modal-Signature).
+        current_secret: settings.webhook_hmac_secret.
+        prev_secret: settings.webhook_hmac_secret_prev (may be None/empty).
+
+    Returns:
+        "current" if the current secret matched, "prev" if the previous matched,
+        "dev-skip" if both secrets are empty (local dev — validation skipped).
 
     Raises:
-        HTTPException 401: When signature is missing or does not match.
+        HTTPException(401): Missing or invalid signature.
     """
-    if not settings.runpod_webhook_secret:
-        return  # Skip validation in local dev
+    if not current_secret and not prev_secret:
+        return "dev-skip"
 
     if not signature:
         raise HTTPException(status_code=401, detail="Missing signature")
 
-    expected = hmac.new(
-        settings.runpod_webhook_secret.encode(),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    for label, secret in (("current", current_secret), ("prev", prev_secret)):
+        if not secret:
+            continue
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        if hmac.compare_digest(expected, signature):
+            if label == "prev":
+                logger.warning(
+                    "Webhook signed with PREV secret — rotation window active"
+                )
+            return label
 
-    if not hmac.compare_digest(expected, signature):
-        raise HTTPException(status_code=401, detail="Invalid signature")
+    raise HTTPException(status_code=401, detail="Invalid signature")
+
+
+# Backwards-compat shim: old callers still invoke validate_runpod_signature.
+# Remove after grep confirms no usages remain.
+def validate_runpod_signature(body: bytes, signature: str | None) -> None:
+    """Deprecated — use validate_webhook_signature directly."""
+    validate_webhook_signature(
+        body,
+        signature,
+        settings.webhook_hmac_secret,
+        settings.webhook_hmac_secret_prev,
+    )
 
 
 @router.post("/runpod")
@@ -86,12 +116,40 @@ async def runpod_webhook(request: Request):
         {"received": True} on all valid requests.
     """
     body = await request.body()
-    validate_runpod_signature(body, request.headers.get("X-RunPod-Signature"))
+    signature = request.headers.get("X-RunPod-Signature") or request.headers.get("X-Modal-Signature")
+    validate_webhook_signature(
+        body,
+        signature,
+        settings.webhook_hmac_secret,
+        settings.webhook_hmac_secret_prev,
+    )
 
     payload = json.loads(body)
     job_id: str = payload.get("id", "")
     pod_id: str = payload.get("pod_id", "")
     runpod_status: str = payload.get("status", "")
+
+    # Phase 6 addition: ``chunk_status`` signals how a session ended.
+    # 'paused_for_resume' = container checkpointed before Modal's 23hr timeout
+    #                        and exited 0; orchestrator must spawn the next session.
+    # 'complete' / 'failed' = terminal — proceed with the existing completion path.
+    # Absent = legacy webhook (one-shot job); treated as terminal.
+    chunk_status: str | None = payload.get("chunk_status")
+
+    # Early dispatch: if the container reports paused_for_resume, enqueue the
+    # next session and return WITHOUT running the terminate/billing/email path.
+    if chunk_status == "paused_for_resume" and job_id:
+        from worker.session_orchestrator import handle_chunk_status
+
+        designs_so_far = int(payload.get("output", {}).get("designs_completed_so_far", 0))
+        await handle_chunk_status(
+            job_id=job_id,
+            chunk_status="paused_for_resume",
+            designs_completed=designs_so_far,
+        )
+        # SSE event so the progress page shows session-boundary state.
+        await publish_status(job_id, "running", "Session paused — spawning next session")
+        return {"received": True, "action": "resume_enqueued"}
 
     internal_status = _RUNPOD_STATUS_MAP.get(runpod_status)
     if not internal_status:
@@ -216,15 +274,17 @@ async def runpod_webhook(request: Request):
     # Publish SSE status update.
     await publish_status(job_id, internal_status, internal_status.capitalize())
 
-    # ---------- Terminate the RunPod pod to stop billing ----------
+    # ---------- Terminate the GPU job to stop billing ----------
+    # On RunPod this terminates the pod. On Modal the function has already
+    # self-terminated before this webhook fires, so terminate_pod is a no-op.
     if stored_pod_id:
         try:
-            provider = RunPodProvider(api_key=settings.runpod_api_key)
+            provider = get_provider()
             await provider.terminate_pod(stored_pod_id)
-            logger.info("Terminated pod %s for job %s", stored_pod_id, job_id)
+            logger.info("Terminated GPU job %s for job %s", stored_pod_id, job_id)
         except Exception as exc:
             # Log but don't fail the webhook — orphan cleanup will catch it.
-            logger.error("Failed to terminate pod %s: %s", stored_pod_id, exc)
+            logger.error("Failed to terminate GPU job %s: %s", stored_pod_id, exc)
 
     # Record billing for completed or cancelled jobs (user pays for consumed GPU time).
     if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
@@ -275,7 +335,13 @@ async def heartbeat_webhook(request: Request):
         designs_total: int      Total designs requested
     """
     body = await request.body()
-    validate_runpod_signature(body, request.headers.get("X-RunPod-Signature"))
+    signature = request.headers.get("X-RunPod-Signature") or request.headers.get("X-Modal-Signature")
+    validate_webhook_signature(
+        body,
+        signature,
+        settings.webhook_hmac_secret,
+        settings.webhook_hmac_secret_prev,
+    )
 
     payload = json.loads(body)
     job_id = payload.get("job_id", "")

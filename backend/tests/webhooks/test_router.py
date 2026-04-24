@@ -163,7 +163,7 @@ async def test_webhook_completed_job():
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
         patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
-        patch("webhooks.router.RunPodProvider", return_value=mock_provider),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock),
@@ -239,7 +239,7 @@ async def test_webhook_failed_job():
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
         patch("webhooks.router.publish_status", new_callable=AsyncMock),
-        patch("webhooks.router.RunPodProvider", return_value=mock_provider),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
@@ -344,6 +344,11 @@ async def test_webhook_signature_validation():
     wrong_sig = "deadbeef" * 8
 
     with patch("webhooks.router.settings") as mock_settings:
+        # Phase 11 D-10 rename: set both the new canonical field and the deprecated
+        # alias so validate_webhook_signature reads the real secret (MagicMock
+        # auto-attrs would otherwise be a truthy non-string).
+        mock_settings.webhook_hmac_secret = secret
+        mock_settings.webhook_hmac_secret_prev = ""
         mock_settings.runpod_webhook_secret = secret
         mock_settings.gpu_price_per_second = 0.0001
         mock_settings.gpu_markup_percent = 30.0
@@ -397,11 +402,14 @@ async def test_webhook_valid_signature():
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock),
         patch("webhooks.router.publish_status", new_callable=AsyncMock),
-        patch("webhooks.router.RunPodProvider") as MockProvider,
+        patch("webhooks.router.get_provider") as MockProvider,
         patch("webhooks.router.record_gpu_usage"),
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock),
     ):
+        # Phase 11 D-10 rename: set new canonical field + deprecated alias.
+        mock_settings.webhook_hmac_secret = secret
+        mock_settings.webhook_hmac_secret_prev = ""
         mock_settings.runpod_webhook_secret = secret
         mock_settings.gpu_price_per_second = 0.0001
         mock_settings.gpu_markup_percent = 30.0
