@@ -223,9 +223,9 @@ Plans:
   3. Database on Supabase Cloud (Pro plan) with connection pooling and backups
   4. Redis on Upstash with TLS
   5. Object storage on Cloudflare R2 with presigned URL access
-  6. GPU jobs dispatch to RunPod from production backend
+  6. GPU jobs dispatch to Modal (primary GPU provider per Phase 10) from production backend; RunPod remains quarantined as an emergency fallback only
   7. Environment variables and secrets managed via platform-native secret stores (not .env files)
-  8. Monitoring: Sentry for errors, uptime monitoring with PagerDuty/Opsgenie alerting
+  8. Monitoring: Sentry for errors + UptimeRobot for uptime, both routing to #kendrew-alerts Slack (PagerDuty/Opsgenie deferred until a paying customer with an uptime SLO)
   9. Rollback possible within 5 minutes via Railway/Vercel deploy history
 **Plans**: 5 plans
 Plans:
