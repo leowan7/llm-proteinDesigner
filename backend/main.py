@@ -16,16 +16,39 @@ from db.connection import close_db_pool, get_db_pool
 from middleware.logging import StructuredLoggingMiddleware, setup_logging
 
 # Initialize Sentry error tracking (disabled when sentry_dsn is empty).
+# Hot-path Performance sampling per Phase 11 D-14: sample 100% of the 5 routes
+# that actually cost money or user-facing latency; 0% of everything else to
+# stay inside the free-tier quota.
+_HOT_PATHS = {
+    "POST /agent/message",
+    "POST /jobs/launch",
+    "POST /webhooks/runpod",
+    "POST /webhooks/heartbeat",
+    "POST /jobs/{job_id}/upload-urls",
+}
+
+
+def _traces_sampler(sampling_context: dict) -> float:
+    """Sentry traces_sampler per Phase 11 D-14.
+
+    Sample 100% of the 5 hot paths that actually cost money or user-facing
+    latency; 0% of everything else to stay within the free-tier quota.
+    """
+    txn_ctx = sampling_context.get("transaction_context", {}) or {}
+    name = txn_ctx.get("name", "") or ""
+    return 1.0 if name in _HOT_PATHS else 0.0
+
+
 if settings.sentry_dsn:
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
-        traces_sample_rate=0.0,  # No APM for v1
+        traces_sampler=_traces_sampler,
         profiles_sample_rate=0.0,
         integrations=[
             StarletteIntegration(transaction_style="endpoint"),
             FastApiIntegration(transaction_style="endpoint"),
         ],
-        environment="development" if settings.debug else "production",
+        environment=("production" if not settings.debug else "development"),
     )
 
 # Configure structured JSON logging to stdout.
