@@ -29,14 +29,14 @@ Get Kendrew live on `kendrew.ai` and reachable by external users on production i
 ### CI/CD Deploy Flow
 
 - **D-05:** Deploys from `main` are gated by Phase 9's `test.yml` green status. Railway and Vercel auto-deploy on push to main only after the CI gates (backend tests, frontend tests, E2E, lint+typecheck, coverage) pass. Use Railway/Vercel GitHub checks so a red CI blocks the platform deploy.
-- **D-06:** Alembic migrations run automatically as a Railway predeploy command (`alembic upgrade head`) before the new container receives traffic. Failed migration aborts the deploy. Prod and staging backends both run this.
+- **D-06:** Database migrations run automatically via the Supabase CLI as a Railway predeploy command (`supabase db push --db-url $DATABASE_URL --yes`) before the new container receives traffic. Failed migration aborts the deploy. Prod and staging backends both run this against their own Supabase projects. **Note:** repo uses Supabase SQL migrations (16 files in `supabase/migrations/`), not Alembic — the Supabase CLI is added to `backend/Dockerfile` during this phase. Amended 2026-04-24 after research surfaced the Alembic-vs-Supabase contradiction.
 - **D-07:** Flip on the drafted `.github/workflows/deploy-modal.yml` workflow: PRs touching `infrastructure/modal/**`, `docker/**`, or `backend/pipelines/**` deploy to Modal `staging`; push to `main` deploys to Modal prod. Remove the `if: false` guard, set `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` secrets, and confirm the five app paths exist at HEAD.
 - **D-08:** Post-deploy smoke test (Phase 9 D-11 — `.github/workflows/smoke.yml`) is informational. Runs after deploy completes, posts failures to Sentry + `#kendrew-alerts`. Human decides rollback via Railway/Vercel deploy history (Phase 9 D-12). No auto-rollback.
 
 ### Secrets + Env Management
 
 - **D-09:** Prod secrets live in platform-native stores only: Railway Variables (backend + worker), Vercel Env Vars (frontend), Modal Secrets (GPU apps). No Doppler / 1Password sync — too much vendor drift for a solo-engineer launch. Each secret scoped per environment.
-- **D-10:** Webhook secret rotation (deferred from Phase 5): implement dual-secret grace-period support. Backend accepts both `RUNPOD_WEBHOOK_SECRET` / `MODAL_WEBHOOK_SECRET` and a `_PREV` variant during a rotation window so secrets can rotate without downtime. Documented rotation runbook lives in `docs/deploy.md`.
+- **D-10:** Webhook secret rotation (deferred from Phase 5): implement dual-secret grace-period support with a single shared secret pair. Introduce `WEBHOOK_HMAC_SECRET` + `WEBHOOK_HMAC_SECRET_PREV` that covers both RunPod and Modal webhook signatures. Backend tries the current secret first, falls back to `_PREV` during rotation windows. Rename the existing `settings.runpod_webhook_secret` field to `settings.webhook_hmac_secret` during this phase; keep `RUNPOD_WEBHOOK_SECRET` as a deprecated alias in `backend/config.py` for one release cycle. Documented rotation runbook lives in `docs/deploy.md`. Amended 2026-04-24 — single shared secret chosen over split Modal/RunPod secrets (smaller diff to `backend/webhooks/router.py`, half the rotation surface).
 - **D-11:** Full `.env.example` audit. Every prod-relevant key must appear with a placeholder and a comment explaining which runtime needs it: Sentry DSN (backend + frontend), Stripe live keys (backend), Resend API key (backend), Upstash Redis URL (backend + worker), R2 credentials + bucket (backend + worker + modal), UptimeRobot monitor ID (optional), webhook secrets + _PREV variants, Modal tokens (worker + CI), Supabase service role (backend only — never frontend).
 - **D-12:** Env vars scoped explicitly per runtime in `docs/deploy.md`:
   - Backend/worker (Railway): all secret keys (Stripe secret, Anthropic, Supabase service role, Modal tokens, R2 credentials, webhook secrets, Resend).
@@ -64,7 +64,7 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 - Vercel project settings (monorepo root, build command, output dir) — follow existing `frontend/` Vite config.
 - UptimeRobot monitor configuration details (interval, alert contacts).
 - Specific Cloudflare DNS record TTLs.
-- Whether staging uses a subdomain (`staging.kendrew.ai`, `app-staging.kendrew.ai`) or Vercel/Railway default `*.vercel.app` / `*.up.railway.app` URLs — pick the simpler option if DNS is cheap.
+- ~~Staging subdomain naming~~ — **Locked 2026-04-24:** staging uses `staging.kendrew.ai` (frontend) + `app-staging.kendrew.ai` (backend). Mirrors prod DNS layout; unambiguous for CORS and cookie-domain configuration.
 - Structure of `docs/deploy.md` (table, runbook style, or both).
 
 </decisions>
