@@ -21,7 +21,8 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 7: Admin Dashboard** - Admin auth, user management, job monitoring, revenue overview, system health, audit log
 - [ ] **Phase 8: Post-Run Analysis Agent** - Agent-assisted result analysis, candidate ranking, shortlisting, and report generation
 - [ ] **Phase 9: Testing & CI/CD** - Automated test suite (unit, integration, E2E), CI pipeline, pre-deploy gates
-- [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness (completed 2026-04-23)
+- [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness
+ (completed 2026-04-23)
 - [ ] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL
 - [ ] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer)
 - [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
@@ -226,7 +227,13 @@ Plans:
   7. Environment variables and secrets managed via platform-native secret stores (not .env files)
   8. Monitoring: Sentry for errors, uptime monitoring with PagerDuty/Opsgenie alerting
   9. Rollback possible within 5 minutes via Railway/Vercel deploy history
-**Plans**: TBD
+**Plans**: 5 plans
+Plans:
+- [ ] 11-01-PLAN.md — Wave 0 test scaffolds, Supabase CLI in Dockerfile, debug Sentry route, validation scripts
+- [ ] 11-02-PLAN.md — Wave 1 external resource provisioning (Supabase, Upstash, R2, Modal, Cloudflare, Resend)
+- [ ] 11-03-PLAN.md — Wave 2 platform deploys (railway.toml, deploy-modal.yml flip, Cloudflare DNS, Railway services, Vercel project)
+- [ ] 11-04-PLAN.md — Wave 3 code changes (dual-secret webhook, asyncpg Supavisor fix, full .env.example audit)
+- [ ] 11-05-PLAN.md — Wave 4 monitoring (Sentry hot-path Performance, UptimeRobot, docs/deploy.md, ROADMAP SC 6 + SC 8 correction)
 
 ### Phase 12: Teams & Organizations
 **Goal**: Biopharma teams can use the platform under a shared organization with centralized billing and role-based access. This is how you sell to companies, not individuals.

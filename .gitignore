@@ -2,6 +2,10 @@
 .env.local
 .env
 
+# Throwaway spike / experiment outputs
+scratch/**/spike_output/
+scratch/**/*.pdb
+
 # Python
 __pycache__/
 *.pyc
@@ -27,3 +31,6 @@ minio_data/
 # Supabase
 supabase/.temp/
 .gstack/
+
+# Phase 11 deployment — secrets collected locally, never committed
+.planning/phases/11-deployment/11-02-PROVISIONING.md
