@@ -1,15 +1,38 @@
 # RFdiffusion Modal smoke-test blocker report
 
 **Agent:** RFdiffusion (Kendrew Phase 4 smoke-testing)
-**Date:** 2026-04-22 (updated after retry 2 — persistent XLA cache via Modal Volume)
-**Status:** **DEFERRED — post-launch.** Kendrew ships with 4 pipelines (BoltzGen,
-RFantibody, PXDesign, BindCraft — all live-validated end-to-end via Modal
-webhook + MinIO + Supabase). RFdiffusion remains blocked on the colabfold_batch
-JIT-compile hang documented below; fix plan is bake-XLA-cache via
-`@app.build(gpu=...)` or swap AF2 validation to ESMFold. Not a launch blocker.
+**Date:** 2026-04-22 (initial), **2026-04-26 RESOLVED**
+**Status:** ✅ **RESOLVED 2026-04-26.** Mini_pilot completed in 6.3 min on A100-SXM4-80GB
+(376.2 s wallclock, 352 GPU-s, 2/2 candidates produced). Root cause was NOT XLA JIT
+or persistent cache — it was TF/JAX VRAM contention inside `colabfold_batch`. TensorFlow
+(transitive dep for AF2's `tf.data` feature pipeline) preallocated nearly all VRAM at
+import; JAX hung silently during XLA JIT. Fix is the LocalColabFold-prescribed env-var
+set added to `_af2_env_with_jax_cache()` in commit `d83335c` — `TF_FORCE_GPU_ALLOW_GROWTH=true`,
+`XLA_PYTHON_CLIENT_PREALLOCATE=false`, `XLA_PYTHON_CLIENT_ALLOCATOR=platform`,
+`XLA_PYTHON_CLIENT_MEM_FRACTION=4.0`, `TF_FORCE_UNIFIED_MEMORY=1`, `TF_ENABLE_ONEDNN_OPTS=0`.
 
-**Live-test history (prior state, retained for reference):**
+Same fix unblocked tools-hub D2 AF2 + D3 ColabFold the same day (tools-hub commit
+`f5257b8`). All three Bug 8-affected pipelines now ship.
+
+Run record (job `rfdiff-mini-pilot-bug8-1777223957`):
+- 376.2 s wallclock (was 28+ min hang before fix)
+- 352 GPU seconds
+- Status: COMPLETED, exit 0
+- Stages: preflight → RFdiffusion (~3 min) → ProteinMPNN (~30 s) → AF2 validation
+  (~3 min, used to hang here for 18-29 min) → output write
+- 2/2 candidates produced
+
+Persistent XLA cache (`kendrew-rfdiffusion-xla-cache` modal Volume) now actually
+populates on success; subsequent cold pods will skip the JIT entirely and finish
+in ~5 min total.
+
+---
+
+**Original investigation summary (retained for reference, hypotheses now superseded):**
+
 Smoke tier GREEN x2 (both pre-fix and post-fix). Mini_pilot tier STILL BLOCKED after retry 2. JIT compile silence window extended to 28+ min in this retry (vs 20+ min in retry 1) with no AF2 output produced before budget exhaustion. Reproduced again on 2026-04-22 pilot `f2feed5e-a053-452c-9f94-cb05c7022400` (A100-40GB, num_designs=1): Stage 3 AF2 silent for 60+ min, terminated with `Pipeline error`. Same signature.
+
+The "JIT silent compile" framing turned out to be wrong — the silence wasn't a long-running JIT, it was JAX waiting forever for VRAM that TF had preallocated and would never release. Once both frameworks were forced into growth-allocation mode, JAX got memory and finished JIT in seconds, not minutes.
 
 ---
 
