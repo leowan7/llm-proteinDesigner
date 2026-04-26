@@ -71,7 +71,13 @@ RUN pip install --force-reinstall --no-cache-dir \
     "deepspeed>=0.12.0,<0.13.0" && \
     python3 -c "import torch, deepspeed; print('torch', torch.__version__, 'deepspeed', deepspeed.__version__)"
 
-# ---------- Restore cuDNN 9.1 AFTER torch reinstall ----------
+# ============================================================================
+# !!! DO NOT MOVE OR REORDER THIS BLOCK !!!
+# This RUN must come AFTER every torch install above and BEFORE any step that
+# imports JAX. If you reorder it, reinstall torch later, or remove the
+# `--no-deps` flag, PXDesign will silently fall back to cuDNN 8 and hang for
+# ~28 minutes on the first JAX call (Bug-8-shape failure).
+# ============================================================================
 # torch==2.3.1 depends on nvidia-cudnn-cu12==8.9.2.26 and re-installing torch
 # pulls cuDNN 8 back into /usr/local/lib/python3.10/dist-packages/nvidia/cudnn/lib/,
 # overwriting the cuDNN 9.1.1.17 that jax[cuda12]==0.4.29 needs. Force cuDNN
