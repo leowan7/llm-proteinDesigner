@@ -970,13 +970,22 @@ def _extract_target_sequence(pdb_path: str, chain_id: str) -> str | None:
 
 
 def _af2_env_with_jax_cache() -> dict:
-    """Return an env dict with JAX persistent cache enabled for AF2 subprocess.
+    """Return an env dict with JAX persistent cache + LocalColabFold VRAM
+    flags enabled for the AF2 (colabfold_batch) subprocess.
 
     ColabFold drives JAX, and JAX's persistent compilation cache is controlled
     by env vars. The Modal function mounts a named Volume at /root/.cache/jax
     so compiled HLO survives container eviction. First cold run populates the
     cache (~10-15 min XLA compile for AF2 multimer_v3); subsequent runs reuse
     the compiled graph and skip the JIT step.
+
+    The LocalColabFold env-var set is the standard runtime fix for TF/JAX
+    co-tenancy on a single GPU: TF (pulled in for AF2's tf.data feature
+    pipeline) defaults to claiming nearly all VRAM at import time; JAX
+    then can't allocate during XLA JIT and silently hangs. These flags
+    force both frameworks into growth-allocation mode. Same fix that
+    unblocked tools-hub D2/D3 atomic primitives — see commit f5257b8 in
+    tools-hub and reference_localcolabfold_env_vars.md.
 
     See infrastructure/modal/rfdiffusion_app.py::xla_cache_volume.
     """
@@ -986,6 +995,14 @@ def _af2_env_with_jax_cache() -> dict:
     env["JAX_COMPILATION_CACHE_DIR"] = cache_dir
     env["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"] = "0"
     env["JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES"] = "0"
+    # LocalColabFold prescribed VRAM/allocator flags for TF/JAX co-tenancy
+    # (Bug 8 root cause: TF preallocates ~all VRAM at import → JAX hangs).
+    env.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
+    env.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    env.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
+    env.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "4.0")
+    env.setdefault("TF_FORCE_UNIFIED_MEMORY", "1")
+    env.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     return env
 
 
