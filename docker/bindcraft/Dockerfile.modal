@@ -1,0 +1,74 @@
+# Modal variant of docker/bindcraft/Dockerfile.
+# Diff vs production:
+#   1. Miniforge download uses `curl -fsSL --retry` (RunPod's `wget -q` fails on Modal build net)
+#   2. No COPY run_pipeline.py (Modal mounts it via add_local_file / add_local_dir)
+#   3. No CMD (Modal invokes @app.function bodies directly; see infrastructure/modal/bindcraft_app.py)
+# Everything else byte-identical to the production Dockerfile — validated by the spike at
+# scratch/modal_spike/bindcraft_spike.py (ran end-to-end on Modal A100-80GB).
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+SHELL ["/bin/bash", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    PYTHONUNBUFFERED=1 \
+    BINDCRAFT_DIR=/app
+
+# ---------- System deps ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash ca-certificates curl git rsync libgfortran5 wget \
+    build-essential pkg-config procps unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------- OpenCL ----------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ocl-icd-libopencl1 clinfo && \
+    rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /etc/OpenCL/vendors && \
+    echo "libnvidia-opencl.so.1" > /etc/OpenCL/vendors/nvidia.icd
+
+# ---------- Miniforge (conda) — PATCHED: curl with retries instead of wget -q ----------
+ENV CONDA_DIR=/miniforge3
+RUN curl -fsSL --retry 5 --retry-delay 10 \
+        https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh \
+        -o /tmp/miniforge.sh && \
+    bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
+    rm -f /tmp/miniforge.sh
+ENV PATH=${CONDA_DIR}/bin:${PATH}
+RUN conda config --set channel_priority strict && \
+    conda config --set always_yes yes && \
+    conda update -n base -c conda-forge conda && \
+    conda clean -afy
+
+# ---------- Clone FreeBindCraft ----------
+WORKDIR /app
+RUN git clone --depth 1 https://github.com/cytokineking/FreeBindCraft.git /app/src && \
+    shopt -s dotglob && mv /app/src/* /app/ && rm -rf /app/src
+
+RUN chmod +x /app/functions/dssp || true && \
+    chmod +x /app/functions/sc || true
+
+# ---------- FreeBindCraft install (slow: 20-30 min) ----------
+RUN bash -lc 'source ${CONDA_DIR}/etc/profile.d/conda.sh && \
+    bash /app/install_bindcraft.sh --pkg_manager conda --cuda 12.1 --no-pyrosetta'
+
+# ---------- Verify critical deps ----------
+RUN ${CONDA_DIR}/envs/BindCraft/bin/python -c "\
+import jax; print('JAX', jax.__version__); \
+import openmm; print('OpenMM', openmm.__version__); \
+from Bio.PDB import PDBParser; print('Biopython OK')"
+
+# ---------- Activate conda env on PATH ----------
+ENV PATH=${CONDA_DIR}/envs/BindCraft/bin:${CONDA_DIR}/bin:${PATH} \
+    LD_LIBRARY_PATH=${CONDA_DIR}/envs/BindCraft/lib:${LD_LIBRARY_PATH} \
+    CONDA_DEFAULT_ENV="BindCraft" \
+    BINDCRAFT_HOME=/app
+
+ENV OPENMM_PLATFORM_ORDER=CUDA,OpenCL \
+    OPENMM_DEFAULT_PLATFORM=CUDA
+
+# Ensure `requests` is in the BindCraft conda env (used by run_pipeline.py for webhook + uploads)
+RUN ${CONDA_DIR}/envs/BindCraft/bin/pip install --no-cache-dir requests
+
+# NOTE: no COPY or CMD — Modal invokes @app.function bodies directly.

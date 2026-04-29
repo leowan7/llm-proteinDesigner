@@ -1,29 +1,42 @@
-"""RunPod GPU provider implementation using the Pod REST API.
+"""RunPod GPU provider — QUARANTINED as of the Modal migration (Phase 8).
+
+**This module is retained solely as an emergency-rollback path.** The active
+production provider is ``ModalProvider`` (``backend/gpu/modal.py``).
+``backend/gpu/__init__.py:get_provider()`` only instantiates ``RunPodProvider``
+when ``settings.gpu_provider == "runpod_emergency"`` — a bare ``"runpod"`` is
+intentionally rejected.
+
+Do NOT add new features here. Do NOT route new code through this module.
+If Modal is unavailable and you need RunPod temporarily, flip the env var
+``GPU_PROVIDER=runpod_emergency`` and restart the backend; see
+``infrastructure/modal/README.md`` for the break-glass runbook.
 
 Implements the GPUProvider ABC using RunPod's Pod API via httpx.AsyncClient.
-This replaces the previous serverless endpoint approach.
 
 RunPod Pod API reference: https://docs.runpod.io/api-reference/pods
 - Create:    POST /v1/pods
 - Get:       GET  /v1/pods/{id}
 - Stop:      POST /v1/pods/{id}/stop
 - Terminate: DELETE /v1/pods/{id}
-
-Key differences from serverless:
-- No handler requirement — runs any Docker image
-- No UID mapping issues — root access by default
-- No image size limits — configurable container disk
-- Must explicitly terminate pods to stop billing
 """
 
 import json
 import logging
+import warnings
 
 import httpx
 
 from gpu.provider import GPUJobStatus, GPUJobSubmission, GPUProvider
 
 logger = logging.getLogger(__name__)
+
+warnings.warn(
+    "backend.gpu.runpod is quarantined. Use backend.gpu.get_provider() — which "
+    "returns ModalProvider by default and only hits RunPod if "
+    "GPU_PROVIDER=runpod_emergency. See infrastructure/modal/README.md.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 RUNPOD_API_BASE = "https://rest.runpod.io/v1"
 
