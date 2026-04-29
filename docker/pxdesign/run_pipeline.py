@@ -418,17 +418,29 @@ def run_command(
         returncode = proc.wait(timeout=max(1, int(deadline - time.time())))
     except subprocess.TimeoutExpired:
         elapsed = time.time() - start
-        output_tail = "".join(tail)[-4000:]
+        # Keep both head and tail so the actual traceback survives even when
+        # the trailing buffer is filled with chatty progress-bar updates.
+        # The 2026-04-28 mini_pilot FAIL surfaced 50+ identical "78.5%" lines
+        # in detail[-2000:], which pushed the real exception line off the end.
+        full = "".join(tail)
+        head_tail = (
+            full[:1500] + "\n... [truncated] ...\n" + full[-1500:]
+            if len(full) > 3000 else full
+        )
         logger.error(
-            "Command TIMED OUT after %.1fs. Output tail:\n%s",
-            elapsed, output_tail,
+            "Command TIMED OUT after %.1fs. Output head+tail:\n%s",
+            elapsed, head_tail,
         )
         raise RuntimeError(
-            f"Command timed out after {timeout}s: {output_tail[-2000:]}"
+            f"Command timed out after {timeout}s: {head_tail[-2000:]}"
         )
 
     elapsed = time.time() - start
-    output_tail = "".join(tail)[-4000:]
+    full = "".join(tail)
+    head_tail = (
+        full[:1500] + "\n... [truncated] ...\n" + full[-1500:]
+        if len(full) > 3000 else full
+    )
     logger.info(
         "Command finished in %.1fs (exit code %d).",
         elapsed, returncode,
@@ -436,9 +448,9 @@ def run_command(
 
     if returncode != 0:
         raise RuntimeError(
-            f"Command failed (exit {returncode}): {output_tail[-2000:]}"
+            f"Command failed (exit {returncode}): {head_tail[-2000:]}"
         )
-    return output_tail
+    return head_tail
 
 
 def post_webhook(
@@ -852,6 +864,7 @@ def run_pxdesign(
     num_designs: int,
     preset: str = "preview",
     timeout: int = 5400,
+    tier: str = "",
 ) -> None:
     """Run the PXDesign pipeline.
 
@@ -865,6 +878,12 @@ def run_pxdesign(
         "--N_sample", str(num_designs),
         "--dtype", "bf16",
     ]
+    # Deterministic seed for smoke + mini_pilot so validation runs are
+    # reproducible. Pilot tier draws a fresh seed every run for diversity
+    # across caller submissions. If upstream PXDesign rejects --seed,
+    # remove this branch — the pipeline ran for months without it.
+    if tier in ("smoke", "mini_pilot"):
+        cmd.extend(["--seed", "42"])
     try:
         run_command(cmd, timeout=timeout, cwd=PXDESIGN_DIR)
     except FileNotFoundError:
@@ -994,15 +1013,21 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
         # ----- Run PXDesign -----
         # First-run JAX JIT + AF2 compile alone takes 10-15 min on A100-80.
         # Smoke (N=1) completes in ~17 min wall / ~1000 gpu_seconds on a cold
-        # container, so 1700s leaves ~12 min of headroom. Mini-pilot (N=2 +
-        # post_filter) roughly doubles the diffusion + AF2-IG cost; bump the
-        # internal timeout to 4500s so the full pipeline has room to finish
-        # without tripping our own guard well before Modal's function timeout.
-        timeout_s = 1700 if tier == "smoke" else 4500
+        # container, so 1700s leaves ~12 min of headroom. Mini_pilot (N=1) and
+        # pilot (caller target) can take longer when the Protenix DDIM sampler
+        # hits an unfortunate seed (see VALIDATION-LOG.md 2026-04-28 mini_pilot
+        # FAIL — hung at step 157/200 of AF2-IG diffusion at 75 min wallclock).
+        # Bumped 4500 -> 5200 (2026-04-29) to leave 200s headroom under the
+        # tools-hub Modal-level 5400s wait cap; matches the agent investigation
+        # recommendation. When upstream PXDesign / ColabDesign are pinned to
+        # the 2026-04-22 known-good SHAs (Dockerfile.modal lines 30, 35), the
+        # 4500s envelope was sufficient — the bump compensates for upstream
+        # drift until the pin is restored.
+        timeout_s = 1700 if tier == "smoke" else 5200
         try:
             run_pxdesign(
                 spec_path, output_dir, num_designs,
-                preset=preset, timeout=timeout_s,
+                preset=preset, timeout=timeout_s, tier=tier,
             )
         except Exception as exc:
             # Log output tree to aid triage

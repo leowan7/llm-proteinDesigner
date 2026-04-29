@@ -26,13 +26,23 @@ RUN python3 -m pip install --no-cache-dir \
 RUN git clone --depth 1 --branch v3.5.1 \
     https://github.com/NVIDIA/cutlass.git $CUTLASS_PATH
 
-# ---------- Clone PXDesign ----------
-RUN git clone --depth 1 https://github.com/bytedance/PXDesign.git $PXDESIGN_DIR
+# ---------- Clone PXDesign (PINNED 2026-04-29) ----------
+# Pinned to upstream HEAD as of 2026-04-29 to stop further drift after the
+# 2026-04-28 mini_pilot regression (see VALIDATION-LOG.md). If mini_pilot
+# performance does not recover with the run_pipeline.py timeout bump alone,
+# replace this SHA with the upstream commit that was current on 2026-04-22
+# when the 918s mini_pilot baseline was established.
+ARG PXDESIGN_SHA=f788441313c84c3074fe9596ac2433f96b15c763
+RUN git clone https://github.com/bytedance/PXDesign.git $PXDESIGN_DIR && \
+    cd $PXDESIGN_DIR && git checkout $PXDESIGN_SHA && \
+    echo "PXDesign pinned to $(git rev-parse HEAD)"
 
 # ---------- Install PXDesign deps ----------
 RUN pip --no-cache-dir install git+https://github.com/bytedance/Protenix.git@v0.5.0+pxd
 
-RUN pip install --no-cache-dir git+https://github.com/sokrypton/ColabDesign.git --no-deps && \
+# ColabDesign (PINNED 2026-04-29) — same drift-stop rationale.
+ARG COLABDESIGN_SHA=e31a56fe1d9b4de25c8697f3a28b75892941cc72
+RUN pip install --no-cache-dir "git+https://github.com/sokrypton/ColabDesign.git@${COLABDESIGN_SHA}" --no-deps && \
     pip install --no-cache-dir \
     posix_ipc einops transformers==4.51.3 optax==0.2.5 dm-haiku==0.0.13
 
