@@ -1,18 +1,13 @@
 ---
 phase: 02-agent-and-structure-input
 verified: 2026-03-19T14:30:00Z
-status: gaps_found
-score: 9/10 must-haves verified
+reverified: 2026-04-23T12:30:00Z
+status: verified
+score: 10/10 must-haves verified
 gaps:
   - truth: "Agent classifies design intent into binder_design, de_novo_backbone, or motif_scaffolding"
-    status: partial
-    reason: "test_classify_intent_returns_valid_type and test_classify_intent_includes_tool_recommendation fail because the tests assert len(enum)==3, but the classify_intent tool schema was expanded in Plan 05 to 6 design_types (minibinder, vhh_nanobody, de_novo_backbone, motif_scaffolding, conformational_ensemble, structure_prediction) and 4 recommended_tools (rfdiffusion, rfantibody, bindcraft, boltzgen). The production schema is correct and more accurate; the tests were not updated."
-    artifacts:
-      - path: "backend/tests/agent/test_tools.py"
-        issue: "TestIntentClassification::test_classify_intent_returns_valid_type asserts 'binder_design' in enum (missing from updated schema) and len==3 (actual: 6). TestIntentClassification::test_classify_intent_includes_tool_recommendation asserts len==3 (actual: 4)."
-    missing:
-      - "Update test_classify_intent_returns_valid_type to assert the 6 current design_type values (minibinder, vhh_nanobody, de_novo_backbone, motif_scaffolding, conformational_ensemble, structure_prediction) and remove the len==3 assertion"
-      - "Update test_classify_intent_includes_tool_recommendation to assert all 4 current tool values (rfdiffusion, rfantibody, bindcraft, boltzgen) and remove the len==3 assertion"
+    status: resolved
+    reason: "Closed 2026-04-23. Tests in backend/tests/agent/test_tools.py updated to match the current production schema (8 design_types: minibinder, vhh_nanobody, full_antibody, cyclic_peptide, small_molecule_binder, de_novo_backbone, motif_scaffolding, symmetric_assembly; 5 recommended_tools: rfdiffusion, rfantibody, bindcraft, boltzgen, pxdesign). The schema grew beyond the original targets because Plan 08's analysis tools and the PXDesign pipeline landed; tests now assert full membership of the live enum rather than a fixed count. All affected tests pass."
 human_verification:
   - test: "Full agent wizard flow end-to-end"
     expected: "User describes protein, agent resolves structure (StructurePreviewCard), classifies intent, recommends tool with action buttons, collects parameters, runs validation (ValidationCard), presents ReviewCard with Launch Job button gated by warning acknowledgment"

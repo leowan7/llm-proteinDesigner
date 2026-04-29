@@ -1,6 +1,7 @@
 ---
 phase: 09-testing-ci-cd
 reviewed: 2026-04-10T00:00:00Z
+reresolved: 2026-04-23T12:15:00Z
 depth: standard
 files_reviewed: 20
 files_reviewed_list:
@@ -29,8 +30,16 @@ findings:
   warning: 4
   info: 3
   total: 8
-status: issues_found
+resolution:
+  critical_resolved: 1
+  warning_resolved: 4
+  info_resolved: 2
+  info_noaction: 1
+  all_addressed: true
+status: resolved
 ---
+
+> **Resolution note (2026-04-23):** All 8 findings have been addressed in current source. See _Resolution Log_ at the bottom of this file for per-finding status and evidence.
 
 # Phase 09: Code Review Report
 
@@ -200,3 +209,20 @@ No immediate action required. When upgrading `pytest-asyncio` beyond 0.24, verif
 _Reviewed: 2026-04-10T00:00:00Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+---
+
+## Resolution Log (2026-04-23)
+
+| ID | Severity | File | Status | Evidence |
+|----|----------|------|--------|----------|
+| CR-01 | Critical | `.github/workflows/smoke.yml:50-51` | RESOLVED | Auth step now reads `SMOKE_TEST_EMAIL` / `SMOKE_TEST_PASSWORD` from `secrets.*` via the step's `env:` block. No plaintext credentials remain in the workflow. |
+| WR-01 | Warning | `backend/tests/middleware/test_rate_limit.py:89-106` | RESOLVED | Docstring rewritten to document the `user:{client_host}` fallback path explicitly (`get_rate_limit_key` uses `f"user:{payload.get('sub', request.client.host)}"`). Assertion `user:172.16.0.1` is coherent with the docstring. |
+| WR-02 | Warning | `.github/workflows/test.yml:128-137` | RESOLVED | `sleep 3` replaced with a 20-iteration `curl -sf .../health` readiness poll. Fails fast if the server never starts; cheap when it starts quickly. |
+| WR-03 | Warning | `.github/workflows/test.yml:44` | RESOLVED | CI pytest invocation now includes `--ignore=tests/integration`, aligning with `.coveragerc` omission and making the integration skip behavior explicit. |
+| WR-04 | Warning | `backend/tests/integration/test_agent_flow.py:111-115`, `backend/tests/integration/test_session_crud.py:111-116` | RESOLVED | Both `_delete_session` helpers now log cleanup failures via `warnings.warn(...)` instead of silently swallowing the exception. Conforms to the "never silently pass exceptions" rule in CLAUDE.md. |
+| IN-01 | Info | `.github/workflows/smoke.yml:53-56` | RESOLVED | Step renamed to `"Setup Node.js for Playwright"` — name now matches the actual action (`actions/setup-node@v4`). |
+| IN-02 | Info | `backend/tests/integration/test_agent_flow.py` | RESOLVED | `text_block.hasattr = lambda ...` dead assignment is not present in the current file. |
+| IN-03 | Info | `backend/requirements.txt:15` | NO ACTION REQUIRED | Informational note only — `pytest-asyncio==0.24.0` pin is intentional and `asyncio_default_fixture_loop_scope = function` suppresses the deprecation warning. Revisit on future upgrade. |
+
+_Re-verified: 2026-04-23T12:15:00Z_
