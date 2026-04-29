@@ -51,11 +51,12 @@ def get_rate_limit_key(request: Request) -> str:
 
 
 # Create the limiter instance with Redis storage and a global fallback limit.
+# Rate limiting is disabled under TESTING=true so unit tests do not depend on Redis.
 limiter = Limiter(
     key_func=get_rate_limit_key,
     default_limits=[settings.rate_limit_default],
     storage_uri=settings.redis_url,
-    enabled=settings.rate_limit_enabled,
+    enabled=settings.rate_limit_enabled and not settings.testing,
 )
 
 

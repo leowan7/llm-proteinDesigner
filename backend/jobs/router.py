@@ -70,10 +70,34 @@ _TOOL_IMAGES = TOOL_IMAGES
 # ---------------------------------------------------------------------------
 
 class LaunchRequest(BaseModel):
-    """Request body for POST /jobs/launch."""
+    """Request body for POST /jobs/launch.
+
+    Phase 2 additions:
+        job_tier: ``"pilot"`` (default) or ``"full_design"``. Pilot runs clamp
+            parameters to a small validation preset; full-design requires that
+            the user has already completed a successful pilot on the same tool.
+        total_budget_hours: GPU hours cap (1-96). Only meaningful for
+            ``full_design``. Ignored for pilot. Defaults to 4 if absent.
+    """
 
     job_id: str
     job_name: str | None = None
+    job_tier: str = "pilot"
+    total_budget_hours: int = 4
+
+
+class EstimateRequest(BaseModel):
+    """Request body for POST /jobs/estimate.
+
+    Returns predicted ``(seconds, dollars)`` for a hypothetical job before
+    the user submits. Used by the frontend submit form to render the
+    pilot-vs-full-design cost comparison.
+    """
+
+    tool: str
+    job_tier: str = "pilot"
+    total_budget_hours: int = 4
+    parameters: dict = {}
 
 
 @router.post("/launch")
@@ -150,12 +174,111 @@ async def launch_job_endpoint(
                 body.job_id,
             )
 
-    # Parse job_spec and dispatch.
-    spec_data = json.loads(row["job_spec"] or "{}")
-    job_spec = JobSpec(**spec_data)
-    await launch_job(job_id=body.job_id, job_spec=job_spec, user_id=user_id, pool=pool)
+    # Validate job_tier + total_budget_hours.
+    if body.job_tier not in ("pilot", "full_design"):
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid job_tier {body.job_tier!r}. Must be 'pilot' or 'full_design'.",
+        )
+    if not (1 <= body.total_budget_hours <= 96):
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="total_budget_hours must be between 1 and 96 (hard cap).",
+        )
 
-    return {"job_id": body.job_id, "status": "queued"}
+    # Parse job_spec to get the tool for tier gating + tier-aware dispatch.
+    spec_data = json.loads(row["job_spec"] or "{}")
+    spec_data["job_tier"] = body.job_tier  # Stamp tier into the spec for pipeline.generate_config.
+    tool = spec_data.get("tool", "")
+
+    # Gate: full_design requires at least one previously-completed pilot on the
+    # same tool for this user. Prevents expensive campaigns on an unvalidated
+    # tool+target combination.
+    if body.job_tier == "full_design":
+        async with pool.acquire() as conn:
+            pilot_row = await conn.fetchrow(
+                """
+                SELECT 1 FROM public.jobs
+                WHERE user_id = $1
+                  AND job_tier = 'pilot'
+                  AND status = 'complete'
+                  AND job_spec::jsonb ->> 'tool' = $2
+                LIMIT 1
+                """,
+                user_id,
+                tool,
+            )
+        if not pilot_row:
+            raise HTTPException(
+                status_code=http_status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Full-design submission for {tool!r} requires a successfully "
+                    "completed pilot on that tool first. Run a pilot, then come back."
+                ),
+            )
+
+    job_spec = JobSpec(**{k: v for k, v in spec_data.items() if k != "job_tier"})
+    await launch_job(
+        job_id=body.job_id,
+        job_spec=job_spec,
+        user_id=user_id,
+        pool=pool,
+        job_tier=body.job_tier,
+        total_budget_hours=body.total_budget_hours,
+    )
+
+    return {
+        "job_id": body.job_id,
+        "status": "queued",
+        "job_tier": body.job_tier,
+        "total_budget_hours": body.total_budget_hours,
+    }
+
+
+@router.post("/estimate")
+@limiter.limit("30/minute")
+async def estimate_job_endpoint(
+    request: Request,
+    body: EstimateRequest,
+    user_id: str = Depends(get_current_user),
+):
+    """Return predicted runtime + cost for a hypothetical job.
+
+    Used by the frontend submit form to show pilot-vs-full cost comparison
+    before the user commits. Does not touch the DB or provider.
+
+    Returns:
+        ``{"seconds": int, "dollars": float, "gpu_sku": str, "pilot_clamped": bool}``.
+    """
+    from pipelines import PIPELINE_MAP
+
+    pipeline = PIPELINE_MAP.get(body.tool)
+    if not pipeline:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown tool {body.tool!r}. Valid tools: {sorted(PIPELINE_MAP.keys())}",
+        )
+    if body.job_tier not in ("pilot", "full_design"):
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid job_tier {body.job_tier!r}.",
+        )
+
+    # Build a minimal job_spec for the estimator.
+    spec = {
+        "tool": body.tool,
+        "job_tier": body.job_tier,
+        "total_budget_hours": body.total_budget_hours,
+        "parameters": body.parameters or {},
+    }
+    seconds, dollars = pipeline.estimate_cost(spec)
+
+    return {
+        "seconds": seconds,
+        "dollars": dollars,
+        "gpu_sku": pipeline.gpu_sku,
+        "pilot_clamped": body.job_tier == "pilot",
+    }
 
 
 # ---------------------------------------------------------------------------

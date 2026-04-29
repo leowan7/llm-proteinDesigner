@@ -58,6 +58,8 @@ def _queued_job_row(with_pod_id: str | None = None) -> dict:
         }),
         "user_id": "test-user-uuid",
         "runpod_job_id": with_pod_id,
+        "job_tier": "pilot",
+        "total_budget_hours": 4,
     }
 
 
@@ -99,12 +101,12 @@ async def test_run_job_creates_pod():
 
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.tasks.RunPodProvider", return_value=mock_provider),
+        patch("worker.tasks.get_provider", return_value=mock_provider),
+        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.generate_presigned_get_url", return_value="https://s3.example.com/target.pdb"),
         patch("worker.tasks.publish_status", new_callable=AsyncMock) as mock_publish,
         patch("worker.tasks.update_job_status", new_callable=AsyncMock) as mock_update,
         patch("worker.tasks.PIPELINE_MAP", {"rfdiffusion": mock_pipeline}),
-        patch("worker.tasks.TOOL_IMAGES", {"rfdiffusion": "ghcr.io/ranomics/rfdiffusion:latest"}),
         patch("worker.tasks.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -146,7 +148,8 @@ async def test_run_job_idempotent_skip():
 
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.tasks.RunPodProvider", return_value=mock_provider),
+        patch("worker.tasks.get_provider", return_value=mock_provider),
+        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -172,7 +175,8 @@ async def test_run_job_missing_job():
 
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.tasks.RunPodProvider", return_value=mock_provider),
+        patch("worker.tasks.get_provider", return_value=mock_provider),
+        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"

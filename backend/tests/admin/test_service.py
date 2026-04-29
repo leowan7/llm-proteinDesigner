@@ -56,9 +56,9 @@ def _make_pool_for_cancel(job_row, cust_row=None):
     job_conn.fetchrow = AsyncMock(return_value=job_row)
     job_conn.execute = AsyncMock()
 
-    # Connection 2: UPDATE gpu_cost_usd
+    # Connection 2: UPDATE gpu_cost_usd — asyncpg returns "UPDATE <n>" string
     update_conn = AsyncMock()
-    update_conn.execute = AsyncMock()
+    update_conn.execute = AsyncMock(return_value="UPDATE 1")
 
     # Connection 3: stripe customer lookup
     cust_conn = AsyncMock()
@@ -90,14 +90,10 @@ async def test_cancel_job_by_id_success():
     mock_provider.cancel_job = AsyncMock()
 
     with (
-        patch("jobs.service.RunPodProvider", return_value=mock_provider),
+        patch("jobs.service.get_provider", return_value=mock_provider),
         patch("jobs.service.record_gpu_usage"),
-        patch("worker.tasks.get_db_pool", return_value=AsyncMock(
-            acquire=MagicMock(return_value=_make_ctx(AsyncMock(execute=AsyncMock())))
-        )),
-        patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
-            publish=AsyncMock(), aclose=AsyncMock()
-        )),
+        patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+        patch("worker.tasks.publish_status", new_callable=AsyncMock),
     ):
         result = await cancel_job_by_id("job-001", mock_pool)
 
@@ -136,14 +132,10 @@ async def test_cancel_records_billing():
     mock_record = MagicMock()
 
     with (
-        patch("jobs.service.RunPodProvider", return_value=mock_provider),
+        patch("jobs.service.get_provider", return_value=mock_provider),
         patch("jobs.service.record_gpu_usage", mock_record),
-        patch("worker.tasks.get_db_pool", return_value=AsyncMock(
-            acquire=MagicMock(return_value=_make_ctx(AsyncMock(execute=AsyncMock())))
-        )),
-        patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
-            publish=AsyncMock(), aclose=AsyncMock()
-        )),
+        patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+        patch("worker.tasks.publish_status", new_callable=AsyncMock),
     ):
         result = await cancel_job_by_id("job-002", mock_pool)
 

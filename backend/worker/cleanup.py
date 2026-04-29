@@ -17,41 +17,86 @@ import logging
 
 from config import settings
 from db.connection import get_db_pool
-from gpu.runpod import RunPodProvider
+from gpu import get_provider
 from jobs.notifications import send_failure_email
 from worker.tasks import publish_status
 
 logger = logging.getLogger(__name__)
 
-# Pods running longer than this (seconds) are considered orphaned.
-# Set to 2 hours — generous buffer above the longest pipeline (BindCraft at 1.5hr).
-MAX_POD_LIFETIME_SECONDS = 7200
+# Per-job maximum lifetime is derived dynamically from ``jobs.total_budget_hours``
+# (Phase 2 column). A job is orphaned if it exceeds ``total_budget_hours + headroom``.
+#
+# BEFORE (RunPod era): a hardcoded 2-hour kill — silently truncated multi-day
+# binder campaigns. Phase 7 fix: compute per-job based on declared budget.
+LIFETIME_HEADROOM_SECONDS = 3600  # 1 hr slack on top of the declared budget
+
+# Legacy constant — retained as the SAFETY FLOOR for jobs missing a
+# total_budget_hours column (older rows before the migration). Any job older
+# than this without a declared budget is still considered orphaned.
+MAX_POD_LIFETIME_SECONDS = 7200  # noqa: F841  -- retained for compat
 
 # Jobs with no heartbeat for this duration (seconds) are considered stale.
-STALE_HEARTBEAT_SECONDS = 600
+#
+# Was 600 (10 min). Bumped to 1800 (30 min) after BindCraft pilots were being
+# killed mid-warmup: BindCraft's first-trajectory JAX compile + AF2 init block
+# Python for 5–10 min with no heartbeat opportunity (tool is alive on GPU but
+# can't emit). 30 min of silence on GPU genuinely indicates a hang.
+#
+# Trade-off: a truly hung job now costs up to 20 extra minutes of GPU time
+# before the safety net fires. Billing cap at STALE_HEARTBEAT_SECONDS means
+# the user isn't charged for those extra minutes (see cleanup.py:220).
+STALE_HEARTBEAT_SECONDS = 1800
 
 
-async def cleanup_orphan_pods() -> int:
-    """Find and terminate RunPod pods that exceed the maximum lifetime.
+def _effective_lifetime_seconds(total_budget_hours: int | None) -> int:
+    """Compute a job's maximum allowed lifetime based on its declared budget.
 
-    Compares active pods against the jobs table. A pod is orphaned if:
+    Args:
+        total_budget_hours: Value from ``jobs.total_budget_hours`` (1-96),
+            or None for legacy rows.
+
+    Returns:
+        Seconds of allowed runtime. Falls back to ``MAX_POD_LIFETIME_SECONDS``
+        (2 hr) for rows without a budget to avoid indefinite runs on unmigrated
+        data.
+    """
+    if not total_budget_hours or total_budget_hours <= 0:
+        return MAX_POD_LIFETIME_SECONDS
+    return int(total_budget_hours) * 3600 + LIFETIME_HEADROOM_SECONDS
+
+
+async def cleanup_orphan_pods(ctx: dict | None = None) -> int:
+    """Find and terminate orphaned GPU jobs that exceed the maximum lifetime.
+
+    Compares active pods/function-calls against the jobs table. A job is orphaned if:
     - It has been running longer than MAX_POD_LIFETIME_SECONDS, OR
     - Its job is already in a terminal state (complete/failed/cancelled)
 
+    NOTE (Phase 7 todo): The orphan-by-list path relies on ``provider.list_pods()``
+    which is RunPod-specific. ``ModalProvider.list_pods()`` currently returns an
+    empty list; for Modal, orphan detection happens primarily via
+    ``detect_stale_jobs`` (DB-driven) instead. Phase 7 adds a proper
+    ``list_active_jobs()`` abstraction.
+
     Returns:
-        Number of pods terminated.
+        Number of orphan jobs terminated.
     """
-    if not settings.runpod_api_key:
-        logger.info("RunPod API key not configured, skipping cleanup")
+    try:
+        provider = get_provider()
+    except Exception as exc:
+        logger.info("No GPU provider configured, skipping orphan cleanup: %s", exc)
         return 0
 
-    provider = RunPodProvider(api_key=settings.runpod_api_key)
     terminated = 0
 
     try:
         pods = await provider.list_pods()
+    except AttributeError:
+        # Provider lacks list_pods (not in the ABC). Fallback: rely on
+        # detect_stale_jobs for orphan detection.
+        pods = []
     except Exception as exc:
-        logger.error("Failed to list RunPod pods: %s", exc)
+        logger.error("Failed to list GPU provider jobs: %s", exc)
         return 0
 
     if not pods:
@@ -68,9 +113,14 @@ async def cleanup_orphan_pods() -> int:
             continue
 
         # Check if the job associated with this pod is already terminal.
+        # Pull total_budget_hours (Phase 2 column) so we respect the declared
+        # per-job budget rather than a hardcoded 2-hour kill.
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, status, started_at FROM public.jobs WHERE runpod_job_id = $1",
+                """SELECT id, status, started_at,
+                          COALESCE(total_budget_hours, 0) AS total_budget_hours
+                   FROM public.jobs
+                   WHERE runpod_job_id = $1""",
                 pod_id,
             )
 
@@ -84,9 +134,14 @@ async def cleanup_orphan_pods() -> int:
         elif row and row["started_at"]:
             import datetime
             elapsed = datetime.datetime.now(datetime.timezone.utc) - row["started_at"]
-            if elapsed.total_seconds() > MAX_POD_LIFETIME_SECONDS:
+            budget_seconds = _effective_lifetime_seconds(row["total_budget_hours"])
+            if elapsed.total_seconds() > budget_seconds:
                 should_terminate = True
-                reason = f"job {row['id']} running for {elapsed.total_seconds():.0f}s (max {MAX_POD_LIFETIME_SECONDS}s)"
+                reason = (
+                    f"job {row['id']} running for {elapsed.total_seconds():.0f}s "
+                    f"(budget {row['total_budget_hours']}hr "
+                    f"+ {LIFETIME_HEADROOM_SECONDS}s headroom = {budget_seconds}s cap)"
+                )
 
         elif not row:
             # Pod exists but no matching job — orphaned.
@@ -105,13 +160,15 @@ async def cleanup_orphan_pods() -> int:
     return terminated
 
 
-async def detect_stale_jobs() -> int:
+async def detect_stale_jobs(ctx: dict | None = None) -> int:
     """Find and fail jobs that have not sent a heartbeat within the threshold.
 
     A job is considered stale if:
-    - It has status 'running' AND last_heartbeat_at is older than 10 minutes, OR
-    - It has status 'running' AND started_at is older than 10 minutes AND
-      last_heartbeat_at is NULL (container never sent a heartbeat).
+    - It has status 'running' AND last_heartbeat_at is older than
+      STALE_HEARTBEAT_SECONDS, OR
+    - It has status 'running' AND started_at is older than
+      STALE_HEARTBEAT_SECONDS AND last_heartbeat_at is NULL (container
+      never sent a heartbeat).
 
     For each stale job the function:
     1. Marks the job as failed with an appropriate error category.
@@ -126,19 +183,25 @@ async def detect_stale_jobs() -> int:
     pool = await get_db_pool()
     killed = 0
 
+    # Build the SQL INTERVAL from STALE_HEARTBEAT_SECONDS so they can never
+    # drift again. Previously this was a hardcoded '10 minutes' that silently
+    # undercut the 30-min Python constant and killed healthy jobs inside long
+    # AF2/colabfold subprocesses.
+    stale_interval_sql = f"INTERVAL '{STALE_HEARTBEAT_SECONDS} seconds'"
+
     # Query for stale running jobs
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, user_id, started_at, last_heartbeat_at, runpod_job_id
+            f"""SELECT id, user_id, started_at, last_heartbeat_at, runpod_job_id
                FROM public.jobs
                WHERE status = 'running'
                  AND (
                      (last_heartbeat_at IS NOT NULL
-                      AND last_heartbeat_at < NOW() - INTERVAL '10 minutes')
+                      AND last_heartbeat_at < NOW() - {stale_interval_sql})
                      OR
                      (last_heartbeat_at IS NULL
                       AND started_at IS NOT NULL
-                      AND started_at < NOW() - INTERVAL '10 minutes')
+                      AND started_at < NOW() - {stale_interval_sql})
                  )"""
         )
 
@@ -147,9 +210,18 @@ async def detect_stale_jobs() -> int:
 
     logger.warning("Found %d stale running job(s)", len(rows))
 
-    provider = None
-    if settings.runpod_api_key:
-        provider = RunPodProvider(api_key=settings.runpod_api_key)
+    # Resolve the active GPU provider (Modal by default, RunPod-emergency fallback).
+    # A config error (e.g. missing Modal tokens) shouldn't stop us from marking
+    # jobs failed in the DB — we just skip the provider-side cancel call.
+    try:
+        provider = get_provider()
+    except Exception as exc:
+        logger.warning(
+            "No GPU provider available for stale-job cleanup; "
+            "marking jobs failed in DB only: %s",
+            exc,
+        )
+        provider = None
 
     for row in rows:
         job_id = str(row["id"])
@@ -188,13 +260,18 @@ async def detect_stale_jobs() -> int:
             job_id, last_hb, gpu_seconds,
         )
 
-        # Terminate the RunPod pod if present
+        # Cancel the provider-side GPU job if present. ``cancel_job`` works
+        # for both RunPod (DELETE pod) and Modal (FunctionCall.cancel).
+        # endpoint_id is not needed by either provider's cancel_job path.
         if pod_id and provider:
             try:
-                await provider.terminate_pod(pod_id)
-                logger.info("Terminated pod %s for stale job %s", pod_id, job_id)
+                await provider.cancel_job("", pod_id)
+                logger.info("Cancelled GPU job %s for stale job %s", pod_id, job_id)
             except Exception as exc:
-                logger.error("Failed to terminate pod %s for stale job %s: %s", pod_id, job_id, exc)
+                logger.error(
+                    "Failed to cancel GPU job %s for stale job %s: %s",
+                    pod_id, job_id, exc,
+                )
 
         # Publish SSE failure event
         await publish_status(job_id, "failed", "Job timed out")
@@ -217,7 +294,7 @@ async def detect_stale_jobs() -> int:
     return killed
 
 
-async def check_daily_gpu_spend() -> None:
+async def check_daily_gpu_spend(ctx: dict | None = None) -> None:
     """Check total GPU spend in the last 24 hours and alert if over threshold.
 
     Queries the jobs table for completed/cancelled/failed jobs in the last 24

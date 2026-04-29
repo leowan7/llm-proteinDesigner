@@ -10,10 +10,18 @@ from tests.conftest import TEST_USER_EMAIL, TEST_USER_PASSWORD
 
 @pytest.mark.anyio
 async def test_health(client):
-    """Health endpoint returns 200."""
+    """Health endpoint returns a structured deep-check payload.
+
+    Returns 200 when all dependencies (api, db, redis) are healthy; returns
+    503 when any dependency is unreachable. The api check is always expected
+    to pass; db and redis may be unavailable in unit-test environments that
+    only bring up Supabase without Redis.
+    """
     response = await client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.status_code in (200, 503)
+    body = response.json()
+    assert body.get("api") == "ok", f"api check must always be ok, got {body}"
+    assert "db" in body and "redis" in body, f"response missing expected keys: {body}"
 
 
 @pytest.mark.anyio

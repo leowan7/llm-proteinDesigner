@@ -19,13 +19,15 @@ class TestGPUUsageMeter:
         """Mock stripe.billing.MeterEvent.create. Verify it is called with:
         - event_name='gpu_seconds'
         - payload={'stripe_customer_id': 'cus_123', 'value': '3600'}
+        - idempotency_key='gpu_usage_<job_id>'
         Note: 'value' must be a string ('3600'), not an integer (3600).
         """
         with patch("billing.stripe_client.stripe.billing.MeterEvent.create") as mock_create:
-            record_gpu_usage("cus_123", 3600)
+            record_gpu_usage("cus_123", "job-abc", 3600)
             mock_create.assert_called_once_with(
                 event_name="gpu_seconds",
                 payload={"stripe_customer_id": "cus_123", "value": "3600"},
+                idempotency_key="gpu_usage_job-abc",
             )
 
     def test_record_gpu_usage_value_is_string(self):
@@ -34,7 +36,7 @@ class TestGPUUsageMeter:
         this distinction is easy to get wrong.
         """
         with patch("billing.stripe_client.stripe.billing.MeterEvent.create") as mock_create:
-            record_gpu_usage("cus_456", 1200)
+            record_gpu_usage("cus_456", "job-xyz", 1200)
             call_payload = mock_create.call_args[1]["payload"]
             assert isinstance(call_payload["value"], str), (
                 f"Payload 'value' must be str, got {type(call_payload['value'])}"

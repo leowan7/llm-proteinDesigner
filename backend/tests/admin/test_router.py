@@ -241,6 +241,9 @@ async def test_cancel_job(admin_client):
 
     mock_write_audit = AsyncMock()
 
+    # admin cancel validates job_id is a valid UUID (400 otherwise) — use a real UUID.
+    job_uuid = "11111111-1111-1111-1111-111111111111"
+
     with (
         patch("admin.router.get_db_pool", return_value=mock_pool),
         patch("admin.router.cancel_job_by_id", new_callable=AsyncMock, return_value=mock_cancel_result),
@@ -248,7 +251,7 @@ async def test_cancel_job(admin_client):
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            response = await client.post("/admin/jobs/job-123/cancel")
+            response = await client.post(f"/admin/jobs/{job_uuid}/cancel")
 
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"

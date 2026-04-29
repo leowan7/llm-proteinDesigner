@@ -78,6 +78,7 @@ async def test_cleanup_orphan_pods_terminates():
         "id": "job-orphan-uuid",
         "status": "running",
         "started_at": ORPHAN_STARTED_AT,
+        "total_budget_hours": 0,
     }
 
     conn = AsyncMock()
@@ -92,7 +93,7 @@ async def test_cleanup_orphan_pods_terminates():
 
     with (
         patch("worker.cleanup.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.cleanup.RunPodProvider", return_value=mock_provider),
+        patch("worker.cleanup.get_provider", return_value=mock_provider),
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -114,6 +115,7 @@ async def test_cleanup_orphan_pods_no_orphans():
         "id": "job-fresh-uuid",
         "status": "running",
         "started_at": RECENT_STARTED_AT,
+        "total_budget_hours": 0,
     }
 
     conn = AsyncMock()
@@ -128,7 +130,7 @@ async def test_cleanup_orphan_pods_no_orphans():
 
     with (
         patch("worker.cleanup.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.cleanup.RunPodProvider", return_value=mock_provider),
+        patch("worker.cleanup.get_provider", return_value=mock_provider),
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -138,19 +140,21 @@ async def test_cleanup_orphan_pods_no_orphans():
     mock_provider.terminate_pod.assert_not_called()
 
 
-async def test_cleanup_orphan_pods_no_api_key():
-    """cleanup_orphan_pods exits early when RunPod API key is not configured."""
-    mock_provider = AsyncMock()
+async def test_cleanup_orphan_pods_no_provider():
+    """cleanup_orphan_pods exits early when the GPU provider cannot be built.
 
-    with (
-        patch("worker.cleanup.RunPodProvider", return_value=mock_provider),
-        patch("worker.cleanup.settings") as mock_settings,
+    The modern flow routes through ``get_provider()`` which raises if no
+    provider is configured (Modal/RunPod credentials both missing). The
+    function swallows the error, logs it, and returns 0 without touching
+    the provider.
+    """
+    with patch(
+        "worker.cleanup.get_provider",
+        side_effect=RuntimeError("No GPU provider configured"),
     ):
-        mock_settings.runpod_api_key = None
         count = await cleanup_orphan_pods()
 
     assert count == 0
-    mock_provider.list_pods.assert_not_called()
 
 
 async def test_cleanup_orphan_pods_non_kendrew_pods_skipped():
@@ -174,7 +178,7 @@ async def test_cleanup_orphan_pods_non_kendrew_pods_skipped():
 
     with (
         patch("worker.cleanup.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.cleanup.RunPodProvider", return_value=mock_provider),
+        patch("worker.cleanup.get_provider", return_value=mock_provider),
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -232,7 +236,7 @@ async def test_cleanup_stale_jobs():
 
     with (
         patch("worker.cleanup.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("worker.cleanup.RunPodProvider", return_value=mock_provider),
+        patch("worker.cleanup.get_provider", return_value=mock_provider),
         patch("worker.cleanup.publish_status", new_callable=AsyncMock) as mock_publish,
         patch("worker.cleanup.send_failure_email", new_callable=AsyncMock) as mock_email,
         patch("worker.cleanup.settings") as mock_settings,

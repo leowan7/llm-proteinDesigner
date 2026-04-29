@@ -21,10 +21,19 @@ class TestJobNotifications:
         - to: user email address
         - subject: contains tool name and design count
         - html: contains job URL with correct job_id
+
+        The notifications module skips sending when RESEND_API_KEY is unset,
+        so we patch settings to supply a dummy key for this test.
         """
         mock_send = MagicMock()
 
-        with patch("resend.Emails.send", mock_send):
+        with (
+            patch("resend.Emails.send", mock_send),
+            patch("jobs.notifications.settings") as mock_settings,
+        ):
+            mock_settings.resend_api_key = "re_test"
+            mock_settings.resend_from_email = "Kendrew <jobs@kendrew.ai>"
+            mock_settings.app_base_url = "http://localhost:8000"
             from jobs.notifications import send_completion_email
             await send_completion_email(
                 to_email="scientist@example.com",
@@ -51,7 +60,13 @@ class TestJobNotifications:
         """
         mock_send = MagicMock()
 
-        with patch("resend.Emails.send", mock_send):
+        with (
+            patch("resend.Emails.send", mock_send),
+            patch("jobs.notifications.settings") as mock_settings,
+        ):
+            mock_settings.resend_api_key = "re_test"
+            mock_settings.resend_from_email = "Kendrew <jobs@kendrew.ai>"
+            mock_settings.app_base_url = "http://localhost:8000"
             from jobs.notifications import send_failure_email
             await send_failure_email(
                 to_email="scientist@example.com",

@@ -9,22 +9,34 @@ BindCraft may return zero passing candidates — this is expected behavior, not 
 """
 
 from jobs.models import CandidateResult
-from pipelines.base import ToolPipeline
+from pipelines.base import ToolPipeline, merge_pilot_params
 
 
 class BindCraftPipeline(ToolPipeline):
     """Pipeline for BindCraft binder optimization jobs."""
 
+    @property
+    def gpu_sku(self) -> str:
+        """BindCraft needs 80GB VRAM (AF2 multimer + ColabDesign footprint)."""
+        return "A100-80GB"
+
+    def pilot_preset(self) -> dict:
+        """Pilot: 2 final designs — completes in ~20 min, proves the tool works."""
+        return {"num_designs": 2}
+
     def generate_config(self, job_spec: dict, target_local_path: str) -> dict:
         """Build JSON settings dict for BindCraft.
 
+        Pilot runs clamp ``num_designs`` to 2 via ``merge_pilot_params``.
+
         Args:
-            job_spec: Deserialized JobSpec dict.
+            job_spec: Deserialized JobSpec dict. May carry ``job_tier``.
             target_local_path: Path to target PDB inside the container.
 
         Returns:
             Dict with keys: settings_json (dict), protocol (str), filter_set (str).
         """
+        job_spec = merge_pilot_params(job_spec, self.pilot_preset())
         params = job_spec.get("parameters", {})
         chain = job_spec.get("target_chain", "A")
         hotspots = job_spec.get("hotspot_residues", [])

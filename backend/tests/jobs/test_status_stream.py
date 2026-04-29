@@ -85,6 +85,11 @@ class TestStatusPublish:
         mock_redis = AsyncMock()
         mock_redis.pubsub = MagicMock(return_value=mock_pubsub)
         mock_redis.aclose = AsyncMock()
+        # _check_sse_limit does: count = await r.incr(key); await r.expire(key, 300)
+        # r.incr must return an int (1) so the comparison against MAX_SSE_PER_USER works.
+        mock_redis.incr = AsyncMock(return_value=1)
+        mock_redis.expire = AsyncMock()
+        mock_redis.decr = AsyncMock()
 
         app.dependency_overrides[get_current_user] = _override_user("user-123")
         try:

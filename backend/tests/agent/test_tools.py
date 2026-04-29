@@ -21,23 +21,23 @@ class TestIntentClassification:
         """classify_intent tool schema includes all design_type enum values."""
         tool = _get_tool("classify_intent")
         design_type_enum = tool["input_schema"]["properties"]["design_type"]["enum"]
-        assert "minibinder" in design_type_enum
-        assert "vhh_nanobody" in design_type_enum
-        assert "de_novo_backbone" in design_type_enum
-        assert "motif_scaffolding" in design_type_enum
-        assert "conformational_ensemble" in design_type_enum
-        assert "structure_prediction" in design_type_enum
-        assert len(design_type_enum) == 6
+        expected = {
+            "minibinder",
+            "vhh_nanobody",
+            "full_antibody",
+            "cyclic_peptide",
+            "small_molecule_binder",
+            "de_novo_backbone",
+            "motif_scaffolding",
+            "symmetric_assembly",
+        }
+        assert set(design_type_enum) == expected
 
     def test_classify_intent_includes_tool_recommendation(self):
-        """classify_intent tool schema includes all 4 recommended_tool enum values."""
+        """classify_intent tool schema includes all 5 recommended_tool enum values."""
         tool = _get_tool("classify_intent")
         tool_enum = tool["input_schema"]["properties"]["recommended_tool"]["enum"]
-        assert "rfdiffusion" in tool_enum
-        assert "rfantibody" in tool_enum
-        assert "bindcraft" in tool_enum
-        assert "boltzgen" in tool_enum
-        assert len(tool_enum) == 4
+        assert set(tool_enum) == {"rfdiffusion", "rfantibody", "bindcraft", "boltzgen", "pxdesign"}
 
 
 class TestToolRecommendation:
@@ -52,16 +52,27 @@ class TestToolRecommendation:
 
     def test_tool_definitions_have_required_fields(self):
         """All TOOL_DEFINITIONS entries have name, description, and input_schema."""
-        assert len(TOOL_DEFINITIONS) == 4
+        assert len(TOOL_DEFINITIONS) == 10
         for tool in TOOL_DEFINITIONS:
             assert "name" in tool, f"Tool missing 'name': {tool}"
             assert "description" in tool, f"Tool '{tool['name']}' missing 'description'"
             assert "input_schema" in tool, f"Tool '{tool['name']}' missing 'input_schema'"
 
     def test_all_expected_tools_present(self):
-        """TOOL_DEFINITIONS contains all 4 expected tool names."""
+        """TOOL_DEFINITIONS contains the expected setup + analysis tool names."""
         names = {t["name"] for t in TOOL_DEFINITIONS}
-        assert names == {"resolve_structure", "classify_intent", "collect_parameters", "validate_preflight"}
+        assert names == {
+            "resolve_structure",
+            "classify_intent",
+            "collect_parameters",
+            "validate_preflight",
+            "extract_interface",
+            "load_job_results",
+            "analyze_candidates",
+            "flag_red_flags",
+            "generate_report",
+            "submit_refolding_job",
+        }
 
 
 class TestDispatchTool:

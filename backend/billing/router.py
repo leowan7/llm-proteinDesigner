@@ -17,6 +17,7 @@ from billing.stripe_client import (
     create_setup_session,
     get_or_create_customer,
 )
+from config import settings
 from db.connection import get_db_pool
 
 router = APIRouter(prefix="/billing", tags=["billing"])

@@ -18,10 +18,11 @@ from fastapi import HTTPException
 
 from billing.stripe_client import record_gpu_usage
 from config import settings
-from gpu.runpod import RunPodProvider
+from gpu import endpoint_for_tool, get_provider
 
-# Map tool name to RunPod image from settings (pod-based deployment).
-# Defined here so both jobs/router.py and admin/router.py can import from a single source.
+# Legacy tool→RunPod image map. Retained for backward compatibility with admin
+# and test code that imports ``TOOL_IMAGES`` directly. The active provider's
+# endpoint identifier is resolved via ``gpu.endpoint_for_tool(tool)``.
 TOOL_IMAGES: dict[str, str] = {
     "rfdiffusion": settings.runpod_image_rfdiffusion,
     "rfantibody": settings.runpod_image_rfantibody,
@@ -68,13 +69,20 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     if not row:
         raise HTTPException(status_code=404, detail="No running job found")
 
-    # Cancel on the GPU provider.
+    # Cancel on the active GPU provider (Modal by default, RunPod-emergency fallback).
+    # endpoint_id semantics depend on the provider; ``endpoint_for_tool`` handles that.
     if row["runpod_job_id"]:
-        provider = RunPodProvider(api_key=settings.runpod_api_key)
+        provider = get_provider()
         spec = json.loads(row["job_spec"] or "{}")
         tool = spec.get("tool", "")
-        endpoint_id = TOOL_IMAGES.get(tool, "")
-        await provider.cancel_job(endpoint_id, row["runpod_job_id"])
+        try:
+            endpoint_id = endpoint_for_tool(tool)
+        except ValueError:
+            # If no endpoint is configured (e.g. provider-less tool), skip provider
+            # cancel and proceed to mark the job cancelled in the DB.
+            endpoint_id = ""
+        if endpoint_id:
+            await provider.cancel_job(endpoint_id, row["runpod_job_id"])
 
     # Calculate partial GPU seconds from started_at.
     gpu_seconds = 0

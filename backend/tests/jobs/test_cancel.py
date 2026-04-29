@@ -33,27 +33,33 @@ def _make_ctx(conn):
     return ctx
 
 
-def _make_router_pool(job_row, cust_row):
-    """Build the router-side pool mock.
+def _make_router_pool(job_row, cust_row, owner_row=None):
+    """Build the router+service shared pool mock.
 
-    acquire() call sequence in cancel_job (router pool only):
-      1. fetchrow — job row (check status='running')
-      2. execute  — UPDATE gpu_cost_usd
-      3. fetchrow — stripe_customer_id for billing
+    acquire() call sequence (router then service):
+      1. router ownership check — fetchrow SELECT id WHERE id=? AND user_id=?
+      2. service job fetch — fetchrow full job row
+      3. service UPDATE gpu_cost_usd — returns "UPDATE 1"
+      4. service customer fetch — fetchrow stripe_customer_id
     """
+    if owner_row is None:
+        owner_row = {"id": "job-owned"}
+
+    owner_conn = AsyncMock()
+    owner_conn.fetchrow = AsyncMock(return_value=owner_row)
+
     job_conn = AsyncMock()
     job_conn.fetchrow = AsyncMock(return_value=job_row)
-    job_conn.execute = AsyncMock()
 
     exec_conn = AsyncMock()
-    exec_conn.execute = AsyncMock()
+    exec_conn.execute = AsyncMock(return_value="UPDATE 1")
 
     cust_conn = AsyncMock()
     cust_conn.fetchrow = AsyncMock(return_value=cust_row)
-    cust_conn.execute = AsyncMock()
 
     pool = AsyncMock()
     pool.acquire = MagicMock(side_effect=[
+        _make_ctx(owner_conn),
         _make_ctx(job_conn),
         _make_ctx(exec_conn),
         _make_ctx(cust_conn),
@@ -82,11 +88,11 @@ class TestJobCancellation:
         started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
         job_row = {
             "runpod_job_id": "rp-job-001",
-            "job_spec": json.dumps({"tool": "rfdiffusion"}),
+            "job_spec": json.dumps({"tool": "bindcraft"}),
             "started_at": started_at,
+            "user_id": "user-abc",
         }
         router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_test"})
-        worker_pool = _make_worker_pool(job_row)
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()
@@ -95,12 +101,10 @@ class TestJobCancellation:
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
-                patch("jobs.router.RunPodProvider", return_value=mock_provider),
-                patch("jobs.router.record_gpu_usage"),
-                patch("worker.tasks.get_db_pool", return_value=worker_pool),
-                patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
-                    publish=AsyncMock(), aclose=AsyncMock()
-                )),
+                patch("jobs.service.get_provider", return_value=mock_provider),
+                patch("jobs.service.record_gpu_usage"),
+                patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+                patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
                 from httpx import AsyncClient, ASGITransport
                 transport = ASGITransport(app=app)
@@ -117,18 +121,16 @@ class TestJobCancellation:
         assert data["status"] == "cancelled"
 
     @pytest.mark.anyio
-    async def test_cancel_calls_runpod_cancel(self):
-        """Mock RunPodProvider and verify cancel_job() is called with the correct
-        endpoint_id and provider_job_id matching the job's runpod_job_id column.
-        """
+    async def test_cancel_calls_provider_cancel(self):
+        """Verify provider.cancel_job is called with the job's runpod_job_id."""
         started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
         job_row = {
             "runpod_job_id": "rp-job-xyz",
-            "job_spec": json.dumps({"tool": "rfdiffusion"}),
+            "job_spec": json.dumps({"tool": "bindcraft"}),
             "started_at": started_at,
+            "user_id": "user-abc",
         }
         router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_test"})
-        worker_pool = _make_worker_pool(job_row)
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()
@@ -137,12 +139,10 @@ class TestJobCancellation:
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
-                patch("jobs.router.RunPodProvider", return_value=mock_provider),
-                patch("jobs.router.record_gpu_usage"),
-                patch("worker.tasks.get_db_pool", return_value=worker_pool),
-                patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
-                    publish=AsyncMock(), aclose=AsyncMock()
-                )),
+                patch("jobs.service.get_provider", return_value=mock_provider),
+                patch("jobs.service.record_gpu_usage"),
+                patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+                patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
                 from httpx import AsyncClient, ASGITransport
                 transport = ASGITransport(app=app)
@@ -156,22 +156,22 @@ class TestJobCancellation:
 
         mock_provider.cancel_job.assert_called_once()
         call_args = mock_provider.cancel_job.call_args
-        # Second positional arg is the runpod_job_id
+        # Second positional arg is the runpod_job_id (aka provider_job_id).
         assert call_args[0][1] == "rp-job-xyz"
 
     @pytest.mark.anyio
     async def test_cancel_records_partial_billing(self):
-        """Verify record_gpu_usage is called with the partial GPU seconds consumed
-        before cancellation (not zero, not the full estimated duration).
+        """Verify record_gpu_usage is called with (customer_id, job_id, gpu_seconds)
+        for the partial GPU time consumed before cancellation.
         """
         started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120)
         job_row = {
             "runpod_job_id": "rp-job-partial",
             "job_spec": json.dumps({"tool": "bindcraft"}),
             "started_at": started_at,
+            "user_id": "user-abc",
         }
         router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_partial"})
-        worker_pool = _make_worker_pool(job_row)
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()
@@ -181,12 +181,10 @@ class TestJobCancellation:
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
-                patch("jobs.router.RunPodProvider", return_value=mock_provider),
-                patch("jobs.router.record_gpu_usage", mock_record),
-                patch("worker.tasks.get_db_pool", return_value=worker_pool),
-                patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
-                    publish=AsyncMock(), aclose=AsyncMock()
-                )),
+                patch("jobs.service.get_provider", return_value=mock_provider),
+                patch("jobs.service.record_gpu_usage", mock_record),
+                patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+                patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
                 from httpx import AsyncClient, ASGITransport
                 transport = ASGITransport(app=app)
@@ -200,6 +198,6 @@ class TestJobCancellation:
 
         data = response.json()
         gpu_seconds = data["gpu_seconds"]
-        # Job ran for ~120 seconds — billing must reflect partial time (> 0)
+        # Job ran for ~120 seconds — billing must reflect partial time (> 0).
         assert gpu_seconds > 0
-        mock_record.assert_called_once_with("cus_partial", gpu_seconds)
+        mock_record.assert_called_once_with("cus_partial", "job-partial", gpu_seconds)

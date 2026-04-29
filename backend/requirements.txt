@@ -19,6 +19,7 @@ biopython==1.86
 respx==0.22.0
 stripe==14.4.1
 runpod==1.8.1
+modal==1.4.2
 resend==2.25.0
 arq==0.27.0
 slowapi==0.1.9

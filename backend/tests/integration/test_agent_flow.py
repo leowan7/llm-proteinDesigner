@@ -180,6 +180,130 @@ def _make_mock_anthropic_tool_then_end(tool_name: str = "resolve_structure"):
     return client_instance
 
 
+def _make_tool_use_response(tool_name: str, tool_id: str, tool_input: dict):
+    """Build a single Anthropic tool_use response.
+
+    Args:
+        tool_name: Name of the tool being invoked.
+        tool_id: Unique tool_use block ID.
+        tool_input: Input payload for the tool.
+
+    Returns:
+        MagicMock imitating a single Anthropic Message with stop_reason=tool_use.
+    """
+    tool_block = MagicMock()
+    tool_block.type = "tool_use"
+    tool_block.id = tool_id
+    tool_block.name = tool_name
+    tool_block.input = tool_input
+
+    response = MagicMock()
+    response.stop_reason = "tool_use"
+    response.content = [tool_block]
+    return response
+
+
+def _make_mock_anthropic_full_flow():
+    """Build a mock Anthropic client that chains all 5 agent conversation stages.
+
+    Simulates the canonical agent flow from ROADMAP SC2:
+        resolve_structure -> classify_intent -> collect_parameters
+            -> validate_preflight -> end_turn (launch-ready)
+
+    The fifth stage is the agent producing a launch-ready summary text; the
+    actual job dispatch happens via POST /jobs/launch outside the agent loop.
+
+    Returns:
+        MagicMock mimicking the anthropic.Anthropic client with a side_effect
+        of 5 sequential responses.
+    """
+    responses = [
+        _make_tool_use_response(
+            "resolve_structure",
+            "tool-call-resolve-001",
+            {"query": "IL6R", "query_type": "natural_language"},
+        ),
+        _make_tool_use_response(
+            "classify_intent",
+            "tool-call-classify-002",
+            {
+                "design_type": "minibinder",
+                "recommended_tool": "bindcraft",
+                "rationale": "Minibinders against a known target are BindCraft's sweet spot.",
+            },
+        ),
+        _make_tool_use_response(
+            "collect_parameters",
+            "tool-call-collect-003",
+            {"tool": "bindcraft"},
+        ),
+        _make_tool_use_response(
+            "validate_preflight",
+            "tool-call-validate-004",
+            {
+                "pdb_path": "s3://bucket/test.pdb",
+                "chain_id": "A",
+                "tool": "bindcraft",
+                "parameters": {"num_designs": 10, "binder_length": 65},
+            },
+        ),
+    ]
+
+    text_block = MagicMock()
+    text_block.type = "text"
+    text_block.text = (
+        "All checks passed. You're ready to launch a BindCraft minibinder run "
+        "against IL-6 receptor."
+    )
+    end_response = MagicMock()
+    end_response.stop_reason = "end_turn"
+    end_response.content = [text_block]
+    responses.append(end_response)
+
+    client_instance = MagicMock()
+    client_instance.messages.create = MagicMock(side_effect=responses)
+    return client_instance
+
+
+def _make_stage_results() -> dict:
+    """Return a dict mapping tool_name to the JSON-string result to return.
+
+    The multi-stage integration test uses these to side_effect dispatch_tool,
+    producing a realistic-looking payload per stage without hitting real HTTP
+    or DB dependencies inside the tool handlers.
+    """
+    return {
+        "resolve_structure": json.dumps({
+            "pdb_path": "s3://bucket/test.pdb",
+            "chain_id": "A",
+            "resolution": 2.1,
+            "organism": "Homo sapiens",
+            "name": "Interleukin-6 receptor",
+        }),
+        "classify_intent": json.dumps({
+            "design_type": "minibinder",
+            "recommended_tool": "bindcraft",
+            "rationale": "Minibinders against a known target are BindCraft's sweet spot.",
+        }),
+        "collect_parameters": json.dumps({
+            "tool": "bindcraft",
+            "parameters": [
+                {"name": "num_designs", "default": 10, "type": "integer"},
+                {"name": "binder_length", "default": 65, "type": "integer"},
+                {"name": "hotspot_residues", "default": [], "type": "array"},
+            ],
+        }),
+        "validate_preflight": json.dumps({
+            "checks": [
+                {"name": "pdb_quality", "status": "pass"},
+                {"name": "hotspot_sasa", "status": "pass"},
+                {"name": "parameter_sanity", "status": "pass"},
+            ],
+            "ready_to_launch": True,
+        }),
+    }
+
+
 def _parse_sse_events(raw_text: str) -> list[dict]:
     """Parse SSE response text into a list of event dicts.
 
@@ -312,6 +436,115 @@ async def test_agent_message_persists_to_session():
             # At least one assistant reply should be present
             assistant_messages = [m for m in messages if m["role"] == "assistant"]
             assert len(assistant_messages) >= 1, "No assistant reply found in session history"
+
+        finally:
+            if session_id:
+                await _delete_session(client, session_id)
+
+
+async def test_agent_conversation_flow_all_five_stages():
+    """Agent SSE stream exercises all 5 stages: resolve -> classify -> collect -> validate -> launch-ready.
+
+    Satisfies ROADMAP SC2 ("the full agent conversation flow"). Mocks Anthropic
+    with a 5-response side_effect that chains four tool_use turns followed by
+    an end_turn "ready to launch" message. Uses real Supabase for session and
+    message persistence; only Anthropic and dispatch_tool are mocked.
+
+    Asserts:
+    - All 4 tool_result SSE events are streamed in order.
+    - The final assistant text indicates launch readiness.
+    - A 'done' event terminates the stream.
+    - Anthropic client was called at least 5 times (one per response; a 6th
+      call may occur when the background title-generation task fires for the
+      first user message in a session, which is best-effort and non-fatal).
+    - dispatch_tool was called exactly 4 times (one per tool_use turn).
+    """
+    transport = ASGITransport(app=app)
+    expected_order = [
+        "resolve_structure",
+        "classify_intent",
+        "collect_parameters",
+        "validate_preflight",
+    ]
+    stage_results = _make_stage_results()
+
+    async def _dispatch_side_effect(tool_name, _tool_input, user_id=""):
+        """Side-effect implementation of dispatch_tool returning per-tool JSON."""
+        return stage_results[tool_name]
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        session_id = None
+        try:
+            session_id = await _create_session(client)
+
+            mock_client = _make_mock_anthropic_full_flow()
+
+            with (
+                patch("agent.router.anthropic.Anthropic", return_value=mock_client),
+                patch(
+                    "agent.router.dispatch_tool",
+                    side_effect=_dispatch_side_effect,
+                ) as mock_dispatch,
+            ):
+                response = await client.post(
+                    "/agent/message",
+                    json={
+                        "session_id": session_id,
+                        "message": "I want to design a binder for IL-6 receptor",
+                    },
+                )
+
+            assert response.status_code == 200
+            assert "text/event-stream" in response.headers.get("content-type", "")
+
+            events = _parse_sse_events(response.text)
+            event_types = [e.get("type") for e in events]
+
+            # Must terminate with a done event
+            assert "done" in event_types, f"Missing 'done' event. Got: {event_types}"
+
+            # Each of the 4 tool stages must produce exactly one tool_result event,
+            # preserving the resolve -> classify -> collect -> validate order
+            tool_result_events = [e for e in events if e.get("type") == "tool_result"]
+            actual_order = [e["tool_name"] for e in tool_result_events]
+            assert actual_order == expected_order, (
+                f"Tool results streamed in wrong order. "
+                f"Expected {expected_order}, got {actual_order}"
+            )
+
+            # Stage 4 validate_preflight payload indicates launch readiness
+            validate_event = next(
+                e for e in tool_result_events if e["tool_name"] == "validate_preflight"
+            )
+            assert validate_event["result"].get("ready_to_launch") is True
+
+            # Final assistant text is present and references the launch stage
+            text_events = [e for e in events if e.get("type") == "text"]
+            assert text_events, "Expected at least one 'text' event for the final assistant message"
+            final_text = "".join(e.get("text", "") for e in text_events).lower()
+            assert "launch" in final_text, (
+                f"Final assistant text should reference launch readiness. Got: {final_text!r}"
+            )
+
+            # Anthropic should have been called at least 5 times in the agent loop
+            # (4 tool_use + 1 end_turn). A background task may add a 6th title-gen
+            # call on the first message of a session — the agent loop itself is the
+            # contract under test, not the title generator.
+            assert mock_client.messages.create.call_count >= 5, (
+                f"Expected >=5 Anthropic calls (4 tool_use + 1 end_turn), "
+                f"got {mock_client.messages.create.call_count}"
+            )
+
+            # dispatch_tool should have been called once per stage
+            assert mock_dispatch.call_count == 4, (
+                f"Expected 4 dispatch_tool calls, got {mock_dispatch.call_count}"
+            )
+            dispatched_names = [call.args[0] for call in mock_dispatch.call_args_list]
+            assert dispatched_names == expected_order
+
+            # Real DB write: agent_history should contain the full multi-turn conversation
+            get_response = await client.get(f"/sessions/{session_id}")
+            assert get_response.status_code == 200
 
         finally:
             if session_id:

@@ -108,7 +108,7 @@ class TestJobDispatch:
 
         with (
             patch("worker.tasks.get_db_pool", return_value=mock_pool),
-            patch("worker.tasks.RunPodProvider", return_value=mock_provider),
+            patch("worker.tasks.get_provider", return_value=mock_provider),
             patch("worker.tasks.aioredis.from_url", return_value=AsyncMock(
                 publish=AsyncMock(), aclose=AsyncMock()
             )),
