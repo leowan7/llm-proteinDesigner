@@ -1,8 +1,17 @@
 # Environment
 .env.local
 .env
+*.bak
+.env.local.bak
 
-# Throwaway spike / experiment outputs
+# Local artifacts and scratch
+.deploy-logs/
+tmp/
+scratch/
+graphify-out/
+.graphifyignore
+
+# Throwaway spike / experiment outputs (legacy — kept for clarity)
 scratch/**/spike_output/
 scratch/**/*.pdb
 
@@ -12,6 +21,7 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+backend/.coverage
 
 # Node
 node_modules/
@@ -20,6 +30,7 @@ dist/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
@@ -31,6 +42,9 @@ minio_data/
 # Supabase
 supabase/.temp/
 .gstack/
+
+# Frontend local planning (per-project, not shared)
+frontend/.planning/
 
 # Phase 11 deployment — secrets collected locally, never committed
 .planning/phases/11-deployment/11-02-PROVISIONING.md
