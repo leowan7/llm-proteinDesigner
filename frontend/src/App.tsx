@@ -19,10 +19,10 @@ import { AdminRevenuePage } from "./pages/admin/AdminRevenuePage";
 import { AdminSystemPage } from "./pages/admin/AdminSystemPage";
 import { AdminAuditPage } from "./pages/admin/AdminAuditPage";
 import { CookieConsentProvider } from "./components/legal/CookieConsentProvider";
-import { Terms } from "./pages/legal/Terms";
-import { Privacy } from "./pages/legal/Privacy";
-import { Subprocessors } from "./pages/legal/Subprocessors";
-import { Cookies } from "./pages/legal/Cookies";
+import TermsPage from "./pages/legal/Terms";
+import PrivacyPage from "./pages/legal/Privacy";
+import SubprocessorsPage from "./pages/legal/Subprocessors";
+import CookiesPage from "./pages/legal/Cookies";
 
 /**
  * Detects Supabase auth redirects with tokens in the URL hash fragment
@@ -76,10 +76,10 @@ function App() {
             <Route path="/reset-password/confirm" element={<ResetPasswordConfirm />} />
 
             {/* Public legal pages — reachable without auth (Plan 10-06) */}
-            <Route path="/legal/terms" element={<Terms />} />
-            <Route path="/legal/privacy" element={<Privacy />} />
-            <Route path="/legal/subprocessors" element={<Subprocessors />} />
-            <Route path="/legal/cookies" element={<Cookies />} />
+            <Route path="/legal/terms" element={<TermsPage />} />
+            <Route path="/legal/privacy" element={<PrivacyPage />} />
+            <Route path="/legal/subprocessors" element={<SubprocessorsPage />} />
+            <Route path="/legal/cookies" element={<CookiesPage />} />
 
             {/* Admin routes — separate layout, admin auth guard */}
             <Route element={<AdminLayout />}>

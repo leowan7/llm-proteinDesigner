@@ -13,7 +13,7 @@
  * TabsTrigger/TabsContent registration and whitelist entry are untouched.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Dialog,
   DialogContent,
@@ -78,6 +78,13 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
   const [confirmationInput, setConfirmationInput] = useState("");
   const [deleteSubmitting, setDeleteSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Tracks a successful deletion so that onChanged() is deferred until
+  // after deleteDialogOpen flips to false and React commits the close.
+  // Calling onChanged() synchronously in handleConfirmDelete causes the
+  // settings re-fetch re-render to race the Base UI CSS close animation,
+  // aborting it mid-flight; Base UI's treatAbortedAsFinished=false path
+  // then never calls forceUnmount(), leaving the dialog visually stuck.
+  const deletionSucceededRef = useRef(false);
 
   // ---- Cancel section state ----
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
@@ -130,6 +137,16 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
     refreshExportStatus();
   }, [refreshExportStatus]);
 
+  // Fire onChanged() after the dialog's controlled close is committed to DOM
+  // (i.e. deleteDialogOpen is already false before this effect runs), so the
+  // settings re-fetch re-render cannot race and abort the CSS close animation.
+  useEffect(() => {
+    if (!deleteDialogOpen && deletionSucceededRef.current) {
+      deletionSucceededRef.current = false;
+      onChanged();
+    }
+  }, [deleteDialogOpen, onChanged]);
+
   async function handleRequestExport() {
     setExportSubmitting(true);
     setExportError(null);
@@ -155,9 +172,9 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
     setDeleteError(null);
     try {
       await requestAccountDeletion(confirmationInput);
+      deletionSucceededRef.current = true;
       setDeleteDialogOpen(false);
       setConfirmationInput("");
-      onChanged();
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unable to schedule deletion. Try again.";
       setDeleteError(msg);
@@ -412,9 +429,9 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
       {/* Delete confirmation dialog */}
       <Dialog
         open={deleteDialogOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            setDeleteDialogOpen(false);
+        onOpenChange={(nextOpen) => {
+          setDeleteDialogOpen(nextOpen);
+          if (!nextOpen) {
             setConfirmationInput("");
             setDeleteError(null);
           }

@@ -206,6 +206,41 @@ describe("SettingsPage Privacy tab (Plan 10-04)", () => {
     });
   });
 
+  it("dialog closes after successful deletion (regression: dialog stayed open)", async () => {
+    // Regression test for the UAT bug where setDeleteDialogOpen(false) was
+    // called synchronously alongside onChanged(), causing the settings
+    // re-fetch re-render to race and abort the Base UI CSS close animation,
+    // leaving forceUnmount() never called and the dialog visually stuck.
+    const userLib = await import("@/lib/user");
+    // Second getSettings call (triggered by onChanged) returns deletion pending.
+    (userLib.getSettings as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        email: "test@example.com",
+        display_name: "Test User",
+        notification_preferences: { job_complete: true, job_failure: true },
+        deletion_requested_at: null,
+        data_retention_days: 90,
+      })
+      .mockResolvedValueOnce({
+        email: "test@example.com",
+        display_name: "Test User",
+        notification_preferences: { job_complete: true, job_failure: true },
+        deletion_requested_at: "2026-04-24T10:00:00Z",
+        data_retention_days: 90,
+      });
+
+    await renderPrivacy();
+    fireEvent.click(screen.getByRole("button", { name: /^delete my account$/i }));
+    const confirmInput = await screen.findByLabelText(/confirmation/i);
+    fireEvent.change(confirmInput, { target: { value: "DELETE MY ACCOUNT" } });
+    fireEvent.click(screen.getByRole("button", { name: /schedule deletion/i }));
+
+    // Dialog heading must disappear once the API call resolves.
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: /delete account\?/i })).not.toBeInTheDocument();
+    });
+  });
+
   it("renders pending-deletion banner + Cancel button when deletion_requested_at is set", async () => {
     const userLib = await import("@/lib/user");
     (userLib.getSettings as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
