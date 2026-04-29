@@ -21,7 +21,7 @@ Get Kendrew live on `kendrew.ai` and reachable by external users on production i
   - Railway: `kendrew-backend-staging` + `kendrew-backend-prod` services (and matching worker services).
   - Vercel: staging preview alias on a non-prod domain (e.g. `staging.kendrew.ai` CNAME) + prod on `kendrew.ai`.
   - Modal: `staging` + `main` environments (draft `deploy-modal.yml` already separates these).
-  - Supabase Cloud: separate `kendrew-staging` and `kendrew-prod` projects (each Pro plan).
+  - Supabase Cloud: separate `kendrew-staging` and `kendrew-prod` projects (Free tier for deploy validation; upgrade to Pro for PITR + non-paused DBs before public launch).
   - Upstash Redis: separate `kendrew-staging` and `kendrew-prod` databases, both TLS.
   - Cloudflare R2: separate buckets per env (`kendrew-staging`, `kendrew-prod`) to prevent cross-env PDB leakage.
 - **D-04:** SSL certs are platform-managed. Vercel and Railway auto-issue and renew LetsEncrypt. No Cloudflare full-strict — Cloudflare stays DNS-only for `app.kendrew.ai`.
@@ -100,7 +100,7 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 - Railway Docker/Nixpacks deploy docs, Railway predeploy hook docs
 - Vercel custom domains + env vars per environment
 - Cloudflare DNS setup for Vercel + Railway (grey-cloud for app subdomain)
-- Supabase Cloud Pro — connection pooling (Supavisor transaction mode recommended for FastAPI workers)
+- Supabase Cloud — connection pooling (Supavisor transaction mode recommended for FastAPI workers; Free tier acceptable for deploy validation, Pro required before public launch)
 - Upstash Redis TLS URL format (`rediss://...`)
 - Cloudflare R2 bucket creation + API token with object-scope
 - Modal environments + deploy flow (`modal environment create`, `modal deploy`)

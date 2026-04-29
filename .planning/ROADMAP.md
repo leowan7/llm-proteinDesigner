@@ -220,7 +220,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. Frontend deployed on Vercel with custom domain and SSL
   2. Backend + worker deployed on Railway as Docker containers with auto-deploy from main branch
-  3. Database on Supabase Cloud (Pro plan) with connection pooling and backups
+  3. Database on Supabase Cloud with connection pooling and daily backup (7-day retention); PITR deferred until Pro upgrade before public launch
   4. Redis on Upstash with TLS
   5. Object storage on Cloudflare R2 with presigned URL access
   6. GPU jobs dispatch to Modal (primary GPU provider per Phase 10) from production backend; RunPod remains quarantined as an emergency fallback only
