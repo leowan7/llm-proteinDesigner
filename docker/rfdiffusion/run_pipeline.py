@@ -31,6 +31,11 @@ import time
 from glob import glob
 from pathlib import Path
 
+# pipeline_normalize.py is mounted alongside this script at /opt by
+# infrastructure/modal/rfdiffusion_app.py. Adding /opt to sys.path makes
+# the bare module name importable.
+sys.path.insert(0, "/opt")
+
 import requests
 
 # ---------------------------------------------------------------------------
@@ -654,6 +659,21 @@ def run_command(
     return result.stdout + result.stderr
 
 
+_WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
+
+
+def _record_webhook_outcome(delivered: bool, detail: str) -> None:
+    """Persist webhook delivery status so the Modal wrapper can surface
+    it to tools-hub even when the POST silently fails. Read by run_tool()
+    in infrastructure/modal/rfdiffusion_app.py and merged into the function
+    return value, where tools-hub's ModalClient.poll() inspects it."""
+    try:
+        with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
+            json.dump({"delivered": delivered, "detail": detail}, fh)
+    except OSError as exc:
+        logger.error("Failed to write webhook outcome file: %s", exc)
+
+
 def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> None:
     """POST results to the Kendrew backend webhook.
 
@@ -663,6 +683,14 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
         pod_id: RunPod pod ID (for backend to terminate).
         payload: Results dict (candidates, counts, etc.).
     """
+    if not webhook_url:
+        logger.error(
+            "post_webhook: empty webhook_url for job %s; cannot deliver result",
+            job_id,
+        )
+        _record_webhook_outcome(False, "empty webhook_url")
+        return
+
     body = {
         "id": job_id,
         "pod_id": pod_id,
@@ -677,8 +705,11 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
     try:
         resp = requests.post(webhook_url, json=body, timeout=30)
         logger.info("Webhook response: %d", resp.status_code)
+        resp.raise_for_status()
+        _record_webhook_outcome(True, f"http {resp.status_code}")
     except Exception as exc:
         logger.error("Webhook POST failed: %s", exc)
+        _record_webhook_outcome(False, f"{type(exc).__name__}: {exc}")
 
 
 # ===========================================================================
@@ -1231,7 +1262,33 @@ def main():
 
     try:
         # ----- Download input PDB -----
-        download_input(input_url, target_pdb)
+        raw_target_pdb = os.path.join(work_dir, "target_raw.pdb")
+        download_input(input_url, raw_target_pdb)
+
+        # ----- Sanitize input PDB (Bug 9 fix) -----
+        # Strip waters/HETATM/altlocs/multi-model + drop residues with bad
+        # backbones, so RFdiffusion's frame builder doesn't crash on
+        # zero-coord placeholder atoms or non-protein chains. Original
+        # numbering preserved (RFdiffusion hotspot strings reference it).
+        try:
+            from pipeline_normalize import normalize_for_rfdiffusion
+            norm_report = normalize_for_rfdiffusion(
+                raw_target_pdb, target_pdb, target_chain=target_chain,
+            )
+            logger.info(
+                "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
+                "residues_dropped=%s changes=%s",
+                norm_report.chains_kept, norm_report.chains_dropped,
+                norm_report.residues_kept_per_chain,
+                norm_report.residues_dropped_per_chain,
+                norm_report.changes,
+            )
+        except Exception as exc:
+            logger.error("PDB sanitize failed: %s", exc)
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": f"PDB sanitize failed: {exc}",
+            })
+            return
 
         # ----- Stage 1: RFdiffusion -----
         rfdiff_output = os.path.join(work_dir, "rfdiffusion_output")

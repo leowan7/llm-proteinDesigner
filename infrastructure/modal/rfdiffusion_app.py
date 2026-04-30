@@ -64,6 +64,11 @@ def _merged_environment(payload: dict) -> dict[str, str]:
 image = (
     modal.Image.from_dockerfile(_DOCKERFILE, add_python=None)
     .add_local_file(_RUN_PIPELINE_LOCAL, _RUN_PIPELINE_REMOTE, copy=True)
+    .add_local_file(
+        "backend/pdb_utils/pipeline_normalize.py",
+        "/opt/pipeline_normalize.py",
+        copy=True,
+    )
 )
 
 app = modal.App(f"kendrew-{_TOOL}-prod")
@@ -129,10 +134,25 @@ def run_tool(payload: dict) -> dict:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[run_tool] failed to read smoke_results.json: {exc}", flush=True)
 
+    # Webhook tier (pilot, full design): post_webhook writes a delivery
+    # outcome file the wrapper surfaces to tools-hub. If smoke_result is
+    # None and webhook_outcome reports a failure, tools-hub fails the job
+    # with the detail rather than waiting on a webhook that already failed.
+    webhook_outcome: dict | None = None
+    try:
+        with open("/tmp/webhook_outcome.json") as fh:
+            webhook_outcome = json.load(fh)
+        print(f"[run_tool] webhook_outcome: {webhook_outcome}", flush=True)
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[run_tool] failed to read webhook_outcome.json: {exc}", flush=True)
+
     return {
         "exit_code": result.returncode,
         "stdout_tail": "",
         "stderr_tail": "",
         "provider_job_id": payload.get("job_id", ""),
         "smoke_result": smoke_result,
+        "webhook_outcome": webhook_outcome,
     }

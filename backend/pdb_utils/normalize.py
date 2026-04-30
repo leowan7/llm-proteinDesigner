@@ -3,6 +3,13 @@
 Handles: NMR multi-model (keep model 0), altloc (keep highest occupancy via
 BioPython's default DisorderedAtom behaviour), MSE->MET residue mutation,
 and unsupported format rejection.
+
+This module backs the chat / fetch flow (POST /pdb/upload, /pdb/fetch).
+
+For aggressive cleanup needed by GPU pipelines (drop waters, HETATM,
+hydrogens, bad-backbone residues; per-tool flag presets), see
+``pipeline_normalize.py`` — that module is mounted standalone into each
+Kendrew docker image and must not depend on this one.
 """
 import os
 

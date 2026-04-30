@@ -41,6 +41,11 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+# pipeline_normalize.py is mounted alongside this script at /opt by
+# infrastructure/modal/boltzgen_app.py. Adding /opt to sys.path makes the
+# bare module name importable.
+sys.path.insert(0, "/opt")
+
 import requests
 import yaml
 
@@ -68,14 +73,13 @@ SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
 SMOKE_TARGET_PDB = "/opt/smoke_target.pdb"  # baked into the Docker image
 SMOKE_TARGET_CHAIN = "A"
 # Reasonable PD-1 binding interface residues on PD-L1 chain A (PD-1 contact
-# face of the IgV sheet). Note: the baked PDB uses author numbering 18..132,
-# but our CIF step re-indexes to 1..N. These residue numbers are specified
-# in the post-reindex (1-based) coordinate system:
-#   author 54 -> 54-18+1 = 37
-#   author 56 -> 39
-#   author 115 -> 98
-#   author 123 -> 106
-SMOKE_HOTSPOTS = [37, 39, 98, 106]
+# face of the IgV sheet). The baked PDB uses author numbering 18..132.
+# These hotspots are now specified in ORIGINAL author numbering — the
+# build_yaml_spec hotspot remap (Bug 9 fix) converts them to the post-
+# reindex 1..N coordinate space using the renumber_map produced by
+# ensure_cif. Equivalents (for cross-reference with prior versions of this
+# file): author 54 -> 37, 56 -> 39, 115 -> 98, 123 -> 106.
+SMOKE_HOTSPOTS = [54, 56, 115, 123]
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +352,10 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     shutil.copy(SMOKE_TARGET_PDB, target_input)
 
     try:
-        target_cif = ensure_cif(target_input, work_dir)
+        target_chain = job_spec.get("target_chain", "A")
+        target_cif, renumber_map = ensure_cif(
+            target_input, work_dir, target_chain=target_chain,
+        )
     except Exception as exc:
         logger.exception("CIF conversion failed")
         return {
@@ -360,7 +367,7 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
         }
 
     # ---- Stage 2: build YAML spec ----
-    yaml_spec = build_yaml_spec(job_spec, target_cif)
+    yaml_spec = build_yaml_spec(job_spec, target_cif, renumber_map=renumber_map)
     spec_path = write_yaml_spec(yaml_spec, target_cif, work_dir)
 
     # ---- Stage 3: run BoltzGen (streamed) ----
@@ -605,10 +612,33 @@ def run_command(
     return combined_output
 
 
+_WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
+
+
+def _record_webhook_outcome(delivered: bool, detail: str) -> None:
+    """Persist webhook delivery status so the Modal wrapper can surface
+    it to tools-hub even when the POST silently fails. Read by run_tool()
+    in infrastructure/modal/boltzgen_app.py and merged into the function
+    return value, where tools-hub's ModalClient.poll() inspects it."""
+    try:
+        with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
+            json.dump({"delivered": delivered, "detail": detail}, fh)
+    except OSError as exc:
+        logger.error("Failed to write webhook outcome file: %s", exc)
+
+
 def post_webhook(
     webhook_url: str, job_id: str, pod_id: str, payload: dict,
 ) -> None:
     """POST results to the Kendrew backend webhook."""
+    if not webhook_url:
+        logger.error(
+            "post_webhook: empty webhook_url for job %s; cannot deliver result",
+            job_id,
+        )
+        _record_webhook_outcome(False, "empty webhook_url")
+        return
+
     body = {
         "id": job_id,
         "pod_id": pod_id,
@@ -626,34 +656,62 @@ def post_webhook(
     try:
         resp = requests.post(webhook_url, json=body, timeout=30)
         logger.info("Webhook response: %d", resp.status_code)
+        resp.raise_for_status()
+        _record_webhook_outcome(True, f"http {resp.status_code}")
     except Exception as exc:
         logger.error("Webhook POST failed: %s", exc)
+        _record_webhook_outcome(False, f"{type(exc).__name__}: {exc}")
 
 
 # ===========================================================================
 # CIF conversion and re-indexing
 # ===========================================================================
 
-def ensure_cif(input_path: str, work_dir: str) -> str:
+def ensure_cif(
+    input_path: str, work_dir: str, target_chain: str = "A",
+) -> tuple[str, dict]:
     """Convert the downloaded PDB into a BoltzGen-ready mmCIF.
 
-    BoltzGen's mmcif parser (``boltzgen.data.parse.mmcif.parse_mmcif``) is
-    strict: it requires the ``_entity_poly_seq`` block to exist and every
-    residue in ``_atom_site`` to match by name the entry at the same seq
-    position in ``_entity_poly_seq``. gemmi's ``setup_entities()`` +
-    ``make_mmcif_document()`` is not reliable here — for 4Z18 it either
-    omits the block (when called on a freshly-rebuilt Structure) or emits
-    mismatched residue names (when called on the original). We side-step
-    the whole problem by writing a minimal CIF from scratch with exactly
-    the blocks BoltzGen reads.
+    Returns a tuple ``(cif_path, renumber_map)``. The renumber_map is
+    ``{(chain_id, original_resnum): new_resnum}``. Callers
+    (``build_yaml_spec``) use it to rewrite hotspot indices into the
+    cleaned coordinate space.
+
+    BoltzGen's mmcif parser is strict: it requires the
+    ``_entity_poly_seq`` block to exist and every residue in
+    ``_atom_site`` to match by name the entry at the same seq position
+    in ``_entity_poly_seq``. We side-step the whole problem by writing a
+    minimal CIF from scratch with exactly the blocks BoltzGen reads.
+
+    Pipeline (Bug 9 fix, 2026-04-30):
+      1. Sanitize with Biopython (``pipeline_normalize.normalize_for_boltzgen``):
+         drop waters, HETATM, hydrogens, altlocs, multi-model, MSE->MET,
+         filter to ``target_chain`` only, renumber 1..N. Result is a clean
+         single-chain PDB on disk.
+      2. Read that cleaned PDB with gemmi for the custom CIF write below.
 
     The resulting CIF contains only standard-20-AA polymer residues with
     contiguous seqids starting at 1 per chain, no altlocs, no hydrogens,
-    no ligands, no waters. MSE, SEP, etc. are remapped to their standard
-    parents before writing.
+    no ligands, no waters.
     """
-    import gemmi
-    from gemmi import cif
+    from pipeline_normalize import normalize_for_boltzgen  # noqa: PLC0415
+
+    import gemmi  # noqa: PLC0415
+    from gemmi import cif  # noqa: PLC0415
+
+    # ---- Stage 1: Biopython sanitize + renumber ----
+    cleaned_pdb = os.path.join(work_dir, "cleaned.pdb")
+    norm_report = normalize_for_boltzgen(
+        input_path, cleaned_pdb, target_chain=target_chain,
+    )
+    logger.info(
+        "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
+        "residues_dropped=%s changes=%s",
+        norm_report.chains_kept, norm_report.chains_dropped,
+        norm_report.residues_kept_per_chain,
+        norm_report.residues_dropped_per_chain,
+        norm_report.changes,
+    )
 
     STANDARD_AA = frozenset([
         "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
@@ -666,13 +724,24 @@ def ensure_cif(input_path: str, work_dir: str) -> str:
         "HYP": ("PRO", {}), "LLP": ("LYS", {}),
     }
 
-    logger.info("Reading input structure: %s", input_path)
-    structure = gemmi.read_structure(input_path)
+    logger.info("Reading cleaned PDB into gemmi: %s", cleaned_pdb)
+    structure = gemmi.read_structure(cleaned_pdb)
 
-    # Cleanup: altlocs first (so later ops see one copy per residue).
+    # Defensive setup_entities + cleanup quartet. With a polymer-only input
+    # these are largely no-ops, but kept as belt-and-braces.
+    try:
+        structure.setup_entities()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("setup_entities() raised %s; continuing", exc)
     structure.remove_alternative_conformations()
     structure.remove_hydrogens()
-    structure.remove_ligands_and_waters()
+    try:
+        structure.remove_ligands_and_waters()
+    except Exception as exc:
+        logger.warning(
+            "remove_ligands_and_waters() raised %s post-normalize; continuing",
+            exc,
+        )
     structure.remove_empty_chains()
 
     # Extract per-chain sequences and atom records.
@@ -805,14 +874,17 @@ def ensure_cif(input_path: str, work_dir: str) -> str:
         cif_path, os.path.getsize(cif_path), atom_id,
         sum(kept_counts.values()),
     )
-    return cif_path
+    return cif_path, dict(norm_report.renumber_map)
 
 
 # ===========================================================================
 # BoltzGen YAML spec generation
 # ===========================================================================
 
-def build_yaml_spec(job_spec: dict, target_cif_path: str) -> dict:
+def build_yaml_spec(
+    job_spec: dict, target_cif_path: str,
+    renumber_map: dict | None = None,
+) -> dict:
     """Build the BoltzGen YAML design spec from the JobSpec.
 
     Mirrors backend/pipelines/boltzgen.py::generate_config so the container
@@ -840,7 +912,36 @@ def build_yaml_spec(job_spec: dict, target_cif_path: str) -> dict:
     """
     params = job_spec.get("parameters", {})
     chain = job_spec.get("target_chain", "A")
-    hotspots = job_spec.get("hotspot_residues", [])
+    raw_hotspots = list(job_spec.get("hotspot_residues", []) or [])
+
+    # Hotspot remap (Bug 9 fix): user-supplied hotspots refer to original
+    # PDB numbering; the CIF stage renumbered residues 1..N. Use the
+    # renumber_map produced by ensure_cif to convert.
+    if renumber_map:
+        remapped: list = []
+        missing: list = []
+        for h in raw_hotspots:
+            try:
+                orig = int(h)
+            except (TypeError, ValueError):
+                missing.append(str(h))
+                continue
+            new = renumber_map.get((chain, orig))
+            if new is None:
+                missing.append(orig)
+            else:
+                remapped.append(new)
+        if missing:
+            logger.warning(
+                "build_yaml_spec: hotspot residues not found after cleanup "
+                "(skipped): %s. Original hotspots: %s. Chain %s has "
+                "renumber-map entries for residues: %s",
+                missing, raw_hotspots, chain,
+                sorted(r for c, r in renumber_map if c == chain)[:25],
+            )
+        hotspots = remapped
+    else:
+        hotspots = raw_hotspots
 
     # Binder length range from parameters.
     binder_length = params.get("binder_length", {"min": 50, "max": 100})
@@ -1250,7 +1351,10 @@ def main():
         # ----- Stage 2: Convert to CIF and re-index -----
         send_heartbeat(webhook_url, job_id, "Preparing CIF", 0, budget)
         try:
-            target_cif = ensure_cif(target_input, work_dir)
+            target_chain = job_spec.get("target_chain", "A")
+            target_cif, renumber_map = ensure_cif(
+                target_input, work_dir, target_chain=target_chain,
+            )
         except Exception as exc:
             logger.error("CIF conversion failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
@@ -1269,7 +1373,9 @@ def main():
                 job_spec.get("target_chain", "A"),
                 job_spec.get("hotspot_residues", []),
             )
-            yaml_spec = build_yaml_spec(job_spec, target_cif)
+            yaml_spec = build_yaml_spec(
+                job_spec, target_cif, renumber_map=renumber_map,
+            )
 
         if not yaml_spec.get("entities"):
             logger.error("yaml_spec must contain at least one entity")

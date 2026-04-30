@@ -38,6 +38,11 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+# pipeline_normalize.py is mounted alongside this script at /opt by
+# infrastructure/modal/pxdesign_app.py (.add_local_file). Adding /opt to
+# sys.path makes the bare module name importable.
+sys.path.insert(0, "/opt")
+
 import requests
 import yaml
 
@@ -453,11 +458,31 @@ def run_command(
     return head_tail
 
 
+_WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
+
+
+def _record_webhook_outcome(delivered: bool, detail: str) -> None:
+    """Persist webhook delivery status so the Modal wrapper can surface
+    it to tools-hub even when the POST silently fails. Read by run_tool()
+    in infrastructure/modal/pxdesign_app.py and merged into the function
+    return value, where tools-hub's ModalClient.poll() inspects it."""
+    try:
+        with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
+            json.dump({"delivered": delivered, "detail": detail}, fh)
+    except OSError as exc:
+        logger.error("Failed to write webhook outcome file: %s", exc)
+
+
 def post_webhook(
     webhook_url: str, job_id: str, pod_id: str, payload: dict,
 ) -> None:
     """POST results to the Kendrew backend webhook (webhook tier)."""
     if not webhook_url:
+        logger.error(
+            "post_webhook: empty webhook_url for job %s; cannot deliver result",
+            job_id,
+        )
+        _record_webhook_outcome(False, "empty webhook_url")
         return
     body = {
         "id": job_id,
@@ -476,29 +501,87 @@ def post_webhook(
     try:
         resp = requests.post(webhook_url, json=body, timeout=30)
         logger.info("Webhook response: %d", resp.status_code)
+        resp.raise_for_status()
+        _record_webhook_outcome(True, f"http {resp.status_code}")
     except Exception as exc:
         logger.error("Webhook POST failed: %s", exc)
+        _record_webhook_outcome(False, f"{type(exc).__name__}: {exc}")
 
 
 # ===========================================================================
 # CIF conversion and re-indexing
 # ===========================================================================
 
-def ensure_cif(input_path: str, work_dir: str) -> str:
+def ensure_cif(
+    input_path: str, work_dir: str, target_chain: str = "A",
+) -> tuple[str, dict]:
     """Convert the downloaded PDB into a PXDesign-ready mmCIF.
 
-    PXDesign's CIF reader looks up chains by ``label_asym_id``. gemmi's
-    ``make_mmcif_document()`` writes auto-generated subchain labels
-    (``Axp``, ``Ax1``) there when entities are set up, which means
-    PXDesign can't find the caller-provided chain name (``A``).
+    Returns a tuple ``(cif_path, renumber_map)``. The renumber_map is
+    ``{(chain_id, original_resnum): new_resnum}`` produced by the
+    Biopython normalizer, which residues are renumbered 1..N per chain.
+    Callers (``build_yaml_spec``) use it to rewrite hotspot indices into
+    the cleaned coordinate space — without this, user-supplied hotspots
+    silently point at the wrong residues for any input whose chain A
+    doesn't start at residue 1.
 
-    The safest fix is to write the CIF manually with ``label_asym_id ==
-    auth_asym_id == chain_name`` and only standard-20-AA polymer
-    residues. MSE, SEP, etc. are remapped to their parent codes first.
+    Pipeline (Bug 9 fix, 2026-04-30):
+      1. Sanitize with Biopython (``pipeline_normalize.normalize_for_pxdesign``):
+         drop waters, HETATM, hydrogens, altlocs, multi-model, MSE->MET,
+         filter to ``target_chain`` only, renumber 1..N. Result is a clean
+         single-chain PDB on disk.
+      2. Read that cleaned PDB with gemmi for the custom CIF write below.
+         ``setup_entities()`` is called defensively before any cleanup —
+         a no-op on a polymer-only structure but protects against gemmi
+         API drift.
+      3. Write the custom mmCIF (label_asym_id == auth_asym_id ==
+         chain_name) so PXDesign's CIF reader can find the chain by name.
     """
-    import gemmi
-    from gemmi import cif
+    from pipeline_normalize import normalize_for_pxdesign  # noqa: PLC0415
 
+    import gemmi  # noqa: PLC0415
+    from gemmi import cif  # noqa: PLC0415
+
+    # ---- Stage 1: Biopython sanitize + renumber ----
+    cleaned_pdb = os.path.join(work_dir, "cleaned.pdb")
+    norm_report = normalize_for_pxdesign(
+        input_path, cleaned_pdb, target_chain=target_chain,
+    )
+    logger.info(
+        "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
+        "residues_dropped=%s changes=%s",
+        norm_report.chains_kept, norm_report.chains_dropped,
+        norm_report.residues_kept_per_chain,
+        norm_report.residues_dropped_per_chain,
+        norm_report.changes,
+    )
+
+    # ---- Stage 2: gemmi CIF write (now operating on a clean polymer-only PDB) ----
+    structure = gemmi.read_structure(cleaned_pdb)
+    # Defensive: setup_entities derives _entity / _entity_poly metadata from
+    # SEQRES + heuristics. On a polymer-only structure this is a no-op for
+    # remove_ligands_and_waters but inexpensive insurance against gemmi
+    # version drift if the cleanup-call ordering ever changes again.
+    try:
+        structure.setup_entities()
+    except Exception as exc:  # pragma: no cover
+        logger.warning("setup_entities() raised %s; continuing", exc)
+    structure.remove_alternative_conformations()
+    structure.remove_hydrogens()
+    # remove_ligands_and_waters is now safe — the input is polymer-only —
+    # but kept as defense in depth.
+    try:
+        structure.remove_ligands_and_waters()
+    except Exception as exc:
+        logger.warning(
+            "remove_ligands_and_waters() raised %s post-normalize; continuing",
+            exc,
+        )
+    structure.remove_empty_chains()
+
+    # The MODRES_MAP and STANDARD_AA filter below is now mostly redundant
+    # (Biopython already applied them) but kept as belt-and-braces in case
+    # anything slipped through gemmi's own parser. The loop is cheap.
     STANDARD_AA = frozenset([
         "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
         "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
@@ -509,12 +592,6 @@ def ensure_cif(input_path: str, work_dir: str) -> str:
         "TPO": ("THR", {}), "PTR": ("TYR", {}), "KCX": ("LYS", {}),
         "HYP": ("PRO", {}), "LLP": ("LYS", {}),
     }
-
-    structure = gemmi.read_structure(input_path)
-    structure.remove_alternative_conformations()
-    structure.remove_hydrogens()
-    structure.remove_ligands_and_waters()
-    structure.remove_empty_chains()
 
     chains_data: dict[str, list[dict]] = {}
     modres_renames = 0
@@ -627,7 +704,7 @@ def ensure_cif(input_path: str, work_dir: str) -> str:
         cif_path, os.path.getsize(cif_path), atom_id,
         sum(kept_counts.values()),
     )
-    return cif_path
+    return cif_path, dict(norm_report.renumber_map)
 
 
 def get_chain_length(cif_path: str, chain_id: str) -> int:
@@ -650,15 +727,24 @@ def get_chain_length(cif_path: str, chain_id: str) -> int:
 def build_yaml_spec(
     job_spec: dict, target_cif_path: str, preset: str = "preview",
     num_designs: int | None = None, binder_length=None,
+    renumber_map: dict | None = None,
 ) -> dict:
     """Build PXDesign YAML task spec from job parameters.
 
     Reads the target CIF to determine chain length for the crop range.
     PXDesign requires crop as a list of string ranges, e.g. ["1-116"].
+
+    Hotspot remapping (Bug 9 fix): the CIF prep stage renumbers residues
+    1..N per chain. User-supplied hotspots refer to original PDB
+    numbering. ``renumber_map`` is ``{(chain, orig_resnum): new_resnum}``
+    produced by ``ensure_cif()``. We use it to rewrite each hotspot into
+    the new coordinate space before handing it to PXDesign. Hotspots
+    that fall outside the kept range (e.g. on a residue that was dropped
+    as non-standard) are logged and skipped.
     """
     params = job_spec.get("parameters", {})
     chain = job_spec.get("target_chain", "A")
-    hotspots = job_spec.get("hotspot_residues", [])
+    raw_hotspots = list(job_spec.get("hotspot_residues", []) or [])
 
     if binder_length is None:
         binder_length = params.get("binder_length", 80)
@@ -667,6 +753,32 @@ def build_yaml_spec(
 
     chain_length = get_chain_length(target_cif_path, chain)
     logger.info("Target chain %s has %d residues", chain, chain_length)
+
+    if renumber_map:
+        remapped: list = []
+        missing: list = []
+        for h in raw_hotspots:
+            try:
+                orig = int(h)
+            except (TypeError, ValueError):
+                missing.append(str(h))
+                continue
+            new = renumber_map.get((chain, orig))
+            if new is None:
+                missing.append(orig)
+            else:
+                remapped.append(new)
+        if missing:
+            logger.warning(
+                "build_yaml_spec: hotspot residues not found after cleanup "
+                "(skipped): %s. Original hotspots: %s. Chain %s has "
+                "renumber-map entries for residues: %s",
+                missing, raw_hotspots, chain,
+                sorted(r for c, r in renumber_map if c == chain)[:25],
+            )
+        hotspots = remapped
+    else:
+        hotspots = raw_hotspots
 
     chain_spec = {
         "crop": [f"1-{chain_length}"],
@@ -684,9 +796,10 @@ def build_yaml_spec(
     }
 
     logger.info(
-        "YAML spec: chain=%s, crop=[1-%d], hotspots=%s, binder_length=%s, "
-        "N_sample=%d, preset=%s",
-        chain, chain_length, hotspots, binder_length, num_designs, preset,
+        "YAML spec: chain=%s, crop=[1-%d], hotspots(orig=%s, mapped=%s), "
+        "binder_length=%s, N_sample=%d, preset=%s",
+        chain, chain_length, raw_hotspots, hotspots,
+        binder_length, num_designs, preset,
     )
     return yaml_spec
 
@@ -979,7 +1092,10 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
 
         # ----- Convert to CIF -----
         try:
-            target_cif = ensure_cif(target_input, work_dir)
+            target_chain = job_spec.get("target_chain", "A")
+            target_cif, renumber_map = ensure_cif(
+                target_input, work_dir, target_chain=target_chain,
+            )
         except Exception as exc:
             fail_compute("cif_conversion", f"{exc}\n{traceback.format_exc()}")
             return
@@ -991,6 +1107,7 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
                 preset=preset,
                 num_designs=num_designs,
                 binder_length=binder_length,
+                renumber_map=renumber_map,
             )
         except Exception as exc:
             fail_compute("yaml_build", f"{exc}\n{traceback.format_exc()}")
@@ -1217,12 +1334,16 @@ def run_webhook_tier(job_payload: dict) -> None:
         download_input(input_url, target_input)
         send_heartbeat(webhook_url, job_id, "Input downloaded", 0, num_designs)
 
-        target_cif = ensure_cif(target_input, work_dir)
+        target_chain = job_spec.get("target_chain", "A")
+        target_cif, renumber_map = ensure_cif(
+            target_input, work_dir, target_chain=target_chain,
+        )
 
         yaml_spec = build_yaml_spec(
             job_spec, target_cif,
             preset="preview",
             num_designs=num_designs,
+            renumber_map=renumber_map,
         )
         spec_path = os.path.join(work_dir, "spec.yaml")
         with open(spec_path, "w") as fh:
