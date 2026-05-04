@@ -10,10 +10,28 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PXDESIGN_DIR=/opt/pxdesign \
     CUTLASS_PATH=/opt/cutlass
 
-# ---------- System deps ----------
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl git cmake python3-pip python3-dev build-essential \
-    libffi-dev && \
+# ---------- System deps (resilient against Modal->Ubuntu archive blips) ----------
+# 2026-05-04: two consecutive `modal deploy` runs failed at this step with
+# "Unable to connect to archive.ubuntu.com:80" across all 8 round-robin IPs
+# (91.189.91.x / 185.125.190.x — Canonical's primary archive pool). Modal's
+# egress to that pool was broken for >15 minutes. Three layers of defense:
+#   1. Repoint sources.list to mirrors.kernel.org (kernel.org infra, not
+#      Canonical's). Different IP space, different network path.
+#   2. Configure apt to retry inside each get/install call (Acquire::Retries).
+#   3. Wrap apt-get with a bash retry loop + exponential backoff so a single
+#      mirror blip doesn't kill the build.
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu|http://mirrors.kernel.org/ubuntu|g; s|http://security.ubuntu.com/ubuntu|http://mirrors.kernel.org/ubuntu|g' /etc/apt/sources.list && \
+    printf 'Acquire::Retries "10";\nAcquire::http::Timeout "30";\n' > /etc/apt/apt.conf.d/80retries && \
+    cat /etc/apt/sources.list
+
+RUN attempt=0; \
+    until apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+            curl git cmake python3-pip python3-dev build-essential libffi-dev; do \
+      attempt=$((attempt+1)); \
+      if [ $attempt -ge 5 ]; then echo "apt-get failed after 5 attempts" && exit 1; fi; \
+      echo "apt-get attempt $attempt failed, retrying in $((attempt*30))s"; \
+      sleep $((attempt*30)); \
+    done && \
     ln -sf /usr/bin/python3 /usr/bin/python && \
     python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
     rm -rf /var/lib/apt/lists/*
@@ -136,6 +154,54 @@ RUN echo "=== Weight validation ===" && \
     ls -lh $PXDESIGN_DIR/tool_weights/ccd/ && \
     echo "Weight download complete"
 
+# ---------- Pre-bake pxdesign inference cache (incident 2026-05-04 c8eba974) ----------
+# pxdesign/utils/infer.py:download_inference_cache() downloads 7 files from
+# pxdesign.tos-cn-beijing.volces.com on first runtime invocation. urllib's
+# urlretrieve has zero retry support; on 2026-05-04 a TLS UNEXPECTED_EOF at
+# 98% killed a paying pilot run with no recovery path.
+#
+# Fix: pre-fetch all 7 files at image build time using curl with aggressive
+# retries. infer.py guards every download with `if not os.path.exists(...)`,
+# so pre-baked files skip the runtime download entirely. Use `.tmp` + atomic
+# rename so a build-time failure can't leave partial files that pass the
+# existence check at runtime.
+#
+# Default paths (per upstream README):
+#   model checkpoints -> $PXDESIGN_DIR/release_data/checkpoint/
+#   data caches       -> $PXDESIGN_DIR/release_data/ccd_cache/
+# pxdesign resolves load_checkpoint_dir relative to its own working dir,
+# which run_pipeline.py:1001 sets to PXDESIGN_DIR via cwd=PXDESIGN_DIR.
+RUN mkdir -p $PXDESIGN_DIR/release_data/checkpoint && \
+    cd $PXDESIGN_DIR/release_data/checkpoint && \
+    for f in pxdesign_v0.1.0.pt protenix_base_default_v0.5.0.pt \
+             protenix_mini_default_v0.5.0.pt protenix_mini_tmpl_v0.5.0.pt; do \
+      echo ">>> baking checkpoint: $f" && \
+      curl -fL --retry 15 --retry-delay 20 --retry-max-time 1800 --retry-all-errors \
+        --connect-timeout 30 \
+        -o "$f.tmp" \
+        "https://pxdesign.tos-cn-beijing.volces.com/release_model/$f" && \
+      mv "$f.tmp" "$f" && \
+      echo "$f: $(du -h "$f" | cut -f1)"; \
+    done && \
+    echo "Inference checkpoints baked: $(ls -lh $PXDESIGN_DIR/release_data/checkpoint/)"
+
+RUN mkdir -p $PXDESIGN_DIR/release_data/ccd_cache && \
+    cd $PXDESIGN_DIR/release_data/ccd_cache && \
+    for f in components.v20240608.cif components.v20240608.cif.rdkit_mol.pkl clusters-by-entity-40.txt; do \
+      echo ">>> baking data file: $f" && \
+      curl -fL --retry 15 --retry-delay 20 --retry-max-time 1800 --retry-all-errors \
+        --connect-timeout 30 \
+        -o "$f.tmp" \
+        "https://pxdesign.tos-cn-beijing.volces.com/release_data/$f" && \
+      mv "$f.tmp" "$f" && \
+      echo "$f: $(du -h "$f" | cut -f1)"; \
+    done && \
+    echo "Inference data caches baked: $(ls -lh $PXDESIGN_DIR/release_data/ccd_cache/)"
+
+# Tell pxdesign where to find the pre-baked CCD cache. (load_checkpoint_dir is
+# resolved via cwd=PXDESIGN_DIR at runtime; no env override needed for it.)
+ENV PROTENIX_DATA_ROOT_DIR=$PXDESIGN_DIR/release_data/ccd_cache
+
 # ---------- Pipeline utilities ----------
 RUN python3 -m pip install --no-cache-dir \
     gemmi \
@@ -166,6 +232,13 @@ RUN python3 -c "import protenix; print('protenix OK')" && \
     test -d $PXDESIGN_DIR/tool_weights/mpnn/ca_model_weights && echo "mpnn ca weights OK" && \
     test -f $PXDESIGN_DIR/tool_weights/ccd/components.cif && echo "ccd OK" && \
     test -f $PXDESIGN_DIR/tool_weights/ccd/clusters-by-entity-40.txt && echo "clusters OK" && \
+    test -f $PXDESIGN_DIR/release_data/checkpoint/pxdesign_v0.1.0.pt && echo "pxdesign ckpt OK" && \
+    test -f $PXDESIGN_DIR/release_data/checkpoint/protenix_base_default_v0.5.0.pt && echo "protenix base ckpt OK" && \
+    test -f $PXDESIGN_DIR/release_data/checkpoint/protenix_mini_default_v0.5.0.pt && echo "protenix mini ckpt OK" && \
+    test -f $PXDESIGN_DIR/release_data/checkpoint/protenix_mini_tmpl_v0.5.0.pt && echo "protenix mini tmpl ckpt OK" && \
+    test -f $PXDESIGN_DIR/release_data/ccd_cache/components.v20240608.cif && echo "ccd v20240608 OK" && \
+    test -f $PXDESIGN_DIR/release_data/ccd_cache/components.v20240608.cif.rdkit_mol.pkl && echo "ccd rdkit pkl OK" && \
+    test -f $PXDESIGN_DIR/release_data/ccd_cache/clusters-by-entity-40.txt && echo "pdb cluster v0.5 OK" && \
     which pxdesign && echo "pxdesign CLI on PATH"
 
 # NOTE: no COPY run_pipeline.py or CMD — Modal invokes @app.function bodies.
