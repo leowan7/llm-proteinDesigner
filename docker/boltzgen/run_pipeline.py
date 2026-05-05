@@ -1473,11 +1473,11 @@ def main():
             all_designs.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
             passing = all_designs[: max(1, budget)]
             for d in passing:
-                d["scores"]["filter_status"] = "fail (pilot fallback)"
+                d["scores"]["filter_status"] = "below threshold"
             logger.warning(
                 "No designs passed production thresholds; pilot fallback emitting "
-                "top %d by ipTM (all marked filter_status=fail) so validation "
-                "succeeds.",
+                "top %d by ipTM (all marked filter_status='below threshold') so "
+                "validation succeeds.",
                 len(passing),
             )
         design_files = find_design_files(output_dir, budget)

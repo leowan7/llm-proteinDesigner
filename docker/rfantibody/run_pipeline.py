@@ -1289,17 +1289,17 @@ def main():
         # passes pAE<=10 AND pLDDT>=80 AND ipAE<=10, which would leave
         # `candidates=[]` and fail downstream E2E checks even though the
         # pipeline worked end-to-end. Emit the top designs by ipAE regardless
-        # of quality, mark filter_status="fail (pilot fallback)" so callers
-        # can tell pilots apart from real runs.
+        # of quality, mark filter_status="below threshold" so callers can
+        # tell pilots apart from real runs.
         if not passing and tier == "pilot" and all_designs:
             all_designs.sort(key=lambda d: d["scores"].get("ipAE", 99.0))
             passing = all_designs[:2]
             for d in passing:
-                d["scores"]["filter_status"] = "fail (pilot fallback)"
+                d["scores"]["filter_status"] = "below threshold"
             logger.warning(
                 "No designs passed production thresholds; pilot fallback "
-                "emitting top %d by ipAE (all marked filter_status=fail) so "
-                "validation succeeds.",
+                "emitting top %d by ipAE (all marked filter_status='below "
+                "threshold') so validation succeeds.",
                 len(passing),
             )
 
