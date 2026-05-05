@@ -59,7 +59,12 @@ RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
     echo "scFv framework OK"
 
 # ---------- Pipeline utilities ----------
-RUN pip install --no-cache-dir requests
+# biopython is required by backend/pdb_utils/pipeline_normalize.py, which is
+# mounted at /opt by the Modal wrapper and called from run_pipeline.py for
+# Bug-9 PDB sanitization (multi-model NMR, altlocs, MSE->MET, water/HETATM).
+# Without it the pipeline fails fast with "PDB sanitize failed: No module
+# named 'Bio'" before any GPU work runs.
+RUN pip install --no-cache-dir requests biopython
 
 # ---------- Layer 1 fail-fast build-time checks ----------
 # Any failure here fails `modal deploy` before GPU is spent on a broken image.
@@ -81,6 +86,7 @@ RUN echo "=== Layer 1 fail-fast checks ===" && \
     which qvextract && qvextract --help > /dev/null && echo "qvextract CLI OK" && \
     python -c "import torch; assert torch.__version__.startswith(('2.3', '2.4')), torch.__version__; print('torch', torch.__version__)" && \
     python -c "import rfantibody; print('rfantibody import OK')" && \
+    python -c "from Bio.PDB import PDBParser; print('biopython import OK')" && \
     echo "=== All Layer 1 checks passed ==="
 
 # NOTE: no COPY run_pipeline.py or CMD — Modal invokes @app.function bodies.

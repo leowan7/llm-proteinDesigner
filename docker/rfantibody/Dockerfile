@@ -54,7 +54,8 @@ RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
     echo "scFv framework OK"
 
 # ---------- Pipeline utilities ----------
-RUN pip install --no-cache-dir requests
+# biopython is required by pipeline_normalize.py for Bug-9 PDB sanitization.
+RUN pip install --no-cache-dir requests biopython
 
 # ---------- Pipeline script ----------
 COPY run_pipeline.py /opt/run_pipeline.py
