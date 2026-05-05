@@ -1328,7 +1328,9 @@ def main():
     protocol = params.get("protocol", "protein-anything")
     num_designs = params.get("num_designs", 10000)
     # Pilot tier clamps budget to 5; honour it container-side as well.
-    default_budget = 5 if job_spec.get("job_tier") == "pilot" else 60
+    # tier is read from job_payload (line ~1296), not job_spec — the wrapper
+    # keys (job_tier/tier) sit at the payload level, not inside job_spec.
+    default_budget = 5 if tier == "pilot" else 60
     budget = params.get("budget", default_budget)
 
     pipeline_start = time.time()
@@ -1467,7 +1469,7 @@ def main():
         # prove the MinIO-upload / webhook / parse_results path works. The
         # filter_status field records that these didn't pass production
         # thresholds so downstream agents know not to trust the score.
-        if not passing and job_spec.get("job_tier") == "pilot" and all_designs:
+        if not passing and tier == "pilot" and all_designs:
             all_designs.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
             passing = all_designs[: max(1, budget)]
             for d in passing:
