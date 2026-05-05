@@ -1361,7 +1361,7 @@ def main():
         # pipeline worked end-to-end. Emit the top designs by ipTM regardless
         # of quality, mark filter_status="fail (pilot fallback)" so callers
         # can tell pilots apart from real runs.
-        if not passing and job_spec.get("job_tier") == "pilot" and af2_results:
+        if not passing and tier == "pilot" and af2_results:
             af2_results.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
             passing = af2_results[:2]
             for r in passing:

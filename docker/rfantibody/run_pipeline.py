@@ -1291,7 +1291,7 @@ def main():
         # pipeline worked end-to-end. Emit the top designs by ipAE regardless
         # of quality, mark filter_status="fail (pilot fallback)" so callers
         # can tell pilots apart from real runs.
-        if not passing and job_spec.get("job_tier") == "pilot" and all_designs:
+        if not passing and tier == "pilot" and all_designs:
             all_designs.sort(key=lambda d: d["scores"].get("ipAE", 99.0))
             passing = all_designs[:2]
             for d in passing:
