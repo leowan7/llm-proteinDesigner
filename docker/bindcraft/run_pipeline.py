@@ -412,10 +412,13 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     # design name; the Accepted/*.pdb filename adds a "_modelN" suffix
     # (the top AF2 model picked for that design). We key by Design.
     metrics_by_name = {}
+    csv_columns: list[str] = []
     if os.path.exists(csv_path):
         try:
             with open(csv_path) as fh:
                 reader = csv.DictReader(fh)
+                csv_columns = list(reader.fieldnames or [])
+                logger.info("BindCraft CSV columns: %s", csv_columns)
                 for row in reader:
                     name = row.get("Design", "") or row.get("design_name", "") or row.get("name", "")
                     if name:
@@ -430,16 +433,40 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     # We prefer the "Average_*" aggregate across AF2 models since Accepted/
     # PDBs correspond to the highest-scoring model but downstream display
     # uses the aggregate for ranking parity with other tools.
+    #
+    # The template (tools-hub/templates/tools/bindcraft_results.html) renders
+    # 5 columns: ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
+    # populated here or the table renders an em-dash. We accept multiple CSV
+    # column names per canonical key because FreeBindCraft (cytokineking fork)
+    # ships a different column layout than upstream BindCraft and naming has
+    # drifted across versions — earlier dict entries lose to later ones, so
+    # the most common name should appear last for each canonical key.
     _METRIC_MAP = {
+        # ipTM
         "Average_i_pTM": "ipTM",
+        # pLDDT
         "Average_pLDDT": "pLDDT",
+        # pTM (overall)
         "Average_pTM": "pTM",
+        # Interface pAE
         "Average_Binder_pAE": "i_pAE",
-        "Average_Binder_RMSD": "Binder_RMSD",
+        "Average_i_pAE": "i_pAE",
+        # Binder RMSD — template column header is "RMSD"; this is the headline
+        # value (binder fold deviation from the AF2 redocked prediction).
+        "Average_Binder_RMSD": "RMSD",
+        # Hotspot / target RMSDs surface as secondary columns if requested.
         "Average_Hotspot_RMSD": "Hotspot_RMSD",
         "Average_Target_RMSD": "Target_RMSD",
+        # Shape complementarity — accept prefixed + unprefixed across versions.
         "ShapeComplementarity": "shape_complementarity",
+        "Average_Shape_Complementarity": "shape_complementarity",
+        "Average_ShapeComplementarity": "shape_complementarity",
+        # SAP (Spatial Aggregation Propensity) / surface hydrophobicity.
+        # FreeBindCraft writes Average_Surface_Hydrophobicity by default;
+        # legacy / alternate naming covered for forward compat.
         "HydrophobicityScore": "SAP",
+        "Average_Binder_Surface_Hydrophobicity": "SAP",
+        "Average_Surface_Hydrophobicity": "SAP",
     }
 
     candidates = []
