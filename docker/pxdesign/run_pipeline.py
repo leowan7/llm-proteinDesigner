@@ -884,9 +884,22 @@ def parse_summary_csv(csv_path: str) -> list[dict]:
                     break
             scores["filter_status"] = filter_status
 
+            # PXDesign's summary.csv ships a chosen_struct_path column
+            # pointing directly at the produced PDB/CIF. Capture it so the
+            # downstream candidate loop can resolve local_file even when
+            # the CSV has no design_name/name/sample column to match
+            # against the design_files glob index (which fails the
+            # substring match for the synthetic "design_N" fallback name).
+            chosen_path = (
+                row_lower.get("chosen_struct_path")
+                or row_lower.get("chosen_struct_path_relative")
+                or ""
+            ).strip()
+
             results.append({
                 "design_name": design_name,
                 "scores": scores,
+                "chosen_struct_path": chosen_path,
             })
 
     logger.info("Parsed %d entries from summary.csv", len(results))
@@ -1200,7 +1213,12 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
             rank = rank_idx + 1
             design_name = result["design_name"]
 
-            local_path = design_files.get(design_name)
+            # Prefer chosen_struct_path from the CSV when present — most
+            # authoritative path to the structure file.
+            chosen_path = (result.get("chosen_struct_path") or "").strip()
+            local_path = chosen_path if chosen_path and os.path.exists(chosen_path) else None
+            if not local_path:
+                local_path = design_files.get(design_name)
             if not local_path:
                 # Try stem-based matching.
                 local_path = design_files.get(Path(design_name).stem)
@@ -1431,7 +1449,13 @@ def run_webhook_tier(job_payload: dict) -> None:
         for rank_idx, result in enumerate(passing):
             rank = rank_idx + 1
             design_name = result["design_name"]
-            local_path = design_files.get(design_name)
+            # Prefer the CSV's chosen_struct_path when available — it's the
+            # authoritative path to the produced structure file. Fall back
+            # to the design_files glob index for older CSV variants.
+            chosen_path = (result.get("chosen_struct_path") or "").strip()
+            local_path = chosen_path if chosen_path and os.path.exists(chosen_path) else None
+            if not local_path:
+                local_path = design_files.get(design_name)
             if not local_path:
                 for key, fpath in design_files.items():
                     if design_name in key or key in design_name:
