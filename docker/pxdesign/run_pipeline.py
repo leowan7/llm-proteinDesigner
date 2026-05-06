@@ -1478,11 +1478,43 @@ def run_webhook_tier(job_payload: dict) -> None:
                     logger.warning("Metrics CSV upload failed: %s", exc)
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
+        # Inline base64 of each candidate's PDB so candidate_table.html can
+        # render the 3D-viewer + PDB-download buttons (otherwise it falls
+        # through to the em-dash branch keyed on pdb_content_b64). Mirrors
+        # the smoke path's _candidate_from_design helper at line 1045.
+        # PXDesign emits .cif or .pdb depending on output config — convert
+        # CIF -> PDB via gemmi before encoding so the frontend mol viewer
+        # gets a consistent format.
+        webhook_candidates: list[dict] = []
+        for c in candidates:
+            entry = {
+                "rank": c["rank"],
+                "pdb_key": c["pdb_key"],
+                "scores": c["scores"],
+            }
+            local_file = c.get("local_file")
+            if local_file and os.path.exists(local_file):
+                try:
+                    final_path = local_file
+                    if local_file.endswith(".cif"):
+                        import gemmi
+                        pdb_out = os.path.join(
+                            work_dir, f"webhook_design_{c['rank']:03d}.pdb",
+                        )
+                        gemmi.read_structure(local_file).write_pdb(pdb_out)
+                        final_path = pdb_out
+                    entry["pdb_content_b64"] = base64.b64encode(
+                        Path(final_path).read_bytes(),
+                    ).decode()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to encode PDB for rank %d (%s): %s",
+                        c["rank"], local_file, exc,
+                    )
+            webhook_candidates.append(entry)
+
         post_webhook(webhook_url, job_id, pod_id, {
-            "candidates": [
-                {"rank": c["rank"], "pdb_key": c["pdb_key"], "scores": c["scores"]}
-                for c in candidates
-            ],
+            "candidates": webhook_candidates,
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "runtime_minutes": round(elapsed_minutes, 1),
