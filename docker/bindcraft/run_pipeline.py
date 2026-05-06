@@ -685,11 +685,12 @@ def main():
         )
 
         # ----- POST results to webhook -----
+        # Pass webhook_candidates through unchanged so pdb_content_b64
+        # survives to the frontend; the earlier list-comprehension rebuild
+        # was stripping it and falling back to em-dashes in the 3D / PDB
+        # columns of candidate_table.html.
         result_payload = {
-            "candidates": [
-                {"rank": c["rank"], "pdb_key": c["pdb_key"], "scores": c["scores"]}
-                for c in webhook_candidates
-            ],
+            "candidates": webhook_candidates,
             "candidate_count": len(webhook_candidates),
             "total_designs_requested": num_designs,
             "runtime_minutes": round(elapsed_minutes, 1),
