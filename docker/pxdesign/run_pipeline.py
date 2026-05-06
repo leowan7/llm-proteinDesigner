@@ -1386,6 +1386,8 @@ def run_webhook_tier(job_payload: dict) -> None:
         parsed_results = parse_summary_csv(summary_csv)
         design_files = find_design_files(output_dir)
 
+        tier = (job_payload.get("tier") or "").strip().lower()
+
         passing = []
         for result in parsed_results:
             scores = result["scores"]
@@ -1403,6 +1405,26 @@ def run_webhook_tier(job_payload: dict) -> None:
                 passing.append(result)
 
         passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+
+        # Pilot fallback: when no design clears the production threshold,
+        # surface the top-ipTM rows with filter_status="below threshold" so
+        # users see the score distribution rather than an empty candidates
+        # table. Mirrors rfdiffusion / rfantibody / boltzgen pilot fallback
+        # (Kendrew commit d19080c). Only fires at pilot tier — sprint/full
+        # keep strict filtering since deeper sampling makes a true zero a
+        # real signal.
+        if not passing and tier == "pilot" and parsed_results:
+            parsed_results.sort(
+                key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True,
+            )
+            passing = parsed_results[:2]
+            for r in passing:
+                r["scores"]["filter_status"] = "below threshold"
+            logger.info(
+                "Pilot fallback: 0/%d designs cleared thresholds; surfacing "
+                "top %d by ipTM with filter_status='below threshold'",
+                len(parsed_results), len(passing),
+            )
 
         candidates = []
         filenames_to_upload = []
