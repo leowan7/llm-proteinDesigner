@@ -1405,6 +1405,7 @@ def main():
                 "pdb_key": pdb_key,
                 "scores": r["scores"],
                 "sequence": r["sequence"],
+                "local_file": backbone_pdb,
             }
             candidates.append(candidate)
 
@@ -1432,11 +1433,30 @@ def main():
         )
 
         # ----- POST results to webhook -----
+        # Inline base64 of each candidate's PDB so candidate_table.html can
+        # render the 3D-viewer + PDB-download buttons (otherwise it falls
+        # through to the em-dash branch keyed on pdb_content_b64). Mirrors
+        # the smoke path at line 418.
+        webhook_candidates: list[dict] = []
+        for c in candidates:
+            entry = {
+                "rank": c["rank"],
+                "pdb_key": c["pdb_key"],
+                "scores": c["scores"],
+            }
+            local_file = c.get("local_file")
+            if local_file and os.path.exists(local_file):
+                try:
+                    entry["pdb_content_b64"] = _encode_pdb(local_file)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to read PDB for rank %d (%s): %s",
+                        c["rank"], local_file, exc,
+                    )
+            webhook_candidates.append(entry)
+
         result_payload = {
-            "candidates": [
-                {"rank": c["rank"], "pdb_key": c["pdb_key"], "scores": c["scores"]}
-                for c in candidates
-            ],
+            "candidates": webhook_candidates,
             "candidate_count": len(candidates),
             "total_designs": len(backbone_pdbs),
             "af2_validated": len(af2_results),
