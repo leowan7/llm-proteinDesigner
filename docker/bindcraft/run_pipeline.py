@@ -24,6 +24,7 @@ Pipeline:
   6. POST results to webhook
 """
 
+import base64
 import csv
 import datetime
 import json
@@ -637,6 +638,21 @@ def main():
                 "pdb_key": pdb_key,
                 "scores": candidate["scores"],
             }
+            # Inline base64 of the PDB so candidate_table.html can render
+            # the 3D-viewer + PDB-download buttons (otherwise it falls
+            # through to the em-dash branch). BindCraft writes PDBs
+            # directly so no CIF conversion needed.
+            if pdb_path and os.path.exists(pdb_path):
+                try:
+                    pdb_bytes = Path(pdb_path).read_bytes()
+                    webhook_candidate["pdb_content_b64"] = base64.b64encode(
+                        pdb_bytes,
+                    ).decode("ascii")
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to read PDB for rank %d (%s): %s",
+                        rank, pdb_path, exc,
+                    )
             webhook_candidates.append(webhook_candidate)
 
             if upload_filename in upload_urls and os.path.exists(pdb_path):
