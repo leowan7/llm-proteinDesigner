@@ -55,7 +55,9 @@ RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
 
 # ---------- Pipeline utilities ----------
 # biopython is required by pipeline_normalize.py for Bug-9 PDB sanitization.
-RUN pip install --no-cache-dir requests biopython
+# Install into the rfantibody venv (uv sync creates a pip-less venv; use
+# `uv pip install --python <venv-python>` to target the venv's site-packages).
+RUN uv pip install --no-cache --python $RFANTIBODY_DIR/.venv/bin/python requests biopython
 
 # ---------- Pipeline script ----------
 COPY run_pipeline.py /opt/run_pipeline.py

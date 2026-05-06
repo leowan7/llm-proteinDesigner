@@ -64,7 +64,13 @@ RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
 # Bug-9 PDB sanitization (multi-model NMR, altlocs, MSE->MET, water/HETATM).
 # Without it the pipeline fails fast with "PDB sanitize failed: No module
 # named 'Bio'" before any GPU work runs.
-RUN pip install --no-cache-dir requests biopython
+#
+# Install into the rfantibody venv (uv sync creates a pip-less venv, so we
+# can't call `.venv/bin/pip` directly). `uv pip install --python <path>`
+# targets the venv's interpreter explicitly, dropping packages into its
+# site-packages. requests is already pulled in by upstream RFantibody's
+# `uv sync`; we keep the explicit install as defense in case upstream drops it.
+RUN uv pip install --no-cache --python $RFANTIBODY_DIR/.venv/bin/python requests biopython
 
 # ---------- Layer 1 fail-fast build-time checks ----------
 # Any failure here fails `modal deploy` before GPU is spent on a broken image.
