@@ -22,6 +22,7 @@ Pipeline stages:
   5. qvextract    — extract passing PDB files for upload
 """
 
+import base64
 import contextlib
 import csv
 import datetime
@@ -1304,11 +1305,14 @@ def main():
             )
 
         # ----- Prepare upload list -----
+        # Use a separate counter for emitted rank so designs without a
+        # matching PDB (which `continue` past) don't leave rank gaps in
+        # the surviving candidates (mirrors the boltzgen fix).
         candidates = []
         filenames_to_upload = []
+        emitted_rank = 0
 
-        for rank_idx, design in enumerate(passing):
-            rank = rank_idx + 1
+        for design in passing:
             design_name = design["design_name"]
 
             # Match design to extracted PDB
@@ -1325,6 +1329,9 @@ def main():
                     design_name, list(pdb_map.keys())[:10],
                 )
                 continue
+
+            emitted_rank += 1
+            rank = emitted_rank
 
             upload_filename = f"design_{rank:03d}.pdb"
             filenames_to_upload.append(upload_filename)
@@ -1384,15 +1391,31 @@ def main():
         )
 
         # ----- POST results to webhook -----
+        # Inline base64 of each candidate's PDB so candidate_table.html can
+        # render the 3D-viewer + PDB-download buttons (otherwise it falls
+        # through to the em-dash branch keyed on pdb_content_b64). Mirrors
+        # the smoke/mini_pilot path at line 1052.
+        webhook_candidates: list[dict] = []
+        for c in candidates:
+            entry = {
+                "rank": c["rank"],
+                "pdb_key": c["pdb_key"],
+                "scores": c["scores"],
+            }
+            local_file = c.get("local_file")
+            if local_file and os.path.exists(local_file):
+                try:
+                    pdb_bytes = Path(local_file).read_bytes()
+                    entry["pdb_content_b64"] = base64.b64encode(pdb_bytes).decode("ascii")
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to read PDB for rank %d (%s): %s",
+                        c["rank"], local_file, exc,
+                    )
+            webhook_candidates.append(entry)
+
         result_payload = {
-            "candidates": [
-                {
-                    "rank": c["rank"],
-                    "pdb_key": c["pdb_key"],
-                    "scores": c["scores"],
-                }
-                for c in candidates
-            ],
+            "candidates": webhook_candidates,
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "rf2_scored": len(all_designs),
