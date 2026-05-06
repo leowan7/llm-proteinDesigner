@@ -1493,11 +1493,16 @@ def main():
                     design_file_map[stem[len(prefix):]] = fpath
 
         # ----- Prepare upload list -----
+        # rank_idx is the index into `passing`, but designs without a matching
+        # structure file get skipped — so we can't use rank_idx for the
+        # candidate rank or we end up with gaps (e.g. rank=5 for the only
+        # surviving candidate). Use a separate counter that only advances
+        # when we actually keep a design.
         candidates = []
         filenames_to_upload = []
+        emitted_rank = 0
 
-        for rank_idx, design in enumerate(passing):
-            rank = rank_idx + 1
+        for design in passing:
             design_name = design["design_name"]
 
             # Try exact match, then fuzzy match
@@ -1515,6 +1520,9 @@ def main():
                     design_name, list(design_file_map.keys())[:10],
                 )
                 continue
+
+            emitted_rank += 1
+            rank = emitted_rank
 
             ext = Path(design_file).suffix  # .cif or .pdb
             upload_filename = f"design_{rank:03d}{ext}"
@@ -1597,15 +1605,32 @@ def main():
                 "proceeding: " + "; ".join(ubi_warnings)
             )
 
+        # Build candidates with inline base64 PDBs so the tools-hub frontend
+        # can render the 3D viewer + PDB-download buttons. Without this the
+        # candidate_table.html template falls back to the em-dash branch
+        # because it keys off cand.pdb_content_b64. Mirrors the smoke/
+        # mini_pilot path (line 496) for consistency.
+        webhook_candidates: list[dict] = []
+        for c in candidates:
+            entry = {
+                "rank": c["rank"],
+                "pdb_key": c["pdb_key"],
+                "scores": c["scores"],
+            }
+            local_file = c.get("local_file")
+            if local_file and os.path.exists(local_file):
+                try:
+                    pdb_path = _ensure_pdb_output(local_file, work_dir, c["rank"])
+                    entry["pdb_content_b64"] = _encode_pdb(pdb_path)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to encode PDB for rank %d (%s): %s",
+                        c["rank"], local_file, exc,
+                    )
+            webhook_candidates.append(entry)
+
         result_payload = {
-            "candidates": [
-                {
-                    "rank": c["rank"],
-                    "pdb_key": c["pdb_key"],
-                    "scores": c["scores"],
-                }
-                for c in candidates
-            ],
+            "candidates": webhook_candidates,
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "boltzgen_scored": len(all_designs),
