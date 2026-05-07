@@ -1141,10 +1141,18 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
         List of dicts with design_name and scores.
     """
     # BoltzGen metrics value order of preference for each canonical score key.
+    # IMPORTANT: For de novo binder design (no native binder reference) BoltzGen
+    # ships the `native_rmsd_*` columns as 0.0, not NaN — so they MUST come
+    # AFTER the actual refolding self-RMSD columns or every binder shows
+    # RMSD=0.00. The "Refolding RMSD" UI label refers to a structure-vs-
+    # refolded-from-sequence comparison, which lives in `designfolding-bb_rmsd`
+    # and `bb_rmsd`, not in any `native_rmsd_*`.
     RMSD_KEYS = [
+        "designfolding-bb_rmsd", "bb_rmsd",
+        "refolding_rmsd",
         "native_rmsd_bb_refolded", "native_rmsd_refolded",
-        "designfolding-bb_rmsd", "bb_rmsd", "native_rmsd_bb", "native_rmsd",
-        "refolding_rmsd", "rmsd", "RMSD", "design_rmsd", "ca_rmsd",
+        "native_rmsd_bb", "native_rmsd",
+        "rmsd", "RMSD", "design_rmsd", "ca_rmsd",
     ]
     IPTM_KEYS = [
         "iptm", "ipTM", "iPTM", "design_iptm", "protein_iptm",
@@ -1460,26 +1468,10 @@ def main():
             })
             return
 
-        # ----- Filter and rank -----
-        passing = filter_and_rank(all_designs)
-        # Pilot tier fallback: E2E pipeline validation must not be gated by
-        # design quality — a pilot with a random target + low num_designs
-        # often produces designs below production thresholds. Upload the top
-        # N by ipTM regardless so the job can COMPLETE with candidates and
-        # prove the MinIO-upload / webhook / parse_results path works. The
-        # filter_status field records that these didn't pass production
-        # thresholds so downstream agents know not to trust the score.
-        if not passing and tier == "pilot" and all_designs:
-            all_designs.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
-            passing = all_designs[: max(1, budget)]
-            for d in passing:
-                d["scores"]["filter_status"] = "below threshold"
-            logger.warning(
-                "No designs passed production thresholds; pilot fallback emitting "
-                "top %d by ipTM (all marked filter_status='below threshold') so "
-                "validation succeeds.",
-                len(passing),
-            )
+        # ----- Build structure file map (needed up front so the pilot fallback
+        # can intersect ipTM-top-N with designs that actually have structures
+        # on disk; BoltzGen only writes CIFs for its own internally-ranked
+        # final_5_designs/, so a pure top-by-ipTM fallback drops 4/5 designs).
         design_files = find_design_files(output_dir, budget)
 
         # Build a lookup from design name stem to file path
@@ -1491,6 +1483,42 @@ def main():
             for prefix in ["design_", "ranked_", "sample_"]:
                 if stem.startswith(prefix):
                     design_file_map[stem[len(prefix):]] = fpath
+
+        def _has_structure_file(design_name: str) -> bool:
+            """Return True if the design has a matching CIF/PDB on disk."""
+            if design_name in design_file_map:
+                return True
+            for key in design_file_map:
+                if design_name in key or key in design_name:
+                    return True
+            return False
+
+        # ----- Filter and rank -----
+        passing = filter_and_rank(all_designs)
+        # Pilot tier fallback: E2E pipeline validation must not be gated by
+        # design quality — a pilot with a random target + low num_designs
+        # often produces designs below production thresholds. Upload the top
+        # N by ipTM regardless so the job can COMPLETE with candidates and
+        # prove the MinIO-upload / webhook / parse_results path works. The
+        # filter_status field records that these didn't pass production
+        # thresholds so downstream agents know not to trust the score.
+        # IMPORTANT: only consider designs that actually have a structure file
+        # — BoltzGen writes CIFs only for its own internally-ranked top-N, so
+        # a naive top-by-ipTM fallback drops most candidates silently and
+        # leaves the user with 1 candidate when the UI promises up to budget.
+        if not passing and tier == "pilot" and all_designs:
+            structured = [d for d in all_designs if _has_structure_file(d["design_name"])]
+            structured.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+            passing = structured[: max(1, budget)]
+            for d in passing:
+                d["scores"]["filter_status"] = "below threshold"
+            logger.warning(
+                "No designs passed production thresholds; pilot fallback "
+                "emitting top %d by ipTM (filtered to designs with structure "
+                "files; all marked filter_status='below threshold') so "
+                "validation succeeds.",
+                len(passing),
+            )
 
         # ----- Prepare upload list -----
         # rank_idx is the index into `passing`, but designs without a matching
