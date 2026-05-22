@@ -6,7 +6,7 @@
 <domain>
 ## Phase Boundary
 
-Get Kendrew live on `kendrew.ai` and reachable by external users on production infrastructure. Hosting, DNS, SSL, secrets, CI/CD deploy flow, webhook secret rotation, and monitoring wiring built on Phase 5 (hardening), Phase 9 (testing/CI), and Phase 10 (legal). No new product features. Modal is the primary GPU provider (per Phase 10); the ROADMAP line naming RunPod is out of date and must be corrected as part of this phase.
+Get Kendrew live on `bindwave.com` and reachable by external users on production infrastructure. Hosting, DNS, SSL, secrets, CI/CD deploy flow, webhook secret rotation, and monitoring wiring built on Phase 5 (hardening), Phase 9 (testing/CI), and Phase 10 (legal). No new product features. Modal is the primary GPU provider (per Phase 10); the ROADMAP line naming RunPod is out of date and must be corrected as part of this phase.
 
 </domain>
 
@@ -15,16 +15,16 @@ Get Kendrew live on `kendrew.ai` and reachable by external users on production i
 
 ### Domains + Environments
 
-- **D-01:** Production DNS layout: `kendrew.ai` serves the frontend (Vercel), `app.kendrew.ai` serves the backend API (Railway). Matches existing Phase 3 research references and email sender (`jobs@kendrew.ai`).
-- **D-02:** DNS provider is Cloudflare — reuses the account already handling R2 and cloudflared tunnels. `kendrew.ai` apex proxied (orange cloud). `app.kendrew.ai` DNS-only (grey cloud) so Railway's LetsEncrypt validation and SSE streams work unmodified.
+- **D-01:** Production DNS layout: `bindwave.com` serves the frontend (Vercel), `app.bindwave.com` serves the backend API (Railway). Matches existing Phase 3 research references and email sender (`jobs@bindwave.com`).
+- **D-02:** DNS provider is Cloudflare — reuses the account already handling R2 and cloudflared tunnels. `bindwave.com` apex proxied (orange cloud). `app.bindwave.com` DNS-only (grey cloud) so Railway's LetsEncrypt validation and SSE streams work unmodified.
 - **D-03:** Full prod + staging split. Each platform gets a staging instance alongside prod:
   - Railway: `kendrew-backend-staging` + `kendrew-backend-prod` services (and matching worker services).
-  - Vercel: staging preview alias on a non-prod domain (e.g. `staging.kendrew.ai` CNAME) + prod on `kendrew.ai`.
+  - Vercel: staging preview alias on a non-prod domain (e.g. `staging.bindwave.com` CNAME) + prod on `bindwave.com`.
   - Modal: `staging` + `main` environments (draft `deploy-modal.yml` already separates these).
   - Supabase Cloud: separate `kendrew-staging` and `kendrew-prod` projects (both on Pro plan in `lwan sandbox` org; provisioned 2026-04-29). PITR declined for v1 (Pro add-on at ~$100/mo per project; ~$200/mo combined is unjustified pre-revenue). Daily backup with 7-day retention (free on Pro) is the durability floor; worst-case 24h data loss accepted. Revisit only when a paying customer's contract demands tighter RPO. Optional self-rolled hourly `pg_dump`-to-R2 cron is deferred and not blocking deploy. **JWT signing was auto-migrated from HS256 (legacy shared secret) to ECC P-256 on both projects** — backend JWT verifier code change required before deploy: see Plan 11-04 amendment for migrating to JWKS-based verification (research in flight).
   - Upstash Redis: separate `kendrew-staging` and `kendrew-prod` databases, both TLS.
   - Cloudflare R2: separate buckets per env (`kendrew-staging`, `kendrew-prod`) to prevent cross-env PDB leakage.
-- **D-04:** SSL certs are platform-managed. Vercel and Railway auto-issue and renew LetsEncrypt. No Cloudflare full-strict — Cloudflare stays DNS-only for `app.kendrew.ai`.
+- **D-04:** SSL certs are platform-managed. Vercel and Railway auto-issue and renew LetsEncrypt. No Cloudflare full-strict — Cloudflare stays DNS-only for `app.bindwave.com`.
 
 ### CI/CD Deploy Flow
 
@@ -40,7 +40,7 @@ Get Kendrew live on `kendrew.ai` and reachable by external users on production i
 - **D-11:** Full `.env.example` audit. Every prod-relevant key must appear with a placeholder and a comment explaining which runtime needs it: Sentry DSN (backend + frontend), Stripe live keys (backend), Resend API key (backend), Upstash Redis URL (backend + worker), R2 credentials + bucket (backend + worker + modal), UptimeRobot monitor ID (optional), webhook secrets + _PREV variants, Modal tokens (worker + CI), Supabase service role (backend only — never frontend).
 - **D-12:** Env vars scoped explicitly per runtime in `docs/deploy.md`:
   - Backend/worker (Railway): all secret keys (Stripe secret, Anthropic, Supabase service role, Modal tokens, R2 credentials, webhook secrets, Resend).
-  - Frontend (Vercel): public values only (Supabase anon key, `APP_BASE_URL` = `https://app.kendrew.ai`, Stripe publishable key, frontend Sentry DSN).
+  - Frontend (Vercel): public values only (Supabase anon key, `APP_BASE_URL` = `https://app.bindwave.com`, Stripe publishable key, frontend Sentry DSN).
   - Modal apps: R2 credentials (for result upload), backend job-token auth, heartbeat endpoint URL.
   A matrix table in `docs/deploy.md` is the source of truth.
 
@@ -64,7 +64,7 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 - Vercel project settings (monorepo root, build command, output dir) — follow existing `frontend/` Vite config.
 - UptimeRobot monitor configuration details (interval, alert contacts).
 - Specific Cloudflare DNS record TTLs.
-- ~~Staging subdomain naming~~ — **Locked 2026-04-24:** staging uses `staging.kendrew.ai` (frontend) + `app-staging.kendrew.ai` (backend). Mirrors prod DNS layout; unambiguous for CORS and cookie-domain configuration.
+- ~~Staging subdomain naming~~ — **Locked 2026-04-24:** staging uses `staging.bindwave.com` (frontend) + `app-staging.bindwave.com` (backend). Mirrors prod DNS layout; unambiguous for CORS and cookie-domain configuration.
 - Structure of `docs/deploy.md` (table, runbook style, or both).
 
 </decisions>
@@ -106,7 +106,7 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 - Modal environments + deploy flow (`modal environment create`, `modal deploy`)
 - Sentry: Python SDK + React SDK + Performance transactions
 - UptimeRobot: monitor setup + alert contact
-- Resend: domain verification + `jobs@kendrew.ai` sender setup (SPF/DKIM/DMARC)
+- Resend: domain verification + `jobs@bindwave.com` sender setup (SPF/DKIM/DMARC)
 - Stripe live keys + metered billing idempotency (Phase 5 D-2A already uses `job_id`)
 
 </canonical_refs>
@@ -132,7 +132,7 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 - **Railway predeploy hook** — runs `alembic upgrade head` before traffic shifts (D-06).
 - **Vercel build env** — frontend Sentry DSN and Supabase anon key inlined at build time.
 - **Modal deploy environments** — existing `staging` / `main` split in the draft workflow becomes the hard environment boundary.
-- **Cloudflare DNS** — adds `kendrew.ai` (apex A/CNAME to Vercel), `www` redirect, `app.kendrew.ai` (CNAME to Railway, DNS-only), plus SPF/DKIM/DMARC TXT records for Resend.
+- **Cloudflare DNS** — adds `bindwave.com` (apex A/CNAME to Vercel), `www` redirect, `app.bindwave.com` (CNAME to Railway, DNS-only), plus SPF/DKIM/DMARC TXT records for Resend.
 - **GitHub Actions** — six existing workflows (`test.yml`, `smoke.yml`, `deploy-modal.yml` draft, 4x docker-*.yml) provide the CI spine; D-05 wires Railway/Vercel checks to depend on `test.yml`.
 
 </code_context>
@@ -140,9 +140,9 @@ These are edits to `.planning/ROADMAP.md`, not scope changes — they bring the 
 <specifics>
 ## Specific Ideas
 
-- Production apex is `kendrew.ai` (matches the email sender `jobs@kendrew.ai`). Do not use `kendrew.app`, `kendrew.bio`, or any other variant — those are not owned.
-- Backend production base URL: `https://app.kendrew.ai`. Replace the current Cloudflare tunnel placeholder (`bobby-functions-easier-methodology.trycloudflare.com`) in `.env.local` and in any hardcoded references during this phase.
-- Staging base URLs: use short, obviously-non-prod names. Suggestion: `staging.kendrew.ai` (frontend) + `app-staging.kendrew.ai` (backend). Final call is Claude's Discretion (D-12 list) but pick names that will not be mistaken for prod.
+- Production apex is `bindwave.com` (matches the email sender `jobs@bindwave.com`). Do not use `kendrew.app`, `kendrew.bio`, or any other variant — those are not owned.
+- Backend production base URL: `https://app.bindwave.com`. Replace the current Cloudflare tunnel placeholder (`bobby-functions-easier-methodology.trycloudflare.com`) in `.env.local` and in any hardcoded references during this phase.
+- Staging base URLs: use short, obviously-non-prod names. Suggestion: `staging.bindwave.com` (frontend) + `app-staging.bindwave.com` (backend). Final call is Claude's Discretion (D-12 list) but pick names that will not be mistaken for prod.
 - Modal environments stay `staging` and `main` (the draft workflow's names). Do not rename.
 - Webhook secret env var naming: `RUNPOD_WEBHOOK_SECRET` + `RUNPOD_WEBHOOK_SECRET_PREV`, `MODAL_WEBHOOK_SECRET` + `MODAL_WEBHOOK_SECRET_PREV`. Backend tries current secret first, then `_PREV`, for a dual-signature grace window.
 - `#kendrew-alerts` is the existing Slack channel for Sentry + smoke + spend alerts. Do not create a new channel.

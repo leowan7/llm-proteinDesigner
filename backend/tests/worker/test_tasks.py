@@ -114,7 +114,7 @@ async def test_run_job_creates_pod():
         mock_settings.runpod_container_disk_gb = 50
         mock_settings.runpod_network_volume_id = None
         mock_settings.runpod_container_registry_auth_id = None
-        mock_settings.app_base_url = "https://app.kendrew.ai"
+        mock_settings.app_base_url = "https://app.bindwave.com"
 
         await run_job({}, job_id)
 

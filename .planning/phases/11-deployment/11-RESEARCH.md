@@ -24,10 +24,10 @@ Three material items diverge from the locked decisions as written and need the p
 ### Locked Decisions
 
 **Domains + Environments**
-- **D-01:** Production DNS — `kendrew.ai` → Vercel frontend, `app.kendrew.ai` → Railway backend. Matches `jobs@kendrew.ai` email sender.
-- **D-02:** DNS provider is Cloudflare. Apex (`kendrew.ai`) proxied (orange cloud). `app.kendrew.ai` DNS-only (grey cloud) for LetsEncrypt validation + SSE streams.
+- **D-01:** Production DNS — `bindwave.com` → Vercel frontend, `app.bindwave.com` → Railway backend. Matches `jobs@bindwave.com` email sender.
+- **D-02:** DNS provider is Cloudflare. Apex (`bindwave.com`) proxied (orange cloud). `app.bindwave.com` DNS-only (grey cloud) for LetsEncrypt validation + SSE streams.
 - **D-03:** Full prod + staging split across every platform (Railway, Vercel, Modal, Supabase, Upstash, R2). Each env gets its own isolated resources.
-- **D-04:** SSL certs platform-managed (Vercel + Railway auto-issue LetsEncrypt). No Cloudflare full-strict. Cloudflare stays DNS-only for `app.kendrew.ai`.
+- **D-04:** SSL certs platform-managed (Vercel + Railway auto-issue LetsEncrypt). No Cloudflare full-strict. Cloudflare stays DNS-only for `app.bindwave.com`.
 
 **CI/CD Deploy Flow**
 - **D-05:** Deploys from `main` gated by `test.yml` green status. Railway + Vercel auto-deploy on push to main only after CI passes.
@@ -57,7 +57,7 @@ Three material items diverge from the locked decisions as written and need the p
 - Vercel project settings (monorepo root, build command, output dir) — follow existing `frontend/` Vite config.
 - UptimeRobot monitor configuration details (interval, alert contacts).
 - Cloudflare DNS record TTLs.
-- Whether staging uses `staging.kendrew.ai` / `app-staging.kendrew.ai` subdomains or Vercel/Railway default URLs — prefer custom subdomains for clarity.
+- Whether staging uses `staging.bindwave.com` / `app-staging.bindwave.com` subdomains or Vercel/Railway default URLs — prefer custom subdomains for clarity.
 - Structure of `docs/deploy.md` (table, runbook, or both).
 - Supabase connection pooling mode — use Supavisor transaction mode (port 6543) unless research flags a blocker.
 
@@ -87,7 +87,7 @@ Three material items diverge from the locked decisions as written and need the p
 
 Workspace-level constraints from `C:\Users\lab\Documents\Claude_projects\CLAUDE.md` (project-level `CLAUDE.md` not present in `llm-proteinDesigner/`):
 
-- **Brand:** Kendrew is a separate brand from Ranomics. Ranomics pixel / analytics must NOT appear on `kendrew.ai` domain properties.
+- **Brand:** Kendrew is a separate brand from Ranomics. Ranomics pixel / analytics must NOT appear on `bindwave.com` domain properties.
 - **Python style:** PEP 8, Google-style docstrings. Fail fast with informative messages, never silently pass exceptions. (Existing `webhooks/router.py` and `worker/cleanup.py` already conform — Phase 11 changes must preserve.)
 - **Python runtime on dev machine:** `venv\Scripts\python.exe` to avoid PATH issues. Railway + GH Actions use Python 3.11 (`.github/workflows/test.yml`) and 3.12 (`backend/Dockerfile`) — standardize on 3.11 across CI + Railway to match `test.yml`.
 - **Node runtime on dev machine:** `/c/Program Files/nodejs`. GH Actions uses Node 20.
@@ -103,14 +103,14 @@ Workspace-level constraints from `C:\Users\lab\Documents\Claude_projects\CLAUDE.
 |----------|------|-------------------------|--------------|
 | Vercel | Frontend (Vite + React build) | Current — docs updated 2026 | `[VERIFIED: vercel.com/docs/domains/troubleshooting]` Dominant host for Vite/React; first-class GitHub integration, per-env env vars, deployment checks tied to GH Actions. |
 | Railway | Backend + worker (Docker) | Pre-deploy command GA 2025-01-10 | `[VERIFIED: railway.com/changelog/2025-01-10-pre-deploy-command]` Docker-first, supports predeploy hooks via `railway.toml`, Nixpacks optional. |
-| Cloudflare | DNS + R2 + tunnels | Current — account already in use | Already the account managing `kendrew.ai` DNS and R2. Orange/grey cloud per hostname. |
+| Cloudflare | DNS + R2 + tunnels | Current — account already in use | Already the account managing `bindwave.com` DNS and R2. Orange/grey cloud per hostname. |
 | Supabase Cloud Pro | Postgres + Auth | Pro plan required for each env | `[CITED: supabase.com/docs/guides/database/connecting-to-postgres]` — Pro plan unlocks point-in-time backups, higher connection limits, non-paused DBs. |
 | Upstash Redis | Queue (arq) + pub/sub + session cache | Global — TLS by default | `[CITED: upstash.com/docs/redis/howto/connectclient]` — TLS by default, `rediss://` URL scheme works unchanged with redis-py and arq. |
 | Cloudflare R2 | Object storage (PDB files, results) | S3-compat — already in config via `s3_endpoint_url` | Per-env buckets (`kendrew-staging`, `kendrew-prod`) prevent cross-env PDB leakage. |
 | Modal | GPU execution | `modal==1.4.2` in `requirements.txt`; pinned to `>=0.63,<1` in `deploy-modal.yml` | `[VERIFIED: modal.com/docs/guide/environments]` — supports named environments (`staging`, `main`) via `--env` flag. **Version conflict:** CI installs Modal `>=0.63,<1` but `requirements.txt` pins `modal==1.4.2`. Align to 1.4.x in CI. |
 | Sentry | Error tracking + Perf | `sentry-sdk[fastapi]==2.20.0` (backend), `@sentry/react==8.55.1` (frontend) | `[CITED: docs.sentry.io/platforms/python/integrations/fastapi/]` FastAPI integration auto-enables with the SDK when `fastapi` is in deps. |
 | UptimeRobot | External liveness ping | Free tier: 50 monitors at 5-min intervals | `[VERIFIED: uptimerobot.com/pricing/]` — free tier supports Slack/email notifications. |
-| Resend | Transactional email | `resend==2.25.0` in requirements, `jobs@kendrew.ai` sender already configured | `[CITED: resend.com/docs/dashboard/domains/dmarc]` Domain verification via SPF/DKIM/DMARC TXT records. |
+| Resend | Transactional email | `resend==2.25.0` in requirements, `jobs@bindwave.com` sender already configured | `[CITED: resend.com/docs/dashboard/domains/dmarc]` Domain verification via SPF/DKIM/DMARC TXT records. |
 
 ### Version Verification
 
@@ -142,12 +142,12 @@ Wave 1 (provision external resources — parallel):
   - Upstash Redis: kendrew-prod + kendrew-staging (TLS enabled)
   - R2 buckets: kendrew-prod + kendrew-staging + API token scoped per bucket
   - Modal environments: create `staging` (main exists); issue MODAL_TOKEN_ID/SECRET
-  - Resend domain verification for kendrew.ai (SPF/DKIM/DMARC)
+  - Resend domain verification for bindwave.com (SPF/DKIM/DMARC)
 
 Wave 2 (DNS + SSL):
   - Cloudflare records: apex (A 76.76.21.21 orange), www (CNAME -> apex), app (CNAME to Railway grey), app-staging (CNAME grey), staging (CNAME to Vercel, proxied choice)
-  - Railway custom domain: app.kendrew.ai, app-staging.kendrew.ai
-  - Vercel custom domain: kendrew.ai + www redirect + staging.kendrew.ai
+  - Railway custom domain: app.bindwave.com, app-staging.bindwave.com
+  - Vercel custom domain: bindwave.com + www redirect + staging.bindwave.com
 
 Wave 3 (platform deploys):
   - Railway service config: backend-prod + worker-prod (+ staging twin). railway.toml with predeploy hook.
@@ -157,7 +157,7 @@ Wave 3 (platform deploys):
 
 Wave 4 (observability):
   - Sentry project: kendrew-backend + kendrew-frontend (separate DSNs). Slack integration → #kendrew-alerts.
-  - UptimeRobot monitors: app.kendrew.ai/health (5 min), app-staging.kendrew.ai/health (5 min)
+  - UptimeRobot monitors: app.bindwave.com/health (5 min), app-staging.bindwave.com/health (5 min)
   - Sentry Performance: @sentry.start_transaction on 5 hot paths (or traces_sampler with route filter)
   - Wire smoke.yml workflow_run trigger off Railway deploy (or deployment_status webhook)
 
@@ -225,12 +225,12 @@ Pick Option A and flag to user for confirmation.
 
 | Name | Type | Value | Proxy | TTL | Purpose |
 |------|------|-------|-------|-----|---------|
-| `kendrew.ai` (`@`) | A | `76.76.21.21` | Proxied (orange) | Auto | Vercel apex |
+| `bindwave.com` (`@`) | A | `76.76.21.21` | Proxied (orange) | Auto | Vercel apex |
 | `www` | CNAME | `cname.vercel-dns.com` | Proxied (orange) | Auto | www → apex redirect |
 | `app` | CNAME | `<railway-provided-target>.up.railway.app` | DNS only (grey) | Auto | Railway backend prod |
 | `app-staging` | CNAME | `<railway-staging-target>.up.railway.app` | DNS only (grey) | Auto | Railway backend staging |
 | `staging` | CNAME | `cname.vercel-dns.com` | Proxied (orange) | Auto | Vercel frontend staging |
-| `_dmarc` | TXT | `v=DMARC1; p=none; rua=mailto:dmarc@kendrew.ai` | — | Auto | Resend DMARC |
+| `_dmarc` | TXT | `v=DMARC1; p=none; rua=mailto:dmarc@bindwave.com` | — | Auto | Resend DMARC |
 | `@` | TXT (SPF) | `v=spf1 include:amazonses.com ~all` (or Resend-provided value) | — | Auto | Resend SPF |
 | `resend._domainkey` | TXT (DKIM) | `<Resend-provided DKIM value>` | — | Auto | Resend DKIM |
 | `send` (or Resend-provided hostname) | MX | `<Resend-provided mail server>` + priority 10 | DNS only (grey) | Auto | Bounce handling |
@@ -240,7 +240,7 @@ Pick Option A and flag to user for confirmation.
 
 **Gotchas:**
 - MX and mail-related records **must** be grey cloud — proxying breaks SMTP. `[CITED: cloudflare Resend docs guidance]`
-- If Railway cert stuck on "Validating Challenges": toggle Cloudflare proxy OFF, wait for green check in Railway, then leave OFF (D-02 says `app.kendrew.ai` stays DNS-only permanently). `[CITED: docs.railway.com/networking/troubleshooting/ssl]`
+- If Railway cert stuck on "Validating Challenges": toggle Cloudflare proxy OFF, wait for green check in Railway, then leave OFF (D-02 says `app.bindwave.com` stays DNS-only permanently). `[CITED: docs.railway.com/networking/troubleshooting/ssl]`
 - Vercel recommends `76.76.21.21` for apex; still works in 2026 but Vercel is shifting to dynamic records. `[CITED: vercel.com/kb/guide/a-record-and-caa-with-vercel]`
 
 ### Pattern 4: Modal Multi-Environment Deploys
@@ -373,7 +373,7 @@ Note: `config.py` currently has `runpod_webhook_secret` but **not** `modal_webho
 ### Anti-Patterns to Avoid
 
 - **Auto-rollback on smoke failure.** D-08 locked manual. Smoke is informational; alert and let the human decide.
-- **Cloudflare orange-cloud for `app.kendrew.ai`.** Breaks LetsEncrypt DNS-01 validation and interferes with SSE streams (Cloudflare enforces a 100-second timeout by default on free tier). D-02 locks this as DNS-only.
+- **Cloudflare orange-cloud for `app.bindwave.com`.** Breaks LetsEncrypt DNS-01 validation and interferes with SSE streams (Cloudflare enforces a 100-second timeout by default on free tier). D-02 locks this as DNS-only.
 - **Sharing R2 bucket between prod and staging.** PDB data leakage across envs. D-03 requires separate buckets.
 - **Putting `SUPABASE_SERVICE_ROLE_KEY` in Vercel.** Service role = admin-level DB access. Frontend must only get the anon key. D-12 is explicit.
 - **Using Alembic.** No such config exists in the repo. See Summary point 1.
@@ -417,7 +417,7 @@ Note: `config.py` currently has `runpod_webhook_secret` but **not** `modal_webho
 
 **Warning signs:** Sentry errors like `prepared statement "__asyncpg_stmt_1__" does not exist`.
 
-### Pitfall 3: Cloudflare proxy breaking LetsEncrypt on app.kendrew.ai
+### Pitfall 3: Cloudflare proxy breaking LetsEncrypt on app.bindwave.com
 
 **What goes wrong:** Railway shows "SSL pending" forever. Users see cert errors.
 
@@ -485,7 +485,7 @@ Note: `config.py` currently has `runpod_webhook_secret` but **not** `modal_webho
 |----------|-------------|------------------|
 | Stored data | None. No production DB exists yet. | None. |
 | Live service config | `bobby-functions-easier-methodology.trycloudflare.com` hardcoded in `.env.local` as `APP_BASE_URL`. No production version of this resource yet. | Dev keeps trycloudflare; prod + staging get new Railway domains. Zero data migration. |
-| OS-registered state | None (no tasks scheduled against `kendrew.ai` yet). | None. |
+| OS-registered state | None (no tasks scheduled against `bindwave.com` yet). | None. |
 | Secrets / env vars | `.env.example` is dev-only; `.env.local` is dev-only. No prod secrets in git. | Wave 5: full `.env.example` rewrite per D-11. No existing prod secret key names change. |
 | Build artifacts | None — no production builds have run. | None. |
 
@@ -598,7 +598,7 @@ See Pattern 6 above.
 ```
 Monitor Type: HTTPS
 Friendly Name: kendrew-prod-health
-URL: https://app.kendrew.ai/health
+URL: https://app.bindwave.com/health
 Monitoring Interval: 5 minutes
 Alert Contacts: Email (leo@ranomics.com), Slack (#kendrew-alerts via webhook)
 HTTP Method: GET
@@ -632,7 +632,7 @@ Source: `[CITED: uptimerobot.com/pricing/]` — free-tier supports 5-min interva
 | A4 | Modal webhooks post to `/webhooks/runpod` (same endpoint as RunPod) signing with `RUNPOD_WEBHOOK_SECRET`, so only RunPod secret rotation is needed for Modal-in-production. | Pattern 6 | If Modal later signs with its own secret, `MODAL_WEBHOOK_SECRET` + `_PREV` plumbing still needs adding to config.py. Check `infrastructure/modal/*_app.py` post-webhook code. |
 | A5 | Cloudflare TXT record updates for Resend DKIM propagate within 1 hour; domain verification succeeds without manual retry. | Pattern 3, Pitfall 6 | Verification may take up to 48 hours in rare cases. Not a blocker; plan docs wait period. |
 | A6 | UptimeRobot free tier Slack integration supports channel webhook URL (not just email). | Pattern 4 UptimeRobot example | If free tier restricts Slack, use email → Slack email integration as fallback. |
-| A7 | `staging.kendrew.ai` + `app-staging.kendrew.ai` are acceptable staging subdomain names (no brand confusion with prod). | User Constraints / Claude's Discretion | User may prefer different naming. Not a technical risk. |
+| A7 | `staging.bindwave.com` + `app-staging.bindwave.com` are acceptable staging subdomain names (no brand confusion with prod). | User Constraints / Claude's Discretion | User may prefer different naming. Not a technical risk. |
 | A8 | Railway 2-replica backend + 2-replica worker deployment matches the load assumption. | Pattern 5 pool sizing | If user provisions more replicas, pool sizing needs recalculation. Document formula. |
 | A9 | `backend/Dockerfile` can be extended with `RUN curl -fsSL https://supabase.com/install.sh | sh` (or a pinned binary) without bloating image size unreasonably (<50MB addition). | Pitfall 1 fix | If image gets too large, Railway cold starts slow down. Alternative: separate migration-only job. |
 | A10 | `docs/deploy.md` does not yet exist — Phase 11 creates it. | User Constraints | Verified: `ls docs/` shows only `SMOKE-TEST-SPEC.md`, `blocker-pxdesign.md`, `blocker-rfdiffusion.md`. `[VERIFIED]` |
@@ -656,8 +656,8 @@ Source: `[CITED: uptimerobot.com/pricing/]` — free-tier supports 5-min interva
 
 3. **Vercel staging deploy gating.**
    - What we know: Vercel auto-deploys all non-main branches as preview deployments; main as production.
-   - What's unclear: How to expose `staging.kendrew.ai` cleanly if it's supposed to serve a specific non-main branch's preview.
-   - Recommendation: Either (a) alias `staging.kendrew.ai` to a dedicated `staging` branch that auto-deploys as production on that branch, or (b) pin the domain to a specific preview URL. Option (a) is cleaner and Vercel docs support it via "Deploy Hooks" + branch-to-domain mapping.
+   - What's unclear: How to expose `staging.bindwave.com` cleanly if it's supposed to serve a specific non-main branch's preview.
+   - Recommendation: Either (a) alias `staging.bindwave.com` to a dedicated `staging` branch that auto-deploys as production on that branch, or (b) pin the domain to a specific preview URL. Option (a) is cleaner and Vercel docs support it via "Deploy Hooks" + branch-to-domain mapping.
 
 4. **Sentry release tagging.**
    - What we know: `release=` should be set per deploy for accurate stack-trace symbolication.
@@ -683,7 +683,7 @@ Phase 11 is largely external-service config, not local tooling. The one hard dep
 | GitHub repo secrets admin | Waves 3-4 (set MODAL_TOKEN_*, etc.) | Leo has admin | N/A | None |
 | Upstash account | Wave 1 | Must signup if missing | N/A | Fly.io Redis as alt (rejected by CONTEXT.md) |
 | Sentry account with Slack integration | Wave 4 | Leo already has Sentry DSN in config (empty default) | — | None — blocking |
-| Resend account + verified domain record access | Wave 1 + 4 | Already in use (`jobs@kendrew.ai` sender configured) | — | None |
+| Resend account + verified domain record access | Wave 1 + 4 | Already in use (`jobs@bindwave.com` sender configured) | — | None |
 | `openssl` binary (for secret generation) | Wave 5 rotation runbook | Standard on Linux/macOS/Git Bash | — | `python -c "import secrets; print(secrets.token_hex(32))"` |
 
 **Missing dependencies with no fallback:** None blocking research. Planner should confirm during Wave 1 that Leo has accounts on Railway, Vercel, Upstash, Sentry, and Cloudflare (likely yes — all referenced in prior phases).
@@ -695,7 +695,7 @@ Phase 11 is largely external-service config, not local tooling. The one hard dep
 |----------|-------|
 | Framework | pytest 8.3.5 (backend) + Vitest 4.1 (frontend) + Playwright (E2E/smoke); curl + jq for deploy smoke. |
 | Config file | `backend/pytest.ini`, `frontend/vite.config.ts`, `frontend/playwright.config.ts`, `.github/workflows/smoke.yml`. |
-| Quick run command | `cd backend && pytest -x tests/` (existing) + `curl -sf https://app.kendrew.ai/health` (new smoke check). |
+| Quick run command | `cd backend && pytest -x tests/` (existing) + `curl -sf https://app.bindwave.com/health` (new smoke check). |
 | Full suite command | `.github/workflows/test.yml` (already wired); `.github/workflows/smoke.yml` (wired post-deploy by Phase 11). |
 
 ### Phase 11 Success Criteria → Test Map
@@ -704,8 +704,8 @@ Phase 11 has 9 ROADMAP success criteria (as corrected by CONTEXT.md for SC 6 and
 
 | SC # | Behavior (corrected) | Test Type | Automated Command / Check | Where it Lives |
 |------|----------------------|-----------|---------------------------|----------------|
-| SC-1 | Frontend deployed on Vercel with custom domain + SSL | smoke | `curl -sI https://kendrew.ai | grep -E 'HTTP/2 200\|strict-transport-security'` | smoke.yml (new check) + manual DNS check in deploy.md |
-| SC-2 | Backend + worker deployed on Railway as Docker containers, auto-deploy from main | smoke + manual | `curl -sf https://app.kendrew.ai/health` returns 200 AND Railway deploy history shows commit SHA == latest main SHA | smoke.yml existing + Railway dashboard observation |
+| SC-1 | Frontend deployed on Vercel with custom domain + SSL | smoke | `curl -sI https://bindwave.com | grep -E 'HTTP/2 200\|strict-transport-security'` | smoke.yml (new check) + manual DNS check in deploy.md |
+| SC-2 | Backend + worker deployed on Railway as Docker containers, auto-deploy from main | smoke + manual | `curl -sf https://app.bindwave.com/health` returns 200 AND Railway deploy history shows commit SHA == latest main SHA | smoke.yml existing + Railway dashboard observation |
 | SC-3 | Database on Supabase Cloud (Pro) with connection pooling + backups | integration | `/health` endpoint DB check; Supabase dashboard shows Pro tier + PITR backups enabled; `asyncpg` smoke test hits DB 20x rapidly without prepared-statement errors | smoke.yml + manual Supabase config audit |
 | SC-4 | Redis on Upstash with TLS | integration | `/health` endpoint Redis check; verify `REDIS_URL` in Railway starts with `rediss://` (TLS scheme) | smoke.yml + Railway Variables audit |
 | SC-5 | Object storage on R2 with presigned URL access | integration | `/health` R2 ping; exercise `POST /jobs/{id}/upload-urls` from a test user; download a sample PDB via presigned URL | smoke.yml (R2 HEAD) + Playwright e2e |
@@ -719,12 +719,12 @@ Phase 11 has 9 ROADMAP success criteria (as corrected by CONTEXT.md for SC 6 and
 | Signal | Test Type | Automated Command |
 |--------|-----------|-------------------|
 | Dual-secret webhook rotation works | integration | Send a webhook signed with PREV secret, verify 200 + "PREV secret" warning in Sentry; rotate; send with new secret, verify 200; retire PREV; send with PREV, verify 401. | Manual + Wave 5 task |
-| DNS resolves correctly from outside Cloudflare | smoke | `dig +short A kendrew.ai` returns Vercel IP; `dig +short CNAME app.kendrew.ai` returns Railway CNAME; `dig +short TXT _dmarc.kendrew.ai` returns DMARC | smoke.yml new check |
+| DNS resolves correctly from outside Cloudflare | smoke | `dig +short A bindwave.com` returns Vercel IP; `dig +short CNAME app.bindwave.com` returns Railway CNAME; `dig +short TXT _dmarc.bindwave.com` returns DMARC | smoke.yml new check |
 | `deploy-modal.yml` dry-run | CI | Open a PR touching `infrastructure/modal/` — workflow must trigger and deploy to `staging` | Part of deploy-modal.yml |
 | Sentry Performance captures hot paths | integration | Hit `POST /jobs/launch` in staging, see transaction in Sentry Performance dashboard within 1 minute | Manual Wave 4 validation |
 
 ### Sampling Rate
-- **Per task commit (dev loop):** `pytest -x -k <module>` for changed code; `npm run test -- <file>` for frontend. For deploy-related plans: `curl -sf https://app-staging.kendrew.ai/health` before merge.
+- **Per task commit (dev loop):** `pytest -x -k <module>` for changed code; `npm run test -- <file>` for frontend. For deploy-related plans: `curl -sf https://app-staging.bindwave.com/health` before merge.
 - **Per wave merge:** Full `test.yml` green (auto-enforced).
 - **Phase gate:** `smoke.yml` run against both staging and prod; rollback drill completed; all 9 SC signals green; `.env.example` audit review.
 
@@ -743,7 +743,7 @@ Phase 11 has 9 ROADMAP success criteria (as corrected by CONTEXT.md for SC 6 and
 | ASVS Category | Applies | Standard Control |
 |---------------|---------|-----------------|
 | V2 Authentication | Partial | Supabase Auth (unchanged this phase). Phase 11: verify cookie secure=true in prod via `COOKIE_SECURE=true` setting. |
-| V3 Session Management | Partial | HTTP-only cookies already scoped. Phase 11: verify `APP_BASE_URL=https://app.kendrew.ai` so Set-Cookie `Domain` directive is correct. |
+| V3 Session Management | Partial | HTTP-only cookies already scoped. Phase 11: verify `APP_BASE_URL=https://app.bindwave.com` so Set-Cookie `Domain` directive is correct. |
 | V4 Access Control | No net-new | Existing auth/admin dependencies unchanged. |
 | V5 Input Validation | No net-new | Pydantic Settings + request models from prior phases. |
 | V6 Cryptography | Yes | HMAC-SHA256 webhooks (existing); dual-secret rotation (D-10). Never hand-roll — use stdlib `hmac.compare_digest`. |

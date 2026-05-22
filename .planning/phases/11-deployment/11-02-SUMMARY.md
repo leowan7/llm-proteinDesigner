@@ -15,8 +15,8 @@ provides:
   - PENDING: Upstash Redis databases (prod + staging, TLS)
   - PENDING: Cloudflare R2 buckets + per-bucket API tokens (prod + staging)
   - PENDING: Modal staging environment + MODAL_TOKEN_ID/SECRET
-  - PENDING: Cloudflare DNS API token (Zone:DNS:Edit for kendrew.ai)
-  - PENDING: Resend verified kendrew.ai domain + RESEND_API_KEY
+  - PENDING: Cloudflare DNS API token (Zone:DNS:Edit for bindwave.com)
+  - PENDING: Resend verified bindwave.com domain + RESEND_API_KEY
 affects: [11-03-deploy (Railway predeploy + staging wire-up), 11-04-deploy (Resend + asyncpg Supavisor), 11-05-deploy (Sentry + UptimeRobot)]
 
 tech-stack:
@@ -89,7 +89,7 @@ On the skeleton file, all `<verify><automated>` grep checks pass:
 - `grep "kendrew-staging"` → 5 matches
 - `git check-ignore .planning/phases/11-deployment/11-02-PROVISIONING.md` → exit 0, matched by `.gitignore:36`
 
-The remaining acceptance criteria (`modal environment list` showing `main` + `staging`; Resend dashboard showing kendrew.ai `Verified`) cannot pass until Leo completes the external provisioning.
+The remaining acceptance criteria (`modal environment list` showing `main` + `staging`; Resend dashboard showing bindwave.com `Verified`) cannot pass until Leo completes the external provisioning.
 
 ## Deviations from Plan
 
@@ -146,7 +146,7 @@ After Blocks A-F are done and PROVISIONING.md is fully filled in, reply with `"p
 
 **Security reminders for Leo's dashboard work:**
 - R2 tokens scoped per-bucket (T-11-02-02): the `kendrew-prod-r2` token must not see the `kendrew-staging` bucket, and vice versa.
-- Cloudflare DNS token scoped to `kendrew.ai` zone only, not "All Zones" (T-11-02-03).
+- Cloudflare DNS token scoped to `bindwave.com` zone only, not "All Zones" (T-11-02-03).
 - Supabase staging created fresh; never `supabase db dump` prod → staging (T-11-02-04).
 - service_role key goes into Railway backend vars only, never Vercel (T-11-02-07). Plan 11-03 runs `grep -r SUPABASE_SERVICE_ROLE frontend/` and that must return zero hits.
 - PROVISIONING.md stays local; Plan 11-03 deletes it after consumption (T-11-02-01).
@@ -179,4 +179,4 @@ None during the Claude-side skeleton pass. Issues discovered during Leo's dashbo
 - VERIFIED: grep "kendrew-staging" PROVISIONING.md → 5 matches
 - VERIFIED: PROVISIONING.md contains zero emoji characters (Python regex scan)
 - VERIFIED: PROVISIONING.md contains placeholder values only; no real secrets
-- NOT APPLICABLE (external provisioning pending): `modal environment list` showing `staging`; Resend `kendrew.ai Verified`; per-bucket R2 token scopes
+- NOT APPLICABLE (external provisioning pending): `modal environment list` showing `staging`; Resend `bindwave.com Verified`; per-bucket R2 token scopes

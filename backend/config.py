@@ -109,7 +109,7 @@ class Settings(BaseSettings):
 
     # Resend (for job notifications)
     resend_api_key: str = ""
-    resend_from_email: str = "Kendrew.AI <jobs@kendrew.ai>"
+    resend_from_email: str = "Bindwave <jobs@bindwave.com>"
 
     # App base URL (used in email links and Stripe return URLs)
     app_base_url: str = "http://localhost:8000"

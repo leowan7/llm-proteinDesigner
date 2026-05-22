@@ -54,7 +54,7 @@ async def test_below_threshold_sends_no_email():
         patch.dict("sys.modules", {"resend": mock_resend}),
         patch.object(cleanup.settings, "gpu_daily_spend_alert_usd", 50.0),
         patch.object(cleanup.settings, "resend_api_key", "fake-key"),
-        patch.object(cleanup.settings, "resend_from_email", "jobs@kendrew.ai"),
+        patch.object(cleanup.settings, "resend_from_email", "jobs@bindwave.com"),
     ):
         await cleanup.check_daily_gpu_spend()
 
@@ -79,7 +79,7 @@ async def test_above_threshold_sends_one_email():
         patch.dict("sys.modules", {"resend": mock_resend}),
         patch.object(cleanup.settings, "gpu_daily_spend_alert_usd", 50.0),
         patch.object(cleanup.settings, "resend_api_key", "fake-key"),
-        patch.object(cleanup.settings, "resend_from_email", "jobs@kendrew.ai"),
+        patch.object(cleanup.settings, "resend_from_email", "jobs@bindwave.com"),
     ):
         await cleanup.check_daily_gpu_spend()
 

@@ -10,8 +10,8 @@ a deploy concern surfaces that would not be obvious to the next on-call.
 
 | Environment | Frontend | Backend | Database | Redis | R2 Bucket | Modal Env |
 |-------------|----------|---------|----------|-------|-----------|-----------|
-| Production | https://kendrew.ai | https://app.kendrew.ai | kendrew-prod (Supabase Pro) | kendrew-prod (Upstash, TLS) | kendrew-prod | main |
-| Staging | https://staging.kendrew.ai | https://app-staging.kendrew.ai | kendrew-staging (Supabase Pro) | kendrew-staging (Upstash, TLS) | kendrew-staging | staging |
+| Production | https://bindwave.com | https://app.bindwave.com | kendrew-prod (Supabase Pro) | kendrew-prod (Upstash, TLS) | kendrew-prod | main |
+| Staging | https://staging.bindwave.com | https://app-staging.bindwave.com | kendrew-staging (Supabase Pro) | kendrew-staging (Upstash, TLS) | kendrew-staging | staging |
 | Local | http://localhost:5173 | http://localhost:8000 | local Supabase CLI :54322 | Docker redis :6379 | MinIO :9000 | n/a |
 
 ## Env Variable Matrix (Phase 11 D-12)
@@ -46,11 +46,11 @@ with `# runtime:` comments; this table is a reading-friendly summary.
 | MODAL_TOKEN_SECRET | Yes | Yes | - | - | also in GitHub Actions secrets |
 | MODAL_ENVIRONMENT | Yes | Yes | - | - | main or staging |
 | RESEND_API_KEY | Yes | Yes | - | - | worker sends completion emails + spend alerts |
-| RESEND_FROM_EMAIL | Yes | Yes | - | - | `Kendrew.AI <jobs@kendrew.ai>` |
+| RESEND_FROM_EMAIL | Yes | Yes | - | - | `Bindwave <jobs@bindwave.com>` |
 | WEBHOOK_HMAC_SECRET | Yes | - | - | - | Phase 11 D-10 - canonical name; source of truth |
 | WEBHOOK_HMAC_SECRET_PREV | Yes | - | - | - | rotation window only |
 | RUNPOD_WEBHOOK_SECRET | **NO (backend config.py alias only)** | - | - | - | deprecated alias - backend resolves via model_post_init; NOT set in Railway |
-| APP_BASE_URL | Yes | - | - | - | `https://app.kendrew.ai` |
+| APP_BASE_URL | Yes | - | - | - | `https://app.bindwave.com` |
 | VITE_APP_BASE_URL | - | - | Yes | - | same value |
 | GPU_DAILY_SPEND_ALERT_USD | Yes | Yes | - | - | cron threshold (Phase 11 D-16) |
 
@@ -106,9 +106,9 @@ Manual steps (what the script does):
    - OR CLI: `railway rollback --service kendrew-backend-prod`
 3. Vercel rollback:
    - Vercel dashboard -> kendrew project -> Deployments -> previous deploy -> three dots -> "Promote to Production"
-   - OR CLI: `vercel rollback https://kendrew.ai`
+   - OR CLI: `vercel rollback https://bindwave.com`
 4. Verify `/health` returns 200:
-   - `curl -sI https://app.kendrew.ai/health` should return 200 within 2 minutes of rollback.
+   - `curl -sI https://app.bindwave.com/health` should return 200 within 2 minutes of rollback.
 5. Record incident in `docs/incidents/YYYY-MM-DD-<slug>.md` (create if it doesn't exist).
 
 ### Last Drill
@@ -126,7 +126,7 @@ prior-known-good deploy proves the < 5-min target.
 | Signal | Tool | Channel |
 |--------|------|---------|
 | Application errors | Sentry (kendrew-backend, kendrew-frontend) | #kendrew-alerts Slack + email |
-| External liveness | UptimeRobot (app.kendrew.ai/health, app-staging.kendrew.ai/health) | #kendrew-alerts + email |
+| External liveness | UptimeRobot (app.bindwave.com/health, app-staging.bindwave.com/health) | #kendrew-alerts + email |
 | Daily GPU spend | arq cron `check_daily_gpu_spend` | Resend email to leo@ranomics.com |
 | Post-deploy smoke | GitHub Actions smoke.yml | Sentry + #kendrew-alerts on fail |
 
@@ -143,7 +143,7 @@ Sentry Performance traces sample 100% of the 5 D-14 hot paths:
 2. PR touching `infrastructure/modal/**`, `docker/**`, or `backend/pipelines/**` also triggers `deploy-modal.yml` against Modal `staging` env.
 3. On merge to `main`:
    - Railway auto-deploys kendrew-backend-prod + kendrew-worker-prod. `railway.toml` runs `supabase db push` as preDeployCommand; failure aborts the deploy.
-   - Vercel auto-deploys the frontend to https://kendrew.ai.
+   - Vercel auto-deploys the frontend to https://bindwave.com.
    - `deploy-modal.yml` deploys all 5 Modal apps to `main` env (if PR touched Modal paths).
    - `smoke.yml` runs after deploy completes (informational - D-08). Failures post to Sentry + #kendrew-alerts. Human decides rollback.
 

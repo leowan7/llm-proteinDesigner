@@ -24,17 +24,17 @@
 
 ## Domains + Environments
 
-### URL layout for kendrew.ai?
+### URL layout for bindwave.com?
 
 | Option | Description | Selected |
 |--------|-------------|----------|
-| kendrew.ai + app.kendrew.ai | Apex for frontend, subdomain for backend. Matches email sender and Phase 3 research. | ✓ |
-| www.kendrew.ai + api.kendrew.ai | Conventional www/api split. | |
-| kendrew.ai only | Backend on Railway internal, reached via Vercel rewrites. | |
+| bindwave.com + app.bindwave.com | Apex for frontend, subdomain for backend. Matches email sender and Phase 3 research. | ✓ |
+| www.bindwave.com + api.bindwave.com | Conventional www/api split. | |
+| bindwave.com only | Backend on Railway internal, reached via Vercel rewrites. | |
 
-**User's choice:** kendrew.ai + app.kendrew.ai (Recommended)
+**User's choice:** bindwave.com + app.bindwave.com (Recommended)
 
-### DNS provider for kendrew.ai?
+### DNS provider for bindwave.com?
 
 | Option | Description | Selected |
 |--------|-------------|----------|
@@ -202,7 +202,7 @@
 - Vercel project settings (monorepo root, build command).
 - UptimeRobot monitor interval + alert contact specifics.
 - Cloudflare DNS record TTLs.
-- Staging subdomain naming (`staging.kendrew.ai` vs platform defaults).
+- Staging subdomain naming (`staging.bindwave.com` vs platform defaults).
 - Structure of `docs/deploy.md`.
 - Supabase Supavisor pooling mode (transaction vs session) — research-gated.
 

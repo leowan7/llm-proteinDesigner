@@ -17,8 +17,8 @@ provides:
   - .github/workflows/deploy-modal.yml live (if:false guards removed, Modal pin aligned with backend/requirements.txt modal==1.4.2)
   - .github/workflows/test.yml frontend-bundle secret-leak grep guarding Wave 2 Vercel deploys (SC 7, Pitfall 5)
   - PENDING: Cloudflare DNS records (apex A, www/app/app-staging/staging CNAMEs, CAA, DMARC/SPF/DKIM/MX)
-  - PENDING: Railway 4 services (kendrew-backend-prod, kendrew-worker-prod, kendrew-backend-staging, kendrew-worker-staging) with custom domains app.kendrew.ai + app-staging.kendrew.ai
-  - PENDING: Vercel kendrew project rooted at frontend/ with kendrew.ai + staging.kendrew.ai domains and 5 VITE_ env vars
+  - PENDING: Railway 4 services (kendrew-backend-prod, kendrew-worker-prod, kendrew-backend-staging, kendrew-worker-staging) with custom domains app.bindwave.com + app-staging.bindwave.com
+  - PENDING: Vercel kendrew project rooted at frontend/ with bindwave.com + staging.bindwave.com domains and 5 VITE_ env vars
   - PENDING: GitHub repo secrets (MODAL_TOKEN_ID, MODAL_TOKEN_SECRET, SMOKE_TEST_EMAIL, SMOKE_TEST_PASSWORD) + branch protection on main requiring test.yml gates
 affects: [11-05-deploy (Sentry + rollback drill; needs Railway + Vercel live to smoke-test against)]
 
@@ -113,16 +113,16 @@ Task 2 is a `type="checkpoint:human-action"` step. It requires Leo to work in fo
 
 | Block | Dashboard | What Leo does | Approx. time |
 |-------|-----------|----------------|--------------|
-| A | dash.cloudflare.com -> kendrew.ai -> DNS | Add apex A 76.76.21.21 (orange), www CNAME cname.vercel-dns.com (orange), app CNAME to Railway target (GREY per Pitfall 3), app-staging CNAME (grey), staging CNAME cname.vercel-dns.com (orange), CAA records for letsencrypt.org + pki.goog, DMARC/SPF/DKIM/MX from Plan 11-02 Resend | ~15 min |
-| B | railway.app | Create 4 services: kendrew-backend-prod (auto-detects railway.toml), kendrew-worker-prod (override startCommand = `arq worker.main.WorkerSettings`, no healthcheck, no preDeployCommand), kendrew-backend-staging, kendrew-worker-staging. Paste Backend Variables from PROVISIONING.md per exact backend/config.py field names. Use canonical `WEBHOOK_HMAC_SECRET` + `WEBHOOK_HMAC_SECRET_PREV` (D-10) — do NOT set `RUNPOD_WEBHOOK_SECRET` in Railway (it is a backend-side alias only). Add custom domains app.kendrew.ai and app-staging.kendrew.ai. | ~25 min |
-| C | vercel.com | Create kendrew project rooted at `frontend/`, framework Vite, add ONLY 5 VITE_ env vars per environment (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` — never service_role, `VITE_STRIPE_PUBLISHABLE_KEY`, `VITE_SENTRY_DSN_FRONTEND`, `VITE_APP_BASE_URL`). Add domains kendrew.ai + www.kendrew.ai (redirect) + staging.kendrew.ai (bound to `staging` branch). | ~15 min |
+| A | dash.cloudflare.com -> bindwave.com -> DNS | Add apex A 76.76.21.21 (orange), www CNAME cname.vercel-dns.com (orange), app CNAME to Railway target (GREY per Pitfall 3), app-staging CNAME (grey), staging CNAME cname.vercel-dns.com (orange), CAA records for letsencrypt.org + pki.goog, DMARC/SPF/DKIM/MX from Plan 11-02 Resend | ~15 min |
+| B | railway.app | Create 4 services: kendrew-backend-prod (auto-detects railway.toml), kendrew-worker-prod (override startCommand = `arq worker.main.WorkerSettings`, no healthcheck, no preDeployCommand), kendrew-backend-staging, kendrew-worker-staging. Paste Backend Variables from PROVISIONING.md per exact backend/config.py field names. Use canonical `WEBHOOK_HMAC_SECRET` + `WEBHOOK_HMAC_SECRET_PREV` (D-10) — do NOT set `RUNPOD_WEBHOOK_SECRET` in Railway (it is a backend-side alias only). Add custom domains app.bindwave.com and app-staging.bindwave.com. | ~25 min |
+| C | vercel.com | Create kendrew project rooted at `frontend/`, framework Vite, add ONLY 5 VITE_ env vars per environment (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` — never service_role, `VITE_STRIPE_PUBLISHABLE_KEY`, `VITE_SENTRY_DSN_FRONTEND`, `VITE_APP_BASE_URL`). Add domains bindwave.com + www.bindwave.com (redirect) + staging.bindwave.com (bound to `staging` branch). | ~15 min |
 | D | github.com settings | Add repo secrets MODAL_TOKEN_ID, MODAL_TOKEN_SECRET, SMOKE_TEST_EMAIL, SMOKE_TEST_PASSWORD. Enable branch protection on `main` requiring test.yml status checks (Backend Tests, Frontend Unit Tests, E2E Tests, Lint & Type Check). Do NOT enable Vercel Deployment Checks (Pitfall 8 race condition). | ~5 min |
 
 **Task 2 resume signal (from 11-03-PLAN.md):** After all four blocks complete, Leo types `"deployed"` with:
-- `curl -sI https://kendrew.ai` (expect `HTTP/2 200`)
-- `curl -sI https://app.kendrew.ai/health` (expect `HTTP/2 200`)
+- `curl -sI https://bindwave.com` (expect `HTTP/2 200`)
+- `curl -sI https://app.bindwave.com/health` (expect `HTTP/2 200`)
 - Railway service list (all 4 running)
-- `dig +short CNAME app.kendrew.ai` (expect `*.up.railway.app`)
+- `dig +short CNAME app.bindwave.com` (expect `*.up.railway.app`)
 - GitHub Actions run history showing deploy-modal.yml ran (or skipped correctly on a no-op push)
 
 Plan 11-03 cannot be marked overall-complete until Task 2 is signed off against its `<acceptance_criteria>` block (DNS resolves, Railway health returns 200, predeploy supabase db push visible in Railway logs, Vercel env vars do not contain service_role or stripe secret, Redis uses rediss://, DATABASE_URL uses port 6543 Supavisor).
