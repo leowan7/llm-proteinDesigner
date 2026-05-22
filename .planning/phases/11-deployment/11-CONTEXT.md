@@ -21,7 +21,7 @@ Get Kendrew live on `kendrew.ai` and reachable by external users on production i
   - Railway: `kendrew-backend-staging` + `kendrew-backend-prod` services (and matching worker services).
   - Vercel: staging preview alias on a non-prod domain (e.g. `staging.kendrew.ai` CNAME) + prod on `kendrew.ai`.
   - Modal: `staging` + `main` environments (draft `deploy-modal.yml` already separates these).
-  - Supabase Cloud: separate `kendrew-staging` and `kendrew-prod` projects (Free tier for deploy validation; upgrade to Pro for PITR + non-paused DBs before public launch).
+  - Supabase Cloud: separate `kendrew-staging` and `kendrew-prod` projects (both on Pro plan in `lwan sandbox` org; provisioned 2026-04-29). PITR declined for v1 (Pro add-on at ~$100/mo per project; ~$200/mo combined is unjustified pre-revenue). Daily backup with 7-day retention (free on Pro) is the durability floor; worst-case 24h data loss accepted. Revisit only when a paying customer's contract demands tighter RPO. Optional self-rolled hourly `pg_dump`-to-R2 cron is deferred and not blocking deploy. **JWT signing was auto-migrated from HS256 (legacy shared secret) to ECC P-256 on both projects** — backend JWT verifier code change required before deploy: see Plan 11-04 amendment for migrating to JWKS-based verification (research in flight).
   - Upstash Redis: separate `kendrew-staging` and `kendrew-prod` databases, both TLS.
   - Cloudflare R2: separate buckets per env (`kendrew-staging`, `kendrew-prod`) to prevent cross-env PDB leakage.
 - **D-04:** SSL certs are platform-managed. Vercel and Railway auto-issue and renew LetsEncrypt. No Cloudflare full-strict — Cloudflare stays DNS-only for `app.kendrew.ai`.

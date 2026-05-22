@@ -109,14 +109,38 @@ None — no bugs or missing critical functionality discovered. The only work for
 
 Execute Blocks A-F from `.planning/phases/11-deployment/11-02-PLAN.md §how-to-verify`:
 
-| Block | Dashboard                  | Est. Time | Paste into PROVISIONING.md section        |
-| ----- | -------------------------- | --------- | ----------------------------------------- |
-| A     | supabase.com/dashboard     | ~15 min   | §Supabase (both `kendrew-prod` + staging) |
-| B     | console.upstash.com        | ~5 min    | §Upstash Redis (both envs)                |
-| C     | Cloudflare dashboard → R2  | ~10 min   | §Cloudflare R2 (both buckets + tokens)    |
-| D     | `modal` CLI                | ~5 min    | §Modal (tokens + env-exists checkbox)     |
-| E     | dash.cloudflare.com → tokens | ~3 min  | §Cloudflare DNS                           |
-| F     | resend.com/domains         | ~10 min + propagation | §Resend (API key + verified checkboxes) |
+| Block | Dashboard                  | Est. Time | Paste into PROVISIONING.md section        | Status |
+| ----- | -------------------------- | --------- | ----------------------------------------- | ------ |
+| A     | supabase.com/dashboard     | ~15 min   | §Supabase (both `kendrew-prod` + staging) | DONE 2026-04-29 (driven via Claude_in_Chrome MCP — see §Block A delta below) |
+| B     | console.upstash.com        | ~5 min    | §Upstash Redis (both envs)                | pending |
+| C     | Cloudflare dashboard → R2  | ~10 min   | §Cloudflare R2 (both buckets + tokens)    | pending |
+| D     | `modal` CLI                | ~5 min    | §Modal (tokens + env-exists checkbox)     | pending (modal CLI 1.4.2 installed locally; `main` env exists, `staging` not yet created) |
+| E     | dash.cloudflare.com → tokens | ~3 min  | §Cloudflare DNS                           | pending |
+| F     | resend.com/domains         | ~10 min + propagation | §Resend (API key + verified checkboxes) | pending |
+
+## Block A delta (2026-04-29)
+
+Both Supabase projects are now provisioned and PROVISIONING.md §Supabase is fully populated.
+
+| Env             | Project ref          | Compute | Region    | DB password source              |
+| --------------- | -------------------- | ------- | --------- | ------------------------------- |
+| kendrew-prod    | omrhpkmgiqvuwpadhbsl | NANO    | us-east-1 | reset 2026-04-29 (original lost) |
+| kendrew-staging | sqcrsvcrpqckrupztesf | MICRO   | us-east-1 | auto-generated at creation      |
+
+DATABASE_URL: dedicated transaction pooler at `db.<ref>.supabase.co:6543` (Pro tier benefit, IPv6 default). PROVISIONING.md also records the shared Supavisor URL (`aws-0-us-east-1.pooler.supabase.com:6543`) under DATABASE_URL_SHARED as an IPv4-compatible fallback in case Railway IPv6 has issues.
+
+Two deploy concerns surfaced and recorded in PROVISIONING.md:
+
+1. **JWT signing migrated HS256 → ECC P-256.** Supabase auto-rotated the project signing key. Anon and service_role tokens (long-lived, HS256-signed) still verify against the legacy secret, but new end-user session JWTs from Supabase Auth will be ECC-signed. backend/auth.py currently calls `jwt.decode(..., algorithms=["HS256"])` — this will fail for end-user logins after deploy. **Plan 11-04 needs to either** (a) migrate to JWKS-based verification (preferred), (b) determine if Supabase exposes an "unrotate" path back to HS256, or (c) refactor to use Publishable + Secret API keys (sb_publishable_*, sb_secret_*). 11-CONTEXT.md D-03 has been amended to call this out.
+
+2. **PITR is a separate Pro add-on (~$100/mo per project), NOT auto-included.** Both projects currently have daily backup with 7-day retention only. ROADMAP.md SC 3 has been updated to reflect this. Decision needed before public launch on whether to enable the add-on.
+
+Acceptance grep checks all still pass on the populated file:
+- `grep "pooler.supabase.com:6543"` → matches (DATABASE_URL_SHARED lines in both env blocks)
+- `grep "rediss://"` → matches (template Upstash placeholders, will get real values in Block B)
+- `grep "kendrew-prod"` → matches (multiple)
+- `grep "kendrew-staging"` → matches (multiple)
+- `git check-ignore` → exit 0, matched by `.gitignore:50`
 
 After Blocks A-F are done and PROVISIONING.md is fully filled in, reply with `"provisioned"` (or a safe summary that omits real secrets) to the orchestrator, which will resume Plan 11-03.
 
