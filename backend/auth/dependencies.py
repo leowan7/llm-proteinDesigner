@@ -3,7 +3,7 @@
 import jwt
 from fastapi import Cookie, HTTPException, status
 
-from config import settings
+from auth.jwks import jwks_verifier
 
 
 async def get_current_user(access_token: str | None = Cookie(default=None)) -> str:
@@ -11,7 +11,14 @@ async def get_current_user(access_token: str | None = Cookie(default=None)) -> s
     FastAPI dependency that validates a Supabase JWT from an HTTP-only cookie.
 
     Reads the access_token from the HTTP-only cookie set by the login endpoint.
-    Validates using PyJWT with HS256 against the Supabase JWT secret.
+    Verification is delegated to ``auth.jwks.SupabaseJWKSVerifier`` which does
+    dual-algorithm verification: ES256 via the project's JWKS for asymmetric
+    tokens (the post-2026-04 default), HS256 against ``settings.supabase_jwt_secret``
+    when the token's header explicitly claims HS256 and the legacy secret is
+    still configured. Algorithms are pinned per code path; the two paths are
+    NEVER combined in one ``jwt.decode`` call (algorithm-confusion mitigation —
+    see ``auth/jwks.py`` module docstring and Phase 11 Plan 04 sub-plan).
+
     Returns the Supabase user UUID (sub claim).
 
     Raises:
@@ -23,25 +30,7 @@ async def get_current_user(access_token: str | None = Cookie(default=None)) -> s
             detail="Not authenticated",
         )
     try:
-        # Try HS256 first (older Supabase), fall back to ES256 (newer Supabase)
-        try:
-            payload = jwt.decode(
-                access_token,
-                settings.supabase_jwt_secret,
-                algorithms=["HS256"],
-                audience="authenticated",
-            )
-        except (jwt.exceptions.InvalidAlgorithmError, jwt.exceptions.InvalidSignatureError):
-            # Newer Supabase uses ES256 asymmetric signing — fetch JWKS
-            jwks_url = f"{settings.supabase_url}/auth/v1/.well-known/jwks.json"
-            jwks_client = jwt.PyJWKClient(jwks_url)
-            signing_key = jwks_client.get_signing_key_from_jwt(access_token)
-            payload = jwt.decode(
-                access_token,
-                signing_key.key,
-                algorithms=["ES256"],
-                audience="authenticated",
-            )
+        payload = await jwks_verifier.verify(access_token)
         return payload["sub"]
     except jwt.ExpiredSignatureError:
         raise HTTPException(

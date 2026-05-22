@@ -10,6 +10,7 @@ from pydantic import BaseModel, EmailStr
 
 from config import settings
 from auth.dependencies import get_current_user
+from auth.jwks import jwks_verifier
 from db.connection import get_db_pool
 from middleware.rate_limit import limiter
 
@@ -230,24 +231,24 @@ async def exchange_token(body: ExchangeTokenRequest, response: Response):
     set HTTP-only cookies, so it calls this endpoint to exchange the tokens.
     The backend sets them as HTTP-only cookies, making /auth/update-password work.
 
-    WR-05: verify the token signature with ``settings.supabase_jwt_secret`` and
-    derive the cookie ``max_age`` from the token's ``exp`` claim rather than
-    hardcoding 3600 seconds. Supabase recovery tokens are typically short-lived
-    (e.g. 5 minutes) — setting a 60-minute cookie would extend the window the
-    recovery session remains active on the device.
+    WR-05: verify the token signature (dual-algorithm: ES256 via the project's
+    JWKS, falling back to HS256 against ``settings.supabase_jwt_secret`` only
+    when the token's header itself claims HS256 and the legacy secret is set —
+    see Phase 11 Plan 04 sub-plan). Cookie ``max_age`` derives from the token's
+    ``exp`` claim rather than hardcoding 3600 seconds. Supabase recovery tokens
+    are typically short-lived (e.g. 5 minutes) — a 60-minute cookie would
+    extend the window the recovery session remains active on the device.
     """
     try:
-        # Verify signature + audience + exp. jwt.decode raises
-        # ExpiredSignatureError on expired tokens; we surface it as 401.
-        payload = jwt.decode(
-            body.access_token,
-            settings.supabase_jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-        )
+        # Delegate to the shared JWKS verifier. ``ExpiredSignatureError`` and
+        # ``InvalidTokenError`` are both subclasses of ``jwt.PyJWTError`` and
+        # are caught explicitly below to surface different user-facing messages.
+        payload = await jwks_verifier.verify(body.access_token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Recovery token has expired; request a new reset link.")
     except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid recovery token")
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid recovery token")
 
     # Derive max_age from exp so the cookie lifetime tracks the token lifetime.
