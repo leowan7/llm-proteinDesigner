@@ -11,7 +11,12 @@ RUN apt-get update \
  && apt-get purge -y curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Build context is repo root (Railway default). Explicit paths so docker-compose
+# can also use `context: .` + `dockerfile: backend/Dockerfile`.
+# supabase/ migrations are copied in because railway.toml preDeployCommand
+# runs `supabase db push` from /app/ before traffic shifts.
+COPY backend/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
+COPY backend/ /app/
+COPY supabase/ /app/supabase/
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
