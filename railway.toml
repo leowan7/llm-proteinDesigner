@@ -8,7 +8,9 @@ builder = "DOCKERFILE"
 dockerfilePath = "backend/Dockerfile"
 
 [deploy]
-preDeployCommand = ["supabase", "db", "push", "--db-url", "$DATABASE_URL", "--yes"]
+# Single shell-string so $DATABASE_URL is expanded by sh -c (Railway requires
+# at-most-1 element in this array; exec-form rejected at config parse).
+preDeployCommand = ["supabase db push --db-url $DATABASE_URL --yes"]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
