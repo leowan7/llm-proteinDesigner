@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import type { StructureSummary, ChainInfo } from "@/lib/agent";
 
 interface StructurePreviewCardProps {
-  data: Partial<StructureSummary> & Record<string, unknown>;
+  data: StructureSummary;
   onUseDifferent?: () => void;
   onChainSelected?: (chainId: string) => void;
   /** Controlled selected chain — when provided, overrides internal state */
@@ -35,7 +35,7 @@ export function StructurePreviewCard({ data, onUseDifferent, onChainSelected, se
   const protein_name = data.protein_name ?? "Unknown protein";
   const resolution = data.resolution ?? null;
   const method = data.method ?? "";
-  const chains = (data.chains as ChainInfo[] | undefined) ?? [];
+  const chains: ChainInfo[] = data.chains ?? [];
   const normalization_changes = data.normalization_changes ?? [];
   const defaultChain = data.selected_chain ?? (chains[0]?.id || "A");
 
@@ -50,12 +50,10 @@ export function StructurePreviewCard({ data, onUseDifferent, onChainSelected, se
   // Total residues across all chains
   const totalResidues = chains.length > 0
     ? chains.reduce((sum, c) => sum + (c.residue_count || 0), 0)
-    : (data.residue_count as number) ?? 0;
+    : data.residue_count ?? 0;
 
   // Organism — take from first chain that has it, or from top-level data
-  const organism = chains.find((c) => c.organism)?.organism
-    || (data.organism as string | undefined)
-    || "";
+  const organism = chains.find((c) => c.organism)?.organism || data.organism || "";
 
   return (
     <Card className="my-2 border-border/50 font-body">

@@ -42,7 +42,7 @@ import {
   uploadPdbFile,
   sendMessage,
 } from "@/lib/agent";
-import type { ChatMessage, ChatCard, AgentEvent, ActionButton, ReviewData } from "@/lib/agent";
+import type { ChatMessage, ChatCard, AgentEvent, ReviewData, ValidationCheck } from "@/lib/agent";
 import {
   subscribeToJobStatus,
   cancelJob,
@@ -399,7 +399,7 @@ export function ChatPage() {
       // Only show a structure card if we got real PDB metadata (pdb_id + chains)
       if (result.pdb_id && result.chains) {
         structureResultRef.current = result;
-        return { type: "structure_preview", data: result } as ChatCard;
+        return { type: "structure_preview", data: result as unknown as ChatCard["data"] } as ChatCard;
       }
       // UniProt-only results (no PDB resolved yet) — store ref but don't render a card
       structureResultRef.current = result;
@@ -437,7 +437,12 @@ export function ChatPage() {
     if (toolName === "validate_preflight") {
       const validationCard: ChatCard = {
         type: "validation",
-        data: result as ChatCard["data"] & object,
+        data: result as unknown as {
+          validation_results: ValidationCheck[];
+          can_proceed: boolean;
+          has_warnings: boolean;
+          summary: string;
+        },
       };
 
       if (parametersResultRef.current) {
@@ -779,11 +784,13 @@ export function ChatPage() {
         {/* Mobile: context panel sheet trigger */}
         <div className="md:hidden absolute top-2 right-2">
           <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="ghost" size="sm">
-                View summary
-              </Button>
-            </SheetTrigger>
+            <SheetTrigger
+              render={
+                <Button variant="ghost" size="sm">
+                  View summary
+                </Button>
+              }
+            />
             <SheetContent side="bottom" className="h-[60vh]">
               <SheetHeader>
                 <SheetTitle>Current Summary</SheetTitle>

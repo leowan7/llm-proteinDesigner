@@ -18,6 +18,10 @@ import type { ChatCard } from "@/lib/agent";
 interface AgentMessageProps {
   content: string;
   cards?: ChatCard[];
+  /** Optional inline action buttons (half-built feature; widened for build). */
+  actions?: unknown[];
+  /** Action handler for the inline action buttons. */
+  onAction?: (value: string) => void;
   /** Called with the launched job ID after the ReviewCard dispatches a job. */
   onJobLaunched?: (jobId: string) => void;
   onEditParams?: () => void;

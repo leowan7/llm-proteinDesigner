@@ -35,9 +35,7 @@ export function LegalLayout({ title, lastUpdated, children }: LegalLayoutProps) 
 
       <footer className="mt-12 flex items-center justify-between border-t pt-6 text-sm text-muted-foreground">
         <span>© Ranomics Inc.</span>
-        <Button asChild variant="outline" size="sm">
-          <Link to="/">Return to Kendrew</Link>
-        </Button>
+        <Button variant="outline" size="sm" render={<Link to="/">Return to Kendrew</Link>} />
       </footer>
     </div>
   );

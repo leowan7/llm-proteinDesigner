@@ -186,7 +186,7 @@ export function AdminRevenuePage() {
                         border: "1px solid oklch(1 0 0 / 10%)",
                         borderRadius: "0.625rem",
                       }}
-                      formatter={(value: number) => [`$${value.toFixed(2)}`, "Revenue"]}
+                      formatter={(value) => [`$${Number(value).toFixed(2)}`, "Revenue"]}
                     />
                     <Bar dataKey="revenue" radius={[4, 4, 0, 0]}>
                       {revenue.by_tool.map((_, index) => (

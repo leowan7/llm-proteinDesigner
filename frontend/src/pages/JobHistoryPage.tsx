@@ -174,9 +174,7 @@ export function JobHistoryPage() {
               <p className="text-sm text-muted-foreground mb-6">
                 Start a design conversation to launch your first job.
               </p>
-              <Button variant="default" size="sm" asChild>
-                <Link to="/chat">Open chat</Link>
-              </Button>
+              <Button variant="default" size="sm" render={<Link to="/chat">Open chat</Link>} />
             </div>
           )}
 
@@ -232,9 +230,7 @@ export function JobHistoryPage() {
                       </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
-                          <Button variant="outline" size="sm" asChild>
-                            <Link to={`/jobs/${job.id}`}>View</Link>
-                          </Button>
+                          <Button variant="outline" size="sm" render={<Link to={`/jobs/${job.id}`}>View</Link>} />
                           {job.status === "complete" && (
                             <Button
                               variant="outline"
@@ -273,9 +269,7 @@ export function JobHistoryPage() {
                     )}
                   </div>
                   <div className="flex gap-2 mt-3">
-                    <Button variant="outline" size="sm" asChild>
-                      <Link to={`/jobs/${job.id}`}>View job</Link>
-                    </Button>
+                    <Button variant="outline" size="sm" render={<Link to={`/jobs/${job.id}`}>View job</Link>} />
                     {job.status === "complete" && (
                       <Button
                         variant="outline"

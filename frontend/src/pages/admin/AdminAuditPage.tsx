@@ -171,11 +171,13 @@ export function AdminAuditPage() {
                       <TableCell>
                         {entry.target_id ? (
                           <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="font-mono text-sm cursor-help text-foreground">
-                                {entry.target_id.slice(0, 8)}
-                              </span>
-                            </TooltipTrigger>
+                            <TooltipTrigger
+                              render={
+                                <span className="font-mono text-sm cursor-help text-foreground">
+                                  {entry.target_id.slice(0, 8)}
+                                </span>
+                              }
+                            />
                             <TooltipContent>{entry.target_id}</TooltipContent>
                           </Tooltip>
                         ) : (

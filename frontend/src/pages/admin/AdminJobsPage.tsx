@@ -412,7 +412,7 @@ export function AdminJobsPage() {
                                 </div>
 
                                 {/* Error message */}
-                                {expandedJobDetail.results?.error_message && (
+                                {!!expandedJobDetail.results?.error_message && (
                                   <div>
                                     <p className="text-xs font-semibold text-muted-foreground mb-1 uppercase tracking-wide">
                                       Error

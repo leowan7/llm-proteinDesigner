@@ -25,6 +25,8 @@ interface ChatInputProps {
   onInjectedValueConsumed?: () => void;
   /** Ref forwarded to the underlying textarea element (for focus control). */
   textareaRef?: React.RefObject<HTMLTextAreaElement | null>;
+  /** Optional stop handler called when the user aborts an in-flight request. */
+  onStop?: () => void;
 }
 
 /** Format file size in human-readable KB */

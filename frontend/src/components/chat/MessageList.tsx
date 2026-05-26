@@ -23,12 +23,14 @@ interface MessageListProps {
   isProcessing: boolean;
   statusText: string;
   warningsAcknowledged: boolean;
-  onAction: (value: string) => void;
+  onAction?: (value: string) => void;
   /** Called with job ID when the ReviewCard successfully dispatches a job. */
   onJobLaunched: (jobId: string) => void;
   onEditParams: () => void;
   onAcknowledgeWarnings: () => void;
   onUseDifferentStructure: () => void;
+  onChainSelected?: (chainId: string) => void;
+  selectedChain?: string;
   /** Called when an example prompt is clicked in GreetingCard (D-21). */
   onPromptClick?: (prompt: string) => void;
   /** Screen reader announcement for new assistant messages only (WCAG). */
@@ -50,6 +52,8 @@ export function MessageList({
   onEditParams,
   onAcknowledgeWarnings,
   onUseDifferentStructure,
+  onChainSelected,
+  selectedChain,
   onPromptClick,
   lastAnnouncedMessage,
 }: MessageListProps) {
@@ -97,6 +101,8 @@ export function MessageList({
               onEditParams={onEditParams}
               onAcknowledgeWarnings={onAcknowledgeWarnings}
               onUseDifferentStructure={onUseDifferentStructure}
+              onChainSelected={onChainSelected}
+              selectedChain={selectedChain}
               warningsAcknowledged={warningsAcknowledged}
               isValidating={isProcessing && hasReviewCard(message.cards)}
             />

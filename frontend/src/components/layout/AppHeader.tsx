@@ -29,12 +29,14 @@ export function AppHeader({ sessionTitle }: AppHeaderProps) {
 
       {/* Sidebar toggle */}
       <Tooltip>
-        <TooltipTrigger asChild>
-          <SidebarTrigger
-            className="h-8 w-8 shrink-0"
-            aria-label="Toggle sidebar"
-          />
-        </TooltipTrigger>
+        <TooltipTrigger
+          render={
+            <SidebarTrigger
+              className="h-8 w-8 shrink-0"
+              aria-label="Toggle sidebar"
+            />
+          }
+        />
         <TooltipContent side="right">
           <p>Toggle sidebar</p>
         </TooltipContent>

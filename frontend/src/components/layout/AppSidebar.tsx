@@ -98,34 +98,34 @@ function SessionItem({
   onDelete: (id: string) => void;
   onRenameStart: (session: SessionSummary) => void;
 }) {
-  const navigate = useNavigate();
   const title = session.title ?? "Untitled session";
 
   return (
     <SidebarMenuItem>
       <SidebarMenuButton
-        asChild
         isActive={isActive}
         aria-current={isActive ? "page" : undefined}
         className="min-h-[44px] group/item"
-      >
-        <Link to={`/chat/${session.id}`} className="flex items-center gap-2 w-full">
-          <span className="truncate flex-1 text-sm">{title}</span>
-          {/* Context menu trigger — visible on hover */}
-          <span
-            className="opacity-0 group-hover/item:opacity-100 focus-within:opacity-100 shrink-0"
-            onClick={(e) => e.preventDefault()}
-          >
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button
-                  aria-label={`Options for ${title}`}
-                  className="h-6 w-6 inline-flex items-center justify-center rounded-sm hover:bg-sidebar-accent text-muted-foreground hover:text-foreground"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
-                </button>
-              </DropdownMenuTrigger>
+        render={
+          <Link to={`/chat/${session.id}`} className="flex items-center gap-2 w-full">
+            <span className="truncate flex-1 text-sm">{title}</span>
+            {/* Context menu trigger — visible on hover */}
+            <span
+              className="opacity-0 group-hover/item:opacity-100 focus-within:opacity-100 shrink-0"
+              onClick={(e) => e.preventDefault()}
+            >
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <button
+                      aria-label={`Options for ${title}`}
+                      className="h-6 w-6 inline-flex items-center justify-center rounded-sm hover:bg-sidebar-accent text-muted-foreground hover:text-foreground"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                  }
+                />
               <DropdownMenuContent align="end" className="w-36">
                 <DropdownMenuItem
                   onClick={(e) => {
@@ -152,7 +152,8 @@ function SessionItem({
             </DropdownMenu>
           </span>
         </Link>
-      </SidebarMenuButton>
+        }
+      />
     </SidebarMenuItem>
   );
 }
@@ -366,29 +367,29 @@ export function AppSidebar({ sessions, sessionsLoading, activeSessionId, onRefre
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarMenuButton
-                asChild
                 isActive={location.pathname === "/jobs" || location.pathname.startsWith("/jobs/")}
                 className="min-h-[44px]"
                 tooltip="Jobs"
-              >
-                <Link to="/jobs">
-                  <Briefcase className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>Jobs</span>
-                </Link>
-              </SidebarMenuButton>
+                render={
+                  <Link to="/jobs">
+                    <Briefcase className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>Jobs</span>
+                  </Link>
+                }
+              />
             </SidebarMenuItem>
             <SidebarMenuItem>
               <SidebarMenuButton
-                asChild
                 isActive={location.pathname === "/settings"}
                 className="min-h-[44px]"
                 tooltip="Settings"
-              >
-                <Link to="/settings">
-                  <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span>Settings</span>
-                </Link>
-              </SidebarMenuButton>
+                render={
+                  <Link to="/settings">
+                    <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>Settings</span>
+                  </Link>
+                }
+              />
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarGroup>

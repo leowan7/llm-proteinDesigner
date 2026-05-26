@@ -50,6 +50,7 @@ export interface StructureSummary {
   residue_count: number;
   chains: ChainInfo[];
   normalization_changes: string[];
+  organism?: string;
 }
 
 /** Validation check result from validate_preflight tool */
@@ -81,6 +82,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   cards?: ChatCard[];
+  /** Optional inline action buttons (half-built feature; widened for build). */
+  actions?: unknown[];
 }
 
 export type ChatCard =
