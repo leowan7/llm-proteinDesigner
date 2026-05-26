@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging as _stdlogging
 from contextlib import asynccontextmanager
 
 import redis.asyncio as aioredis
@@ -125,7 +126,6 @@ if settings.debug or settings.testing:
     app.include_router(debug_router)
 
 
-import logging as _stdlogging
 _health_logger = _stdlogging.getLogger("kendrew.health")
 
 
