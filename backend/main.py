@@ -134,11 +134,11 @@ async def health():
     """Deep health check — verifies API, database, and Redis connectivity.
 
     Returns 200 with all checks "ok" when healthy, 503 with error details
-    when any dependency is unreachable.
+    when any dependency is unreachable. Failure type+message is logged at
+    WARNING so deploy-time diagnostics surface in Railway logs.
     """
     checks = {"api": "ok"}
 
-    # Check database connectivity.
     try:
         pool = await get_db_pool()
         await pool.fetchval("SELECT 1")
@@ -147,7 +147,6 @@ async def health():
         checks["db"] = f"error: {str(exc)[:200]}"
         _health_logger.warning("health.db_failed type=%s msg=%s", type(exc).__name__, str(exc)[:500])
 
-    # Check Redis connectivity.
     try:
         r = aioredis.from_url(settings.redis_url)
         await r.ping()
