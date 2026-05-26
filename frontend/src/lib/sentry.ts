@@ -2,10 +2,10 @@ import * as Sentry from "@sentry/react";
 
 /**
  * Initialize Sentry error tracking for the frontend.
- * Only activates when VITE_SENTRY_DSN is set (disabled in local dev by default).
+ * Only activates when VITE_SENTRY_DSN_FRONTEND is set (disabled in local dev by default).
  */
 export function initSentry(): void {
-  const dsn = import.meta.env.VITE_SENTRY_DSN;
+  const dsn = import.meta.env.VITE_SENTRY_DSN_FRONTEND;
   if (!dsn) return;
 
   Sentry.init({
