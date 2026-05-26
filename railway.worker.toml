@@ -1,0 +1,17 @@
+# Phase 11 D-06: Worker-specific Railway config-as-code.
+# Worker shares backend/Dockerfile but runs arq instead of uvicorn.
+# Point the worker service at this file via:
+#   Settings -> Config-as-Code -> Config Path: railway.worker.toml
+# Backend still uses /railway.toml.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "backend/Dockerfile"
+
+[deploy]
+# No preDeployCommand: backend's preDeploy already runs supabase db push on
+# its own deployment; worker should not re-run migrations.
+# No healthcheckPath: arq is not an HTTP server.
+startCommand = "arq worker.main.WorkerSettings"
+numReplicas = 2
+restartPolicyType = "ON_FAILURE"
