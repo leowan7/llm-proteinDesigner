@@ -31,7 +31,6 @@ import json
 import logging
 import time
 
-import asyncpg
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings
 
@@ -121,7 +120,7 @@ async def spawn_session(
         s3_key = ensure_pdb_in_s3(
             spec_data["target_pdb_path"], user_id=str(row["user_id"]), job_id=job_id,
         )
-    except Exception as exc:
+    except Exception:
         logger.exception(
             "session_orchestrator.spawn_session: ensure_pdb_in_s3 failed for job %s", job_id,
         )

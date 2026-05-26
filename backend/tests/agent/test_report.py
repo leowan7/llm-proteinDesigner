@@ -6,7 +6,6 @@ async handler.
 All S3 calls are mocked — no real MinIO or network connection required.
 """
 
-import io
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch

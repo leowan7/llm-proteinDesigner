@@ -16,7 +16,6 @@ Exports:
 """
 
 import json
-from typing import Any
 
 from db.connection import get_db_pool
 

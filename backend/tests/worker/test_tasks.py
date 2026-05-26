@@ -16,7 +16,6 @@ os.environ.setdefault("TESTING", "true")
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 # Import the functions under test AFTER setting TESTING env
 from worker.tasks import publish_status
@@ -105,7 +104,7 @@ async def test_run_job_creates_pod():
         patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.generate_presigned_get_url", return_value="https://s3.example.com/target.pdb"),
         patch("worker.tasks.publish_status", new_callable=AsyncMock) as mock_publish,
-        patch("worker.tasks.update_job_status", new_callable=AsyncMock) as mock_update,
+        patch("worker.tasks.update_job_status", new_callable=AsyncMock),
         patch("worker.tasks.PIPELINE_MAP", {"rfdiffusion": mock_pipeline}),
         patch("worker.tasks.settings") as mock_settings,
     ):

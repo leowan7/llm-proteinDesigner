@@ -9,7 +9,6 @@ Implementation target: Plan 03-03.
 """
 
 import io
-import json
 import zipfile
 from unittest.mock import AsyncMock, MagicMock, patch
 

@@ -9,7 +9,6 @@ Implementation target: Plan 03-03.
 
 import json
 
-import pytest
 
 
 class TestJobResults:

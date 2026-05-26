@@ -39,7 +39,6 @@ async def test_login_returns_cookies(client):
         json={"email": TEST_USER_EMAIL, "password": TEST_USER_PASSWORD},
     )
     assert response.status_code == 200
-    cookies = response.cookies
     assert "access_token" in response.headers.get("set-cookie", "").lower()
 
 

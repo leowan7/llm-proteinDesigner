@@ -689,7 +689,7 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
                     tool,
                     json.dumps(job_spec),
                 )
-        except Exception as exc:
+        except Exception:
             # Job creation failed — log but don't block the validation result
             job_id = None
 

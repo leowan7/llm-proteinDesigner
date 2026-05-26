@@ -13,18 +13,16 @@ Security (T-08-07, T-08-08):
   - Shortlist capped at 50 candidates (T-08-09)
 """
 
-import io
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 import pandas as pd
 from fpdf import FPDF
 
 from agent.analysis.cache import get_cached
 from agent.analysis.ranking import compute_distribution_stats
-from agent.analysis.tools import METRIC_THRESHOLDS, _assess_threshold, handle_flag_red_flags
+from agent.analysis.tools import handle_flag_red_flags
 from config import settings
 from storage.client import generate_presigned_get_url, get_s3_client
 

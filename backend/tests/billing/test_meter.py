@@ -7,7 +7,7 @@ Covers:
 Implementation target: Plan 03-02.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from billing.stripe_client import record_gpu_usage
 

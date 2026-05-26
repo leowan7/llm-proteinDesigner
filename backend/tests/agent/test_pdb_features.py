@@ -3,7 +3,6 @@
 Tests BSA, clash count, and interface contact functions from
 agent.analysis.pdb_features against a minimal two-chain fixture.
 """
-import pytest
 from pathlib import Path
 
 from agent.analysis.pdb_features import (

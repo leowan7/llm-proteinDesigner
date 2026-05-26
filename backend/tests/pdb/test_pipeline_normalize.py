@@ -199,7 +199,7 @@ def test_drops_waters(tmp_path):
 def test_keep_waters_flag_retains_them(tmp_path):
     inp = _write_pdb(str(tmp_path / "input.pdb"), PROTEIN_WITH_WATERS_PDB)
     out = str(tmp_path / "out.pdb")
-    report = normalize_for_pipeline(
+    normalize_for_pipeline(
         inp, out, target_chain="A",
         keep_waters=True, keep_hetatm=True,
     )
@@ -243,7 +243,7 @@ def test_multi_model_collapses_to_first(tmp_path):
     out_text = open(out).read()
     # Find the CA atom line — it should reference the model-1 coords (~2.000)
     # rather than model-2 (~9.000).
-    ca_lines = [l for l in out_text.splitlines() if " CA " in l and " ALA A" in l]
+    ca_lines = [line for line in out_text.splitlines() if " CA " in line and " ALA A" in line]
     assert len(ca_lines) == 1
     assert "2.000" in ca_lines[0]
     assert "9.000" not in ca_lines[0]

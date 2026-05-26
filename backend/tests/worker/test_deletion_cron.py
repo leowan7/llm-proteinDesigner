@@ -4,7 +4,6 @@ os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from worker.deletion_cron import process_pending_deletions
 

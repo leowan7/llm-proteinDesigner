@@ -447,7 +447,7 @@ async def test_cr01_hard_delete_reaches_auth_delete_with_prior_audit_log_row():
 
     with patch("user.deletion.get_db_pool", new_callable=AsyncMock, return_value=mock_pool), \
          patch("user.deletion.list_and_delete_user_objects", return_value=0), \
-         patch("user.deletion.stripe") as mock_stripe, \
+         patch("user.deletion.stripe"), \
          patch("user.deletion.delete_auth_user") as mock_auth_delete, \
          patch("user.deletion.send_deletion_completed_email", new_callable=AsyncMock) as mock_email:
         await execute_hard_delete(USER_ID, "user@example.com", "cus_abc")

@@ -11,7 +11,6 @@ os.environ.setdefault("TESTING", "true")
 from unittest.mock import MagicMock
 
 import jwt
-import pytest
 
 from middleware.rate_limit import get_rate_limit_key
 

@@ -16,7 +16,6 @@ import os
 os.environ.setdefault("TESTING", "true")
 
 import datetime
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

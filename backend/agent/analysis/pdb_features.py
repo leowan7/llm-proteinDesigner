@@ -21,7 +21,6 @@ the calling tool — never accepts raw user input (T-08-04).
 """
 
 import logging
-from pathlib import Path
 
 from Bio.PDB import PDBParser, NeighborSearch
 from Bio.PDB.Polypeptide import is_aa

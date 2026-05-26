@@ -9,14 +9,11 @@ os.environ.setdefault("TESTING", "true")
 
 import json
 import logging
-from unittest.mock import patch
 
 import jwt
-import pytest
 from httpx import AsyncClient, ASGITransport
 
 from main import app
-from middleware.logging import StructuredLoggingMiddleware, setup_logging
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter

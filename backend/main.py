@@ -14,6 +14,14 @@ from config import settings
 from auth.router import router as auth_router
 from db.connection import close_db_pool, get_db_pool
 from middleware.logging import StructuredLoggingMiddleware, setup_logging
+from pdb_utils.router import router as pdb_router
+from agent.router import router as agent_router
+from billing.router import router as billing_router
+from webhooks.router import router as webhooks_router
+from jobs.router import router as jobs_router
+from sessions.router import router as sessions_router
+from user.router import router as user_router
+from admin.router import router as admin_router
 
 # Initialize Sentry error tracking (disabled when sentry_dsn is empty).
 # Hot-path Performance sampling per Phase 11 D-14: sample 100% of the 5 routes
@@ -102,31 +110,13 @@ app.add_middleware(StructuredLoggingMiddleware)
 
 # Routers
 app.include_router(auth_router)
-
-# PDB pipeline router (Plan 02-02)
-from pdb_utils.router import router as pdb_router
 app.include_router(pdb_router)
-
-from agent.router import router as agent_router
 app.include_router(agent_router)
-
-from billing.router import router as billing_router
 app.include_router(billing_router)
-
-# Job execution and webhook routers (Plan 03-03)
-from webhooks.router import router as webhooks_router
 app.include_router(webhooks_router)
-
-from jobs.router import router as jobs_router
 app.include_router(jobs_router)
-
-from sessions.router import router as sessions_router
 app.include_router(sessions_router)
-
-from user.router import router as user_router
 app.include_router(user_router)
-
-from admin.router import router as admin_router
 app.include_router(admin_router)
 
 # Phase 11 SC 8: synthetic-error endpoint for Sentry verification (dev only).

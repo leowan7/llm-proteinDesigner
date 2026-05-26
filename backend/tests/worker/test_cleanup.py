@@ -15,7 +15,6 @@ os.environ.setdefault("TESTING", "true")
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from worker.cleanup import (
     MAX_POD_LIFETIME_SECONDS,
