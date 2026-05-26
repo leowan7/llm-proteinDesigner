@@ -155,6 +155,21 @@ jobs:
           COOKIE_SECURE: "false"
           CSRF_SECRET: "ci-csrf-secret"
 
+      - name: Seed E2E test user
+        run: |
+          # Idempotent: returns 200/201 on create, 422 if exists; either is fine for tests.
+          curl -sS -X POST \
+            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"email":"test@example.com","password":"Password123!","email_confirm":true}' \
+            "${SUPABASE_URL}/auth/v1/admin/users" \
+            -o /tmp/seed-resp.json -w "HTTP %{http_code}\n" || true
+          cat /tmp/seed-resp.json | head -c 500; echo
+        env:
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
       - name: Run Playwright tests
         run: cd frontend && npx playwright test
         env:
