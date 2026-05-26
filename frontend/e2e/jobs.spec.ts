@@ -43,10 +43,15 @@ test.describe("Job status + results", () => {
       // JobPage shows a JobStatusCard — verify the page has rendered
       await expect(page.locator("text=Loading job...").or(page.locator('[data-testid="job-status"]'))).toBeVisible({ timeout: 10000 });
     } else {
-      // No jobs — navigate directly to a non-existent job and verify error state
-      await page.goto("/jobs/nonexistent-job-id");
-      // JobPage renders a destructive-colored error paragraph on load failure
-      await expect(page.locator(".text-destructive, text=Failed to load job, text=not found")).toBeVisible({ timeout: 10000 });
+      // No jobs — navigate directly to a non-existent job and verify error state.
+      // JobPage renders <p class="text-base text-destructive">{loadError}</p>.
+      // Avoid mixing CSS selectors with Playwright `text=` in one string
+      // (which is not valid CSS); use .or() chaining instead.
+      await page.goto("/jobs/not-a-real-uuid");
+      const errorParagraph = page.locator(".text-destructive")
+        .or(page.locator("text=Failed to load job"))
+        .or(page.locator("text=not found"));
+      await expect(errorParagraph.first()).toBeVisible({ timeout: 10000 });
     }
   });
 });
