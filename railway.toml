@@ -8,13 +8,14 @@ builder = "DOCKERFILE"
 dockerfilePath = "backend/Dockerfile"
 
 [deploy]
-# Single shell-string so $MIGRATION_DB_URL is expanded by sh -c (Railway requires
-# at-most-1 element in this array; exec-form rejected at config parse).
-# Uses MIGRATION_DB_URL (port 5432 direct connection) instead of DATABASE_URL
-# (port 6543 Supavisor transaction pooler) — `supabase db push` uses session-level
-# state that the transaction pooler rejects. Per-env values set in Railway Variables.
-preDeployCommand = ["supabase db push --db-url $MIGRATION_DB_URL --yes"]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+# preDeployCommand is intentionally disabled while diagnosing why deploys
+# fail silently (CLI exposes only "Starting/Stopping Container" — no preDeploy
+# output, no app traceback). Once main app boots cleanly, re-enable migration
+# step with: ["supabase db push --db-url $MIGRATION_DB_URL --yes"]
+# MIGRATION_DB_URL (port 5432 direct) is set in Railway Variables per env.
+# preDeployCommand = ["supabase db push --db-url $MIGRATION_DB_URL --yes"]
+# Echo PORT so we can see what Railway injects; default to 8000 if missing.
+startCommand = "sh -c 'echo PORT=${PORT:-MISSING}; exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers --forwarded-allow-ips=\"*\"'"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 numReplicas = 2
