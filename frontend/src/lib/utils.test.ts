@@ -9,7 +9,8 @@ describe("cn()", () => {
   });
 
   it("handles conditional class values (falsy values are ignored)", () => {
-    const result = cn("base", false && "hidden", "text-sm");
+    const falsyFlag: boolean = false;
+    const result = cn("base", falsyFlag && "hidden", "text-sm");
     expect(result).toBe("base text-sm");
   });
 

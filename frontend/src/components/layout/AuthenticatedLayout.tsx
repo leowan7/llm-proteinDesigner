@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- exports both components and the LayoutContext for child routes */
 /**
  * AuthenticatedLayout — layout wrapper for all authenticated routes.
  *

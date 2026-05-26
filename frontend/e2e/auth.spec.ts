@@ -24,7 +24,6 @@ test.describe("Authentication", () => {
   });
 
   test("login with invalid credentials shows error", async ({ page }) => {
-    const loginPage = new LoginPage(page);
     await page.goto("/login");
     await page.fill('input[name="email"]', "wrong@example.com");
     await page.fill('input[name="password"]', "wrongpassword");

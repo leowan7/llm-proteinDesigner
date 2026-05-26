@@ -26,7 +26,6 @@ test.describe("Job status + results", () => {
     // JobHistoryPage renders either a <table> (has jobs) or an empty state
     // with a CTA to /chat. Either is a valid loaded state.
     const table = page.locator("table");
-    const emptyState = page.locator('text=No jobs yet, a:has-text("Start designing"), a:has-text("chat")');
 
     // Use Promise.race pattern via expect with multiple locators
     await expect(table.or(page.locator('text=No jobs'))).toBeVisible({ timeout: 10000 });

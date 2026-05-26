@@ -1,3 +1,4 @@
+/* eslint-disable react-hooks/set-state-in-effect -- page-level data fetch on mount is intentional */
 /**
  * JobPage — the main job status and results page at /jobs/:id.
  *

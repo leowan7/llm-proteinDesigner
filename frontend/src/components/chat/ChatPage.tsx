@@ -800,9 +800,13 @@ export function ChatPage() {
           </Sheet>
         </div>
 
-        {/* Drag handle for resizing panels */}
+        {/* Drag handle for resizing panels (desktop-only mouse drag; layout is fluid for keyboard/touch users) */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- decorative resize affordance with mouse-only drag; semantic role="separator" + aria-label provides screen reader context */}
         <div
           onMouseDown={handleDragStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize chat panel"
           className="hidden md:flex items-center justify-center w-1.5 cursor-col-resize hover:bg-primary/20 active:bg-primary/30 transition-colors shrink-0"
         >
           <div className="w-0.5 h-8 rounded-full bg-border" />

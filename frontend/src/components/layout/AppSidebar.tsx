@@ -110,6 +110,7 @@ function SessionItem({
           <Link to={`/chat/${session.id}`} className="flex items-center gap-2 w-full">
             <span className="truncate flex-1 text-sm">{title}</span>
             {/* Context menu trigger — visible on hover */}
+            {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events, jsx-a11y/no-static-element-interactions -- onClick only suppresses parent Link navigation; trigger handles its own keyboard events */}
             <span
               className="opacity-0 group-hover/item:opacity-100 focus-within:opacity-100 shrink-0"
               onClick={(e) => e.preventDefault()}
@@ -469,6 +470,7 @@ export function AppSidebar({ sessions, sessionsLoading, activeSessionId, onRefre
             onKeyDown={(e) => e.key === "Enter" && handleRenameConfirm()}
             className="w-full px-3 py-2 text-sm bg-input border border-border rounded-md text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
             aria-label="Session title"
+            // eslint-disable-next-line jsx-a11y/no-autofocus -- inside a modal dialog, focusing the only field on open is standard and recommended
             autoFocus
           />
           <DialogFooter>
