@@ -108,6 +108,24 @@ jobs:
       - name: Start Supabase
         run: supabase start
 
+      - name: Capture local Supabase keys
+        # `supabase status -o env` prints KEY=value lines; pipe to $GITHUB_ENV so
+        # subsequent steps can use ${LOCAL_SUPABASE_SERVICE_ROLE_KEY} etc.
+        # The local stack uses a different JWT secret than kendrew-staging,
+        # so the GitHub secret SUPABASE_SERVICE_KEY does NOT validate tokens
+        # against this ephemeral instance.
+        run: |
+          set -e
+          supabase status -o env > /tmp/supabase.env
+          cat /tmp/supabase.env
+          # Re-export with stable names for downstream steps
+          ANON=$(grep '^ANON_KEY=' /tmp/supabase.env | cut -d= -f2- | tr -d '"')
+          SVC=$(grep '^SERVICE_ROLE_KEY=' /tmp/supabase.env | cut -d= -f2- | tr -d '"')
+          JWT=$(grep '^JWT_SECRET=' /tmp/supabase.env | cut -d= -f2- | tr -d '"')
+          echo "LOCAL_SUPABASE_ANON_KEY=${ANON}" >> $GITHUB_ENV
+          echo "LOCAL_SUPABASE_SERVICE_ROLE_KEY=${SVC}" >> $GITHUB_ENV
+          echo "LOCAL_SUPABASE_JWT_SECRET=${JWT}" >> $GITHUB_ENV
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -151,7 +169,10 @@ jobs:
         env:
           TESTING: "true"
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Use LOCAL keys so JWT signatures match the ephemeral stack
+          SUPABASE_SERVICE_KEY: ${{ env.LOCAL_SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.LOCAL_SUPABASE_JWT_SECRET }}
+          SUPABASE_ANON_KEY: ${{ env.LOCAL_SUPABASE_ANON_KEY }}
           COOKIE_SECURE: "false"
           CSRF_SECRET: "ci-csrf-secret"
 
@@ -168,7 +189,7 @@ jobs:
           cat /tmp/seed-resp.json | head -c 500; echo
         env:
           SUPABASE_URL: http://127.0.0.1:54321
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_SERVICE_KEY: ${{ env.LOCAL_SUPABASE_SERVICE_ROLE_KEY }}
 
       - name: Run Playwright tests
         run: cd frontend && npx playwright test
