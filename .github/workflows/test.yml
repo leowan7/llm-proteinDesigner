@@ -189,17 +189,55 @@ jobs:
           COOKIE_SECURE: "false"
           CSRF_SECRET: "ci-csrf-secret"
 
-      - name: Seed E2E test user
+      - name: Seed E2E test user (auth + public.users with tos accepted)
+        # Two-stage seed:
+        # 1. POST /auth/v1/admin/users to create the auth user (or 422 if exists)
+        # 2. Upsert public.users with tos_version = COOKIES/TOS current value so
+        #    the ReAcceptanceModal (frontend AuthenticatedLayout) doesn't pop
+        #    up after login and block every clicks-on-app test.
         run: |
-          # Idempotent: returns 200/201 on create, 422 if exists; either is fine for tests.
-          curl -sS -X POST \
-            -H "apikey: ${SUPABASE_SERVICE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_KEY}" \
-            -H "Content-Type: application/json" \
-            -d '{"email":"test@example.com","password":"Password123!","email_confirm":true}' \
-            "${SUPABASE_URL}/auth/v1/admin/users" \
-            -o /tmp/seed-resp.json -w "HTTP %{http_code}\n" || true
-          cat /tmp/seed-resp.json | head -c 500; echo
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          base = os.environ["SUPABASE_URL"]
+          svc  = os.environ["SUPABASE_SERVICE_KEY"]
+          tos  = "2026-04-23"  # must match backend/config.py tos_current_version
+          email, password = "test@example.com", "Password123!"
+          headers = {"apikey": svc, "Authorization": f"Bearer {svc}", "Content-Type": "application/json"}
+
+          def req(method, url, body=None):
+              data = json.dumps(body).encode() if body else None
+              r = urllib.request.Request(url, method=method, headers=headers, data=data)
+              try:
+                  with urllib.request.urlopen(r) as resp:
+                      return resp.status, json.loads(resp.read().decode() or "{}")
+              except urllib.error.HTTPError as e:
+                  return e.code, json.loads(e.read().decode() or "{}")
+
+          # Stage 1: create auth user (or note it exists)
+          code, body = req("POST", f"{base}/auth/v1/admin/users",
+                           {"email": email, "password": password, "email_confirm": True})
+          print(f"create_user: HTTP {code} {body}")
+
+          # Look up the user id either way
+          code, body = req("GET", f"{base}/auth/v1/admin/users?filter=email.eq.{email}")
+          users = body.get("users", body if isinstance(body, list) else [])
+          uid = users[0]["id"] if users else None
+          if not uid:
+              raise SystemExit(f"could not locate seeded user id: {body}")
+          print(f"resolved uid={uid}")
+
+          # Stage 2: upsert public.users with TOS accepted
+          rest_headers = {**headers, "Prefer": "resolution=merge-duplicates,return=representation"}
+          row = {"id": uid, "email": email,
+                 "tos_accepted_at": "2026-05-26T00:00:00Z", "tos_version": tos}
+          r = urllib.request.Request(f"{base}/rest/v1/users", method="POST",
+                                      headers=rest_headers, data=json.dumps(row).encode())
+          try:
+              with urllib.request.urlopen(r) as resp:
+                  print(f"upsert_users: HTTP {resp.status} {resp.read().decode()[:300]}")
+          except urllib.error.HTTPError as e:
+              print(f"upsert_users: HTTP {e.code} {e.read().decode()[:300]}")
+          PY
         env:
           SUPABASE_URL: http://127.0.0.1:54321
           SUPABASE_SERVICE_KEY: ${{ env.LOCAL_SUPABASE_SERVICE_ROLE_KEY }}
