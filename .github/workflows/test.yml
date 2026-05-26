@@ -3,10 +3,12 @@ name: Test Suite
 on:
   pull_request:
     branches: [main, master]
+  push:
+    branches: [master]
 
 # Cancel previous runs on same PR to save CI minutes
 concurrency:
-  group: test-${{ github.head_ref }}
+  group: test-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
