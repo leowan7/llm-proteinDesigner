@@ -13,7 +13,7 @@ dockerfilePath = "backend/Dockerfile"
 # MIGRATION_DB_URL is the Supabase session-mode shared pooler at port 5432
 # (aws-1-us-east-1.pooler.supabase.com); DATABASE_URL is the transaction-mode
 # pooler at port 6543 on the same host. Per-env values in Railway Variables.
-preDeployCommand = ["supabase db push --db-url $MIGRATION_DB_URL --yes"]
+preDeployCommand = ["sh -c \"supabase db push --db-url $MIGRATION_DB_URL --yes\""]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
