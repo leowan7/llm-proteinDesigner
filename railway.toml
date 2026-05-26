@@ -14,7 +14,9 @@ dockerfilePath = "backend/Dockerfile"
 # (aws-1-us-east-1.pooler.supabase.com); DATABASE_URL is the transaction-mode
 # pooler at port 6543 on the same host. Per-env values in Railway Variables.
 preDeployCommand = ["sh -c \"supabase db push --db-url $MIGRATION_DB_URL --yes\""]
-startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
+# Wrap startCommand in sh -c so $PORT (Railway-injected, e.g. 8080) is shell-
+# expanded — exec-form passes the literal $PORT to uvicorn which then errors.
+startCommand = "sh -c 'exec uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"'"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 numReplicas = 2
