@@ -125,6 +125,10 @@ if settings.debug or settings.testing:
     app.include_router(debug_router)
 
 
+import logging as _stdlogging
+_health_logger = _stdlogging.getLogger("kendrew.health")
+
+
 @app.get("/health")
 async def health():
     """Deep health check — verifies API, database, and Redis connectivity.
@@ -140,7 +144,8 @@ async def health():
         await pool.fetchval("SELECT 1")
         checks["db"] = "ok"
     except Exception as exc:
-        checks["db"] = f"error: {str(exc)[:100]}"
+        checks["db"] = f"error: {str(exc)[:200]}"
+        _health_logger.warning("health.db_failed type=%s msg=%s", type(exc).__name__, str(exc)[:500])
 
     # Check Redis connectivity.
     try:
@@ -149,7 +154,8 @@ async def health():
         await r.aclose()
         checks["redis"] = "ok"
     except Exception as exc:
-        checks["redis"] = f"error: {str(exc)[:100]}"
+        checks["redis"] = f"error: {str(exc)[:200]}"
+        _health_logger.warning("health.redis_failed type=%s msg=%s", type(exc).__name__, str(exc)[:500])
 
     healthy = all(v == "ok" for v in checks.values())
     status_code = 200 if healthy else 503
