@@ -28,13 +28,15 @@ test.describe("Settings + billing", () => {
     const settingsPage = new SettingsPage(page);
     await settingsPage.goto();
 
-    // SettingsPage renders 4 TabsTrigger elements with role="tab"
+    // SettingsPage renders 5 TabsTrigger elements with role="tab"
+    // (Account, Billing, Privacy, Usage, Notifications)
     const tabs = page.locator('[role="tab"]');
-    await expect(tabs).toHaveCount(4, { timeout: 10000 });
+    await expect(tabs).toHaveCount(5, { timeout: 10000 });
 
-    // Verify the 4 expected tab names from SettingsPage.tsx
+    // Verify the 5 expected tab names from SettingsPage.tsx
     await expect(tabs.filter({ hasText: "Account" })).toBeVisible();
     await expect(tabs.filter({ hasText: "Billing" })).toBeVisible();
+    await expect(tabs.filter({ hasText: "Privacy" })).toBeVisible();
     await expect(tabs.filter({ hasText: "Usage" })).toBeVisible();
     await expect(tabs.filter({ hasText: "Notifications" })).toBeVisible();
   });
@@ -60,6 +62,15 @@ test.describe("Settings + billing", () => {
   });
 
   test("billing section shows Stripe portal link or payment method info", async ({ page }) => {
+    // Phase 11 D3: Stripe keys not provisioned in CI yet (Block E deferred).
+    // The Billing tab queries Stripe and renders nothing user-clickable
+    // when STRIPE_SECRET_KEY is empty, so none of the expected locators
+    // resolve. Re-enable when Block E completes.
+    test.skip(
+      !process.env.STRIPE_SECRET_KEY,
+      "Stripe not provisioned in CI yet (Phase 11 D3 / Block E deferred)",
+    );
+
     const settingsPage = new SettingsPage(page);
     await settingsPage.goto();
 

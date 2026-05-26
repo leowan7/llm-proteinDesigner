@@ -34,6 +34,20 @@ test.describe("Chat + job launch", () => {
     const loginPage = new LoginPage(page);
     await loginPage.login(TEST_EMAIL, TEST_PASSWORD);
 
+    // Intercept the agent session-create endpoint so we don't depend on
+    // a real Anthropic API key being present in CI for session initialization.
+    await page.route("**/agent/session", async (route) => {
+      if (route.request().method() === "POST") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ session_id: "e2e-test-session" }),
+        });
+      } else {
+        await route.fallback();
+      }
+    });
+
     // Intercept the agent SSE endpoint to return a controlled response.
     // This prevents the test from requiring a real Anthropic API key in CI.
     await page.route("**/agent/message", async (route) => {
