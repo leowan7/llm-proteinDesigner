@@ -8,9 +8,12 @@ builder = "DOCKERFILE"
 dockerfilePath = "backend/Dockerfile"
 
 [deploy]
-# Single shell-string so $DATABASE_URL is expanded by sh -c (Railway requires
+# Single shell-string so $MIGRATION_DB_URL is expanded by sh -c (Railway requires
 # at-most-1 element in this array; exec-form rejected at config parse).
-preDeployCommand = ["supabase db push --db-url $DATABASE_URL --yes"]
+# Uses MIGRATION_DB_URL (port 5432 direct connection) instead of DATABASE_URL
+# (port 6543 Supavisor transaction pooler) — `supabase db push` uses session-level
+# state that the transaction pooler rejects. Per-env values set in Railway Variables.
+preDeployCommand = ["supabase db push --db-url $MIGRATION_DB_URL --yes"]
 startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
