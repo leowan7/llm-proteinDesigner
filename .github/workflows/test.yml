@@ -218,12 +218,19 @@ jobs:
                            {"email": email, "password": password, "email_confirm": True})
           print(f"create_user: HTTP {code} {body}")
 
-          # Look up the user id either way
-          code, body = req("GET", f"{base}/auth/v1/admin/users?filter=email.eq.{email}")
-          users = body.get("users", body if isinstance(body, list) else [])
-          uid = users[0]["id"] if users else None
+          # Look up the user id either way (GoTrue admin list + client-side filter)
+          uid = None
+          if code == 200 and body.get("id"):
+              uid = body["id"]  # created fresh -> id is in the body
+          else:
+              code2, body2 = req("GET", f"{base}/auth/v1/admin/users?per_page=200")
+              users = body2.get("users") if isinstance(body2, dict) else body2
+              for u in (users or []):
+                  if u.get("email", "").lower() == email:
+                      uid = u["id"]
+                      break
           if not uid:
-              raise SystemExit(f"could not locate seeded user id: {body}")
+              raise SystemExit(f"could not locate seeded user id; list response: {body2 if 'body2' in dir() else body}")
           print(f"resolved uid={uid}")
 
           # Stage 2: upsert public.users with TOS accepted
