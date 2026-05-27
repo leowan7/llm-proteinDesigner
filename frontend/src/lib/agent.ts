@@ -12,7 +12,7 @@
 
 import { api } from "./api";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 /**
  * Reads the csrftoken cookie value from document.cookie.
