@@ -96,7 +96,7 @@ image = (
     .add_local_file(_RUN_PIPELINE_LOCAL, _RUN_PIPELINE_REMOTE, copy=True)
 )
 
-app = modal.App(f"kendrew-{_TOOL}-prod")
+app = modal.App(f"ranomics-{_TOOL}-prod")
 
 
 @app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)
