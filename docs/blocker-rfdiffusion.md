@@ -222,7 +222,7 @@ These changes are NOT harmful on their own: if the underlying JIT completes (eve
 
 # Ready-to-run (Leo pulls the trigger)
 
-**Authored 2026-04-22 by Stream E orchestrator. GO.** Status at HEAD (`5f22eec`): wiring verified by code-check (see entry in `tools-hub/docs/VALIDATION-LOG.md#rfdiffusion`). One fresh mini_pilot GPU run is required to close the blocker because commits `97ec005` (A100-40GB + reduced AF2 recycles) and `064266f` (Modal-Volume-backed JAX XLA cache) materially changed the execution path relative to the last recorded smoke-tier green.
+**Authored 2026-04-22 by Stream E orchestrator. GO.** Status at HEAD (`5f22eec`): wiring verified by code-check. End-to-end attestation is recorded in the consuming web service's validation log, not here. One fresh mini_pilot GPU run is required to close the blocker because commits `97ec005` (A100-40GB + reduced AF2 recycles) and `064266f` (Modal-Volume-backed JAX XLA cache) materially changed the execution path relative to the last recorded smoke-tier green.
 
 ## What was verified at HEAD
 
@@ -307,7 +307,7 @@ Both candidates must satisfy these bounds and `status` must be `COMPLETED`. Any 
 
 ## Two-PASS-in-a-row gate
 
-Per the VALIDATION-LOG top-of-file rule, mini_pilot ship-readiness requires 2 consecutive mini_pilot PASS entries. The first run above populates the XLA cache; the second run (warm) finishes in ~400–700 GPU-s. Record both in `tools-hub/docs/VALIDATION-LOG.md#rfdiffusion` using the append format at the top of that file, then flip `FLAG_TOOL_RFDIFFUSION=on` in `tools-hub`.
+Mini_pilot ship-readiness requires 2 consecutive mini_pilot PASS entries. The first run above populates the XLA cache; the second run (warm) finishes in ~400–700 GPU-s. End-to-end attestation is recorded in the consuming web service's validation log, not here; the web service owns the per-tool feature-flag flip once both passes land.
 
 ## Do-not
 

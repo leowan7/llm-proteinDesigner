@@ -617,9 +617,9 @@ _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
 
 def _record_webhook_outcome(delivered: bool, detail: str) -> None:
     """Persist webhook delivery status so the Modal wrapper can surface
-    it to tools-hub even when the POST silently fails. Read by run_tool()
+    it to the consuming web service even when the POST silently fails. Read by run_tool()
     in infrastructure/modal/boltzgen_app.py and merged into the function
-    return value, where tools-hub's ModalClient.poll() inspects it."""
+    return value, where the web service's poller inspects it."""
     try:
         with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
             json.dump({"delivered": delivered, "detail": detail}, fh)
@@ -1575,9 +1575,11 @@ def main():
             filenames_to_upload.append(upload_filename)
 
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver finds the Storage object at
+            # web service's resolver finds the Storage object at
             # {user}/{job}/designs/<basename>. design_name diverges
-            # from upload_filename and would 404 the resolver.
+            # from upload_filename and would 404 the resolver. The
+            # contracts module (/opt/contracts/rpc.py) defines the
+            # upload-URL exchange shape consumed by the web service.
             candidates.append({
                 "rank": rank,
                 "design_name": design_name,
@@ -1655,11 +1657,11 @@ def main():
                 "proceeding: " + "; ".join(ubi_warnings)
             )
 
-        # Build candidates with inline base64 PDBs so the tools-hub frontend
-        # can render the 3D viewer + PDB-download buttons. Without this the
-        # candidate_table.html template falls back to the em-dash branch
-        # because it keys off cand.pdb_content_b64. Mirrors the smoke/
-        # mini_pilot path (line 496) for consistency.
+        # Build candidates with inline base64 PDBs so the consuming web
+        # service's frontend can render the 3D viewer + PDB-download
+        # buttons. Without this the candidate table template falls back
+        # to the em-dash branch because it keys off cand.pdb_content_b64.
+        # Mirrors the smoke/mini_pilot path (line 496) for consistency.
         webhook_candidates: list[dict] = []
         for c in candidates:
             entry = {
