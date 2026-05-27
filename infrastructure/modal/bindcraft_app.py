@@ -4,7 +4,7 @@ Deploy:
     modal deploy infrastructure/modal/bindcraft_app.py
 
 Runtime: the backend's ``ModalProvider.submit_job`` resolves this function
-via ``modal.Function.from_name("kendrew-bindcraft-prod", "run_tool")`` and
+via ``modal.Function.from_name("ranomics-bindcraft-prod", "run_tool")`` and
 invokes ``.spawn.aio(payload)``. The function body translates the payload
 into env vars (see ``_build_run_env`` below) and runs the production
 ``run_pipeline.py`` subprocess, which POSTs candidates + scores to the
@@ -106,7 +106,7 @@ def run_tool(payload: dict) -> dict:
     """Run one BindCraft session (pilot or one chunk of a full-design campaign).
 
     Subprocess stdout/stderr stream to Modal's function logs directly so
-    failures are visible in ``modal app logs kendrew-bindcraft-prod``
+    failures are visible in ``modal app logs ranomics-bindcraft-prod``
     without needing to fetch the FunctionCall return value out-of-band.
     """
     import sys

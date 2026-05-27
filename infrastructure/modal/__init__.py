@@ -1,4 +1,4 @@
-"""Kendrew Modal infrastructure.
+"""Modal infrastructure for the tools-hub GPU pipelines.
 
 Per-tool Modal apps are in ``{bindcraft,boltzgen,rfdiffusion,rfantibody,pxdesign}_app.py``.
 Shared helpers are in ``base_image.py``.
