@@ -7,7 +7,7 @@ name: Deploy Modal apps
 #   - Captures FunctionCall / deploy output per app.
 #   - Posts a single PR comment with the deploy summary.
 #
-# On push to main (paths filtered below):
+# On push to master (paths filtered below):
 #   - Deploys all five tools-hub Modal apps to the `main` Modal environment (prod).
 #
 # Prerequisites (operator-owned; see Plan 11-03 Block D):
@@ -27,7 +27,7 @@ on:
       - 'backend/pipelines/**'
       - '.github/workflows/deploy-modal.yml'
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'infrastructure/modal/**'
       - 'docker/**'
@@ -90,7 +90,7 @@ jobs:
 
       - name: Verify Modal auth
         run: |
-          modal token current
+          modal app list --env "$MODAL_ENVIRONMENT" >/dev/null
 
       - name: Deploy ${{ matrix.app }}
         id: deploy
