@@ -435,8 +435,8 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     # PDBs correspond to the highest-scoring model but downstream display
     # uses the aggregate for ranking parity with other tools.
     #
-    # The template (tools-hub/templates/tools/bindcraft_results.html) renders
-    # 5 columns: ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
+    # The web service's bindcraft results template renders 5 columns:
+    # ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
     # populated here or the table renders an em-dash. We accept multiple CSV
     # column names per canonical key because FreeBindCraft (cytokineking fork)
     # ships a different column layout than upstream BindCraft and naming has
@@ -653,9 +653,11 @@ def main():
             upload_filename = f"design_{rank:03d}.pdb"
 
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver finds the Storage object at
+            # web service's resolver finds the Storage object at
             # {user}/{job}/designs/<basename>. design_name / pdb_name
             # diverges from upload_filename and would 404 the resolver.
+            # The contracts module (/opt/contracts/rpc.py) defines the
+            # upload-URL exchange shape consumed by the web service.
             pdb_key = f"designs/{upload_filename}"
             webhook_candidate = {
                 "rank": rank,
