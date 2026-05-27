@@ -525,6 +525,26 @@ def main():
     job_token = os.environ.get("JOB_TOKEN", "")
 
     job_payload = json.loads(job_payload_str)
+
+    # Validate the payload against the shared contract module mounted at
+    # /opt/contracts by the Modal image build. On import or validation
+    # failure, write a preflight marker and exit non-zero so the wrapper
+    # surfaces a clear contract error rather than a downstream KeyError.
+    import sys
+    sys.path.insert(0, "/opt")
+    try:
+        from contracts.rpc import ToolPayload
+        _validated = ToolPayload.model_validate(job_payload)
+    except Exception as _e:
+        import time as _time
+        print(f"[contract] payload validation failed: {_e}", flush=True)
+        try:
+            with open("/tmp/preflight_failure.json", "w") as _f:
+                json.dump({"error": "payload_validation_failed", "detail": str(_e), "ts": _time.time()}, _f)
+        except Exception:
+            pass
+        sys.exit(1)
+
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")

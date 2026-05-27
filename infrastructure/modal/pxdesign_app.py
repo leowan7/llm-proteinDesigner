@@ -69,6 +69,8 @@ image = (
         "/opt/pipeline_normalize.py",
         copy=True,
     )
+    # Requires sibling checkout of tools-hub for the shared contract module.
+    .add_local_dir("../tools-hub/contracts", "/opt/contracts", copy=True)
 )
 
 app = modal.App(f"ranomics-{_TOOL}-prod")
