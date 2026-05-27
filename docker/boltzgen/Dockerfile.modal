@@ -79,10 +79,13 @@ RUN python3 -m pip install --no-cache-dir \
     CUEP=$(python3 -c "import cuequivariance_ops, os; print(os.path.dirname(cuequivariance_ops.__file__))" 2>/dev/null) && echo "cuequivariance_ops dir: $CUEP" && ls -la $CUEP 2>&1 || true
 
 # ---------- Pipeline utilities ----------
+# pydantic is required by /opt/contracts (vendored from tools-hub/contracts/)
+# which run_pipeline.py imports for ToolPayload validation.
 RUN python3 -m pip install --no-cache-dir \
     gemmi \
     requests \
-    pyyaml
+    pyyaml \
+    "pydantic>=2,<3"
 
 # ---------- Bake model weights (~6 GB) ----------
 # Pre-download HuggingFace weights so cold starts are fast.
