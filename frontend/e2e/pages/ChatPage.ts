@@ -16,6 +16,10 @@ export class ChatPage {
 
   async goto() {
     await this.page.goto("/chat");
+    // Bare /chat triggers session resolution in ChatPage.tsx, which redirects
+    // to /chat/<sessionId>. Without waiting for that, sendMessage() can fire
+    // while sessionId is still undefined and handleSend returns early.
+    await this.page.waitForURL(/\/chat\/[^/?]+$/, { timeout: 15000 });
   }
 
   /**
