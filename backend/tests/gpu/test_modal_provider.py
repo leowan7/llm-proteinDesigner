@@ -84,7 +84,7 @@ class TestModalProvider:
         )
 
         submission = GPUJobSubmission(
-            endpoint_id="kendrew-bindcraft-prod/run_tool",
+            endpoint_id="ranomics-bindcraft-prod/run_tool",
             input_payload={"job_spec": {"tool": "bindcraft"}, "job_token": "jt"},
             webhook_url="http://localhost:8000/webhooks/runpod",
             policy={
@@ -99,7 +99,7 @@ class TestModalProvider:
 
         assert result == "fc-abc123"
         mock_fn_class.from_name.assert_called_once_with(
-            "kendrew-bindcraft-prod", "run_tool", environment_name="test"
+            "ranomics-bindcraft-prod", "run_tool", environment_name="test"
         )
         mock_fn.spawn.aio.assert_called_once()
         payload = mock_fn.spawn.aio.call_args[0][0]
@@ -123,7 +123,7 @@ class TestModalProvider:
         provider = ModalProvider(environment="")
         await provider.submit_job(
             GPUJobSubmission(
-                endpoint_id="kendrew-boltzgen-prod",
+                endpoint_id="ranomics-boltzgen-prod",
                 input_payload={},
                 webhook_url="http://x",
             )
@@ -131,7 +131,7 @@ class TestModalProvider:
 
         # Empty environment normalizes to None -> no environment_name kwarg is passed.
         mock_fn_class.from_name.assert_called_once_with(
-            "kendrew-boltzgen-prod", "run_tool"
+            "ranomics-boltzgen-prod", "run_tool"
         )
 
     @pytest.mark.anyio
@@ -295,11 +295,11 @@ class TestGetProviderFactory:
             mock_settings.gpu_provider = "modal"
             from gpu import endpoint_for_tool
 
-            assert endpoint_for_tool("bindcraft") == "kendrew-bindcraft-prod/run_tool"
-            assert endpoint_for_tool("boltzgen") == "kendrew-boltzgen-prod/run_tool"
-            assert endpoint_for_tool("rfdiffusion") == "kendrew-rfdiffusion-prod/run_tool"
-            assert endpoint_for_tool("rfantibody") == "kendrew-rfantibody-prod/run_tool"
-            assert endpoint_for_tool("pxdesign") == "kendrew-pxdesign-prod/run_tool"
+            assert endpoint_for_tool("bindcraft") == "ranomics-bindcraft-prod/run_tool"
+            assert endpoint_for_tool("boltzgen") == "ranomics-boltzgen-prod/run_tool"
+            assert endpoint_for_tool("rfdiffusion") == "ranomics-rfdiffusion-prod/run_tool"
+            assert endpoint_for_tool("rfantibody") == "ranomics-rfantibody-prod/run_tool"
+            assert endpoint_for_tool("pxdesign") == "ranomics-pxdesign-prod/run_tool"
 
     def test_endpoint_for_tool_rejects_unknown(self):
         with patch("gpu.settings") as mock_settings:
