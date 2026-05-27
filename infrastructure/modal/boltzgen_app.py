@@ -80,7 +80,7 @@ def run_tool(payload: dict) -> dict:
     """Run one BoltzGen session (pilot or chunk of a full-design campaign).
 
     Subprocess stdout/stderr stream to Modal's function logs directly so
-    failures are visible via ``modal app logs kendrew-boltzgen-prod``.
+    failures are visible via ``modal app logs ranomics-boltzgen-prod``.
     """
     import sys
 

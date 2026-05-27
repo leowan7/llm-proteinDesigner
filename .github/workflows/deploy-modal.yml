@@ -3,12 +3,12 @@ name: Deploy Modal apps
 # Live workflow (Stream E, 2026-04-22; enabled Phase 11 D-07, 2026-04-24).
 #
 # On pull_request (paths filtered below):
-#   - Deploys all five Kendrew Modal apps to the `staging` Modal environment.
+#   - Deploys all five tools-hub Modal apps to the `staging` Modal environment.
 #   - Captures FunctionCall / deploy output per app.
 #   - Posts a single PR comment with the deploy summary.
 #
 # On push to main (paths filtered below):
-#   - Deploys all five Kendrew Modal apps to the `main` Modal environment (prod).
+#   - Deploys all five tools-hub Modal apps to the `main` Modal environment (prod).
 #
 # Prerequisites (operator-owned; see Plan 11-03 Block D):
 #   - Modal `staging` environment exists (`modal environment create staging`).
