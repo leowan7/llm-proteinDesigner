@@ -56,7 +56,7 @@ export function ReAcceptanceModal({ open, onAccepted }: ReAcceptanceModalProps) 
           <DialogTitle>Updated Terms of Service</DialogTitle>
           <DialogDescription>
             Our Terms of Service and Privacy Policy have been updated. Review
-            and accept the new version to continue using Kendrew.
+            and accept the new version to continue using Bindwave.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2 text-sm">

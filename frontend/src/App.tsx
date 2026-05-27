@@ -81,6 +81,9 @@ function App() {
             <Route path="/legal/subprocessors" element={<SubprocessorsPage />} />
             <Route path="/legal/cookies" element={<CookiesPage />} />
 
+            {/* Public marketing home */}
+            <Route path="/" element={<HomePage />} />
+
             {/* Admin routes — separate layout, admin auth guard */}
             <Route element={<AdminLayout />}>
               <Route path="/admin" element={<AdminUsersPage />} />
@@ -98,7 +101,6 @@ function App() {
               <Route path="/jobs" element={<JobHistoryPage />} />
               <Route path="/jobs/:id" element={<JobPage />} />
               <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/" element={<HomePage />} />
             </Route>
           </Routes>
         </div>

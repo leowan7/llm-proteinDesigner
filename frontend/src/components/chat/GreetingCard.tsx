@@ -31,7 +31,7 @@ export function GreetingCard({ onPromptClick }: GreetingCardProps) {
         <CardContent className="px-6 py-6 text-center">
           <div className="flex justify-center mb-4">
             <div className="size-10 rounded-lg bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-base">
-              K
+              B
             </div>
           </div>
           <h2 className="font-display text-xl font-semibold text-foreground mb-3">

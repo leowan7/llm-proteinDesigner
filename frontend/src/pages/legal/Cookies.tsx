@@ -40,7 +40,7 @@ export default function CookiesPage() {
   return (
     <LegalLayout title="Cookie Policy" lastUpdated={COOKIES_VERSION}>
       <p>
-        Kendrew uses only strictly-necessary cookies required to authenticate your
+        Bindwave uses only strictly-necessary cookies required to authenticate your
         session and protect against cross-site request forgery. We do not set
         analytics, advertising, marketing, or cross-site tracking cookies. No
         third-party scripts on our application pages set cookies in your browser on
@@ -92,16 +92,16 @@ export default function CookiesPage() {
       <p>
         Because we do not use analytics or advertising cookies, there is nothing to
         opt into or out of beyond the strictly necessary set. If you reject cookies
-        entirely in your browser settings, Kendrew will be unable to maintain your
+        entirely in your browser settings, Bindwave will be unable to maintain your
         authenticated session.
       </p>
 
       <h2 id="local-storage">Browser storage (not cookies)</h2>
       <p>
-        The Kendrew frontend uses <code>localStorage</code> for a small set of
+        The Bindwave frontend uses <code>localStorage</code> for a small set of
         non-identifying UI preferences — for example, the dismissal timestamp of the
         cookie banner and the collapsed/expanded state of sidebar panels. These
-        entries are readable only by the Kendrew origin and are not cookies under
+        entries are readable only by the Bindwave origin and are not cookies under
         European ePrivacy definitions.
       </p>
 

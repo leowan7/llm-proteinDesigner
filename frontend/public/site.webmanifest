@@ -1,0 +1,11 @@
+{
+  "name": "Bindwave",
+  "short_name": "Bindwave",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ],
+  "theme_color": "#312e81",
+  "background_color": "#0d0d12",
+  "display": "standalone"
+}

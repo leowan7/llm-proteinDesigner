@@ -73,12 +73,12 @@ describe("CookieConsentBanner via CookieConsentProvider", () => {
     expect(screen.queryByRole("region", { name: /cookie/i })).toBeNull();
   });
 
-  it("discloses the three strictly-necessary cookies by name", () => {
+  it("uses generic consent copy without naming individual cookies", () => {
     renderProvider();
     const region = screen.getByRole("region", { name: /cookie/i });
-    expect(region.textContent).toContain("access_token");
-    expect(region.textContent).toContain("refresh_token");
-    expect(region.textContent).toContain("csrftoken");
+    expect(region.textContent).not.toContain("access_token");
+    expect(region.textContent).not.toContain("refresh_token");
+    expect(region.textContent).not.toContain("csrftoken");
   });
 
   it("contains a Learn more link to /legal/cookies", () => {

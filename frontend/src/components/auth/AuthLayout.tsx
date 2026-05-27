@@ -31,9 +31,9 @@ export function AuthLayout({ title, subtitle, footer, children }: AuthLayoutProp
           <CardHeader className="space-y-2 p-6">
             <div className="flex items-center gap-2.5 mb-2">
               <div className="size-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-xs">
-                K
+                B
               </div>
-              <span className="font-display text-lg tracking-tight text-foreground">Kendrew<span className="text-primary">.AI</span></span>
+              <span className="font-display text-lg tracking-tight text-foreground">Bindwave</span>
             </div>
             <h1 className="font-display text-xl font-semibold leading-[1.2] tracking-tight">
               {title}

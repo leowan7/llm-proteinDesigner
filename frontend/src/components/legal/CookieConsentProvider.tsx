@@ -16,7 +16,7 @@ interface Props {
  * Behavior:
  * - On first visit (no valid record in localStorage), the banner is visible.
  * - Clicking "Got it" persists the record and hides the banner.
- * - Any component can dispatch `kendrew:open-cookie-consent` on `window`
+ * - Any component can dispatch `bindwave:open-cookie-consent` on `window`
  *   (e.g. via `requestOpenConsent()` from @/lib/cookieConsent) to re-open
  *   the banner for review, even after the user has previously accepted.
  *
