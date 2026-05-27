@@ -368,7 +368,11 @@ def upload_output(url: str, file_path: str) -> None:
     """Upload a file to R2/S3 via a presigned PUT URL."""
     data = Path(file_path).read_bytes()
     if file_path.endswith(".csv"):
-        content_type = "text/csv"
+        # Supabase tool-outputs bucket allowed_mime_types (migration
+        # 0021) accepts text/plain but not text/csv, so a "text/csv"
+        # PUT rejects with HTTP 400. Tag CSV as text/plain — the bytes
+        # are identical and downstream consumers don't dispatch on MIME.
+        content_type = "text/plain"
     elif file_path.endswith(".cif"):
         content_type = "chemical/x-cif"
     else:
@@ -951,6 +955,72 @@ def find_design_files(output_dir: str) -> dict[str, str]:
     return design_files
 
 
+def resolve_design_local_path(
+    *,
+    design_name: str,
+    rank_idx: int,
+    design_files: dict[str, str],
+    chosen_struct_path: str = "",
+    output_dir: str = "",
+    summary_csv_dir: str = "",
+) -> tuple[str | None, str]:
+    """Resolve the on-disk PDB path for a single passing design.
+
+    The "preview" preset emits a summary.csv that lacks design_name /
+    name / sample columns; parse_summary_csv synthesizes "design_N"
+    labels in that case which do not match anything in design_files.
+    chosen_struct_path may be relative to the summary.csv directory or
+    the output_dir, so we try several bases before falling through to
+    the design_files glob index. Returns (path, source_tag) — tag
+    identifies which layer matched, for log triage.
+    """
+    cp = (chosen_struct_path or "").strip()
+    if cp:
+        if os.path.isabs(cp) and os.path.exists(cp):
+            return cp, "chosen_struct_path:abs"
+        if os.path.exists(cp):
+            return cp, "chosen_struct_path:cwd"
+        for base, tag in (
+            (output_dir, "output_dir"),
+            (summary_csv_dir, "summary_csv_dir"),
+        ):
+            if base:
+                joined = os.path.normpath(os.path.join(base, cp))
+                if os.path.exists(joined):
+                    return joined, f"chosen_struct_path:rel_{tag}"
+        if output_dir:
+            basename = os.path.basename(cp)
+            if basename:
+                matches = list(Path(output_dir).rglob(basename))
+                if matches:
+                    return str(matches[0]), f"chosen_struct_path:rglob_{basename}"
+
+    if design_name in design_files:
+        return design_files[design_name], "design_files:direct"
+    stem = Path(design_name).stem
+    if stem in design_files:
+        return design_files[stem], "design_files:stem"
+    for key, fpath in design_files.items():
+        if design_name in key or key in design_name:
+            return fpath, f"design_files:substring({key})"
+
+    sample_key = f"spec_sample_{rank_idx}"
+    if sample_key in design_files:
+        return design_files[sample_key], f"design_files:{sample_key}"
+    sorted_keys = sorted(
+        (k for k in design_files if k.startswith("spec_sample_")),
+        key=lambda s: int(s.rsplit("_", 1)[-1])
+        if s.rsplit("_", 1)[-1].isdigit() else 9999,
+    )
+    if rank_idx < len(sorted_keys):
+        return (
+            design_files[sorted_keys[rank_idx]],
+            f"design_files:sorted_spec_sample[{rank_idx}]",
+        )
+
+    return None, "no_match"
+
+
 def locate_summary_csv(output_dir: str) -> str | None:
     """Find summary.csv anywhere under output_dir."""
     for candidate in (
@@ -1446,21 +1516,22 @@ def run_webhook_tier(job_payload: dict) -> None:
 
         candidates = []
         filenames_to_upload = []
+        summary_csv_dir = os.path.dirname(summary_csv) if summary_csv else ""
         for rank_idx, result in enumerate(passing):
             rank = rank_idx + 1
             design_name = result["design_name"]
-            # Prefer the CSV's chosen_struct_path when available — it's the
-            # authoritative path to the produced structure file. Fall back
-            # to the design_files glob index for older CSV variants.
-            chosen_path = (result.get("chosen_struct_path") or "").strip()
-            local_path = chosen_path if chosen_path and os.path.exists(chosen_path) else None
-            if not local_path:
-                local_path = design_files.get(design_name)
-            if not local_path:
-                for key, fpath in design_files.items():
-                    if design_name in key or key in design_name:
-                        local_path = fpath
-                        break
+            local_path, resolved_via = resolve_design_local_path(
+                design_name=design_name,
+                rank_idx=rank_idx,
+                design_files=design_files,
+                chosen_struct_path=result.get("chosen_struct_path", ""),
+                output_dir=output_dir,
+                summary_csv_dir=summary_csv_dir,
+            )
+            logger.info(
+                "webhook tier: rank=%d design=%s -> %s (resolved via %s)",
+                rank, design_name, local_path, resolved_via,
+            )
             ext = Path(local_path).suffix if local_path else ".pdb"
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
