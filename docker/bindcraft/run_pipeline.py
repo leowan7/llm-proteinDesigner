@@ -632,7 +632,11 @@ def main():
             pdb_path = candidate["pdb_path"]
             upload_filename = f"design_{rank:03d}.pdb"
 
-            pdb_key = f"designs/{candidate['pdb_name']}.pdb"
+            # pdb_key MUST share basename with upload_filename so the
+            # tools-hub resolver finds the Storage object at
+            # {user}/{job}/designs/<basename>. design_name / pdb_name
+            # diverges from upload_filename and would 404 the resolver.
+            pdb_key = f"designs/{upload_filename}"
             webhook_candidate = {
                 "rank": rank,
                 "pdb_key": pdb_key,

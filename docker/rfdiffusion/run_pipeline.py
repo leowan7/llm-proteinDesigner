@@ -1399,7 +1399,12 @@ def main():
                     rfdiff_output, f"design_{design_name.split('_')[-1]}.pdb"
                 )
 
-            pdb_key = f"designs/{design_name}.pdb"
+            upload_filename = f"design_{rank_idx + 1:03d}.pdb"
+            # pdb_key MUST share basename with upload_filename so the
+            # tools-hub resolver finds the Storage object at
+            # {user}/{job}/designs/<basename>. design_name diverges
+            # from upload_filename and would 404 the resolver.
+            pdb_key = f"designs/{upload_filename}"
             candidate = {
                 "rank": rank,
                 "pdb_key": pdb_key,
@@ -1408,8 +1413,6 @@ def main():
                 "local_file": backbone_pdb,
             }
             candidates.append(candidate)
-
-            upload_filename = f"design_{rank_idx + 1:03d}.pdb"
             if upload_filename in upload_urls and os.path.exists(backbone_pdb):
                 try:
                     upload_output(upload_urls[upload_filename], backbone_pdb)

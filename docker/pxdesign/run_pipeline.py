@@ -1464,9 +1464,16 @@ def run_webhook_tier(job_payload: dict) -> None:
             ext = Path(local_path).suffix if local_path else ".pdb"
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
+            # pdb_key MUST share basename with upload_filename so the
+            # tools-hub resolver (/api/jobs/<id>/pdb/<filename>) can find
+            # the Storage object at {user}/{job}/designs/<basename>. Using
+            # the original design_name here created a permanent 404
+            # because tools-hub uploads as design_{rank:03d}.{pdb,cif}
+            # while design_name is the PXDesign internal label
+            # ("design_0", "design_run3-1", etc).
             candidates.append({
                 "rank": rank,
-                "pdb_key": f"designs/{design_name}{ext}",
+                "pdb_key": f"designs/{upload_filename}",
                 "scores": result["scores"],
                 "local_file": local_path,
                 "upload_filename": upload_filename,

@@ -1556,10 +1556,14 @@ def main():
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
 
+            # pdb_key MUST share basename with upload_filename so the
+            # tools-hub resolver finds the Storage object at
+            # {user}/{job}/designs/<basename>. design_name diverges
+            # from upload_filename and would 404 the resolver.
             candidates.append({
                 "rank": rank,
                 "design_name": design_name,
-                "pdb_key": f"designs/{design_name}{ext}",
+                "pdb_key": f"designs/{upload_filename}",
                 "scores": design["scores"],
                 "local_file": design_file,
                 "upload_filename": upload_filename,
