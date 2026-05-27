@@ -115,20 +115,30 @@ Manual steps (what the script does):
 
 | Date | Target | Wall clock to /health green | Blockers |
 |------|--------|-----------------------------|----------|
-| TBD | staging | pending | - |
+| 2026-05-27 | production backend (Railway) | 29s rollback + 39s roll-forward | none |
 
-Run the drill at least once against staging before declaring SC 9 green. The
+Run the drill at least once against production before declaring SC 9 green. The
 drill does NOT require introducing an intentional break - rolling back to any
 prior-known-good deploy proves the < 5-min target.
+
+The 2026-05-27 drill rolled `b16f91ee` (current SUCCESS, ecfa2f9) back to
+`b1909706` (REMOVED, same commit, built 3h earlier) via Railway's GraphQL API
+mutation `deploymentRedeploy(id, usePreviousImageTag: true)` - the API
+equivalent of the dashboard's "Redeploy" button on a prior deployment.
+`/health` returned 200 throughout (zero-downtime swap). Then rolled forward
+the same way (redeployed `b16f91ee`). Both halves used the same fast
+image-promote path; expected behavior for a real bug rollback is the same
+timing because the mechanism is identical regardless of code delta. Staging
+drill remains DEFERRED until the staging Railway stack is wired.
 
 ## Monitoring
 
 | Signal | Tool | Channel |
 |--------|------|---------|
-| Application errors | Sentry (kendrew-backend, kendrew-frontend) | #kendrew-alerts Slack + email |
-| External liveness | UptimeRobot (app.bindwave.com/health, app-staging.bindwave.com/health) | #kendrew-alerts + email |
+| Application errors | Sentry (kendrew-backend, kendrew-frontend) | email to leo@ranomics.com (Sentry default rule "high priority issues"; Slack not installed) |
+| External liveness | UptimeRobot monitor 803167433 on app.bindwave.com/health (staging monitor DEFERRED) | email to leo@ranomics.com |
 | Daily GPU spend | arq cron `check_daily_gpu_spend` | Resend email to leo@ranomics.com |
-| Post-deploy smoke | GitHub Actions smoke.yml | Sentry + #kendrew-alerts on fail |
+| Post-deploy smoke | GitHub Actions smoke.yml | Sentry + email on fail (Slack not installed) |
 
 Sentry Performance traces sample 100% of the 5 D-14 hot paths:
 - `POST /agent/message`
