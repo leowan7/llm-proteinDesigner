@@ -6,7 +6,7 @@
  * On 401 response, attempts one token refresh before failing.
  */
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 /**
  * Reads the csrftoken cookie value from document.cookie.
