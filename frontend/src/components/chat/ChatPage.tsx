@@ -311,7 +311,7 @@ export function ChatPage() {
           }
 
           // Post-first-job completion one-time guidance message (D-23)
-          if (event.status === "complete" && !localStorage.getItem("kendrew_first_job_shown")) {
+          if (event.status === "complete" && !localStorage.getItem("bindwave_first_job_shown")) {
             const firstJobMsg: ChatMessage = {
               id: newId(),
               role: "assistant",
@@ -319,7 +319,7 @@ export function ChatPage() {
                 "Your first design job is complete. Find all past sessions in the sidebar and all job results under Jobs.",
             };
             setMessages((prev) => [...prev, firstJobMsg]);
-            localStorage.setItem("kendrew_first_job_shown", "true");
+            localStorage.setItem("bindwave_first_job_shown", "true");
           }
         }
       },

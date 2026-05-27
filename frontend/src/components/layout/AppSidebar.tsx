@@ -2,7 +2,7 @@
  * AppSidebar — collapsible sidebar for authenticated pages.
  *
  * Structure (top to bottom):
- * 1. SidebarHeader — Kendrew wordmark
+ * 1. SidebarHeader — Bindwave wordmark
  * 2. "Start new session" button
  * 3. SidebarContent — scrollable session list grouped by date
  * 4. SidebarSeparator
@@ -268,10 +268,10 @@ export function AppSidebar({ sessions, sessionsLoading, activeSessionId, onRefre
         <SidebarHeader className="px-3 pt-3 pb-2">
           <div className="flex items-center gap-2">
             <div className="size-7 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-xs shrink-0">
-              K
+              B
             </div>
             <span className="font-display text-base tracking-tight text-foreground group-data-[collapsible=icon]:hidden">
-              Kendrew<span className="text-primary">.AI</span>
+              Bindwave
             </span>
           </div>
         </SidebarHeader>

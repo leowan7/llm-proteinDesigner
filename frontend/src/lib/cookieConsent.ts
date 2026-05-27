@@ -1,18 +1,17 @@
 /**
  * Cookie consent helpers (Plan 10-03).
  *
- * Kendrew only uses strictly-necessary cookies (access_token, refresh_token,
- * csrftoken). We do NOT use analytics, advertising, or tracking cookies, so
- * consent is a one-time disclosure rather than a granular opt-in. The record
- * below persists the user's acknowledgement so the banner is not re-shown on
- * every page load, and it is re-openable at any time via the
- * `kendrew:open-cookie-consent` custom event (dispatched from, e.g., the
- * footer "Cookie preferences" link).
+ * Bindwave only uses strictly-necessary session and CSRF cookies. We do NOT
+ * use analytics, advertising, or tracking cookies, so consent is a one-time
+ * disclosure rather than a granular opt-in. The record below persists the
+ * user's acknowledgement so the banner is not re-shown on every page load,
+ * and it is re-openable at any time via the `bindwave:open-cookie-consent`
+ * custom event (dispatched from, e.g., the footer "Cookie preferences" link).
  */
 import { COOKIES_VERSION } from "@/pages/legal/versions";
 
-export const COOKIE_CONSENT_KEY = "kendrew.cookie_consent.v1";
-export const COOKIE_CONSENT_EVENT = "kendrew:open-cookie-consent";
+export const COOKIE_CONSENT_KEY = "bindwave.cookie_consent.v1";
+export const COOKIE_CONSENT_EVENT = "bindwave:open-cookie-consent";
 
 export interface CookieConsentRecord {
   version: "v1";

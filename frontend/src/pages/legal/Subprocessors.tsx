@@ -90,7 +90,7 @@ export default function SubprocessorsPage() {
     <LegalLayout title="Subprocessors" lastUpdated={SUBPROCESSORS_VERSION}>
       <p>
         This page lists the third-party service providers that Ranomics Inc. engages
-        to deliver Kendrew. Each subprocessor processes personal data only under
+        to deliver Bindwave. Each subprocessor processes personal data only under
         written data-processing terms, solely for the purposes described below, and
         may not use the data for its own purposes.
       </p>
@@ -103,7 +103,7 @@ export default function SubprocessorsPage() {
 
       <h2 id="public-apis">Public APIs (not subprocessors)</h2>
       <p>
-        Kendrew also queries the public <a href="https://www.rcsb.org/">RCSB Protein
+        Bindwave also queries the public <a href="https://www.rcsb.org/">RCSB Protein
         Data Bank</a> and <a href="https://www.uniprot.org/">UniProt</a> APIs using
         accession identifiers (for example, <code>4ZS7</code> or <code>P08887</code>).
         These queries do not transmit user identifiers or uploaded content. We do not

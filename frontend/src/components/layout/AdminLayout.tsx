@@ -7,7 +7,7 @@
  *      without revealing that an admin area exists (D-04).
  *    - Network errors (401) redirect to /login.
  * 2. Sidebar navigation with collapsible icon-only mode.
- * 3. Header with "Kendrew Admin" branding and admin email.
+ * 3. Header with "Bindwave Admin" branding and admin email.
  * 4. Renders child routes via <Outlet />.
  *
  * Structurally separate from AuthenticatedLayout — admin has different nav
@@ -111,7 +111,7 @@ export function AdminLayout() {
       {/* ── Admin Header ── */}
       <header className="h-12 flex items-center justify-between px-4 border-b border-border flex-shrink-0">
         <span className="text-sm font-semibold text-foreground">
-          Kendrew Admin
+          Bindwave Admin
         </span>
         {adminEmail && (
           <span className="text-xs text-muted-foreground">{adminEmail}</span>

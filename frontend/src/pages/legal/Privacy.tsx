@@ -7,7 +7,7 @@ export default function PrivacyPage() {
       <p>
         This Privacy Policy explains how Ranomics Inc. (<em>"we,"</em> <em>"us"</em>)
         collects, uses, discloses, and retains personal data in connection with
-        Kendrew. It supplements the{" "}
+        Bindwave. It supplements the{" "}
         <a href="/legal/terms">Terms of Service</a>. If a term is defined there, it has
         the same meaning here.
       </p>
@@ -200,7 +200,7 @@ export default function PrivacyPage() {
 
       <h2 id="children">9. Children</h2>
       <p>
-        Kendrew is not directed to children under 16. We do not knowingly collect
+        Bindwave is not directed to children under 16. We do not knowingly collect
         personal data from children under 16. If you believe a child has provided us
         with personal data, contact{" "}
         <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a> so we can

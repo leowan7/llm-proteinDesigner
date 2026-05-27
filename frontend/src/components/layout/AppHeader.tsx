@@ -4,7 +4,7 @@
  * Contains:
  * - Skip navigation link (sr-only, visible on focus) as first child
  * - SidebarTrigger (collapse/expand sidebar) with tooltip and aria-label
- * - Kendrew logo mark + wordmark
+ * - Bindwave logo mark + wordmark
  * - Optional session title (passed from AuthenticatedLayout)
  */
 
@@ -45,10 +45,10 @@ export function AppHeader({ sessionTitle }: AppHeaderProps) {
       {/* Logo mark + wordmark */}
       <div className="flex items-center gap-2">
         <div className="size-6 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-xs shrink-0">
-          K
+          B
         </div>
         <span className="font-display text-base tracking-tight text-foreground hidden sm:block">
-          Kendrew<span className="text-primary">.AI</span>
+          Bindwave
         </span>
       </div>
 

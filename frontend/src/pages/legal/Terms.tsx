@@ -6,7 +6,7 @@ export default function TermsPage() {
     <LegalLayout title="Terms of Service" lastUpdated={TOS_VERSION}>
       <p>
         These Terms of Service (the <em>"Terms"</em>) govern your access to and use of
-        Kendrew, an AI protein design platform operated by Ranomics Inc.
+        Bindwave, an AI protein design platform operated by Ranomics Inc.
         (<em>"Ranomics,"</em> <em>"we,"</em> <em>"us"</em>). By creating an account or
         using the service you agree to these Terms. If you are entering into these Terms
         on behalf of an organization, you represent that you have authority to bind that
@@ -25,7 +25,7 @@ export default function TermsPage() {
 
       <h2 id="service-description">2. The Service</h2>
       <p>
-        Kendrew accepts protein structures and design briefs, runs them through
+        Bindwave accepts protein structures and design briefs, runs them through
         third-party AI models (including RFdiffusion, RFantibody, BindCraft, BoltzGen,
         and PXDesign) on managed GPU infrastructure, and returns ranked candidate
         sequences and structures. The service is provided on a pay-per-use basis metered
@@ -41,7 +41,7 @@ export default function TermsPage() {
       <h2 id="ip-ownership">3. Your Content & IP Ownership</h2>
       <p>
         <strong>You retain all rights to the structures and specifications you upload
-        to Kendrew, and to all designs the service produces for you.</strong> We do not
+        to Bindwave, and to all designs the service produces for you.</strong> We do not
         claim any ownership, copyright, patent, or other intellectual property right in
         your content or outputs.
       </p>

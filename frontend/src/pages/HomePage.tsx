@@ -45,12 +45,12 @@ const STEPS = [
   {
     num: "01",
     title: "Define your target",
-    body: "Paste a PDB ID, upload a .pdb or .cif, or describe your protein in plain language. Kendrew resolves the structure and surfaces chain-level metadata for selection.",
+    body: "Paste a PDB ID, upload a .pdb or .cif, or describe your protein in plain language. Bindwave resolves the structure and surfaces chain-level metadata for selection.",
   },
   {
     num: "02",
     title: "Describe your intent",
-    body: "Tell Kendrew what you need and why. It asks targeted questions about your downstream application, then recommends the right computational tool with expert-tuned defaults.",
+    body: "Tell Bindwave what you need and why. It asks targeted questions about your downstream application, then recommends the right computational tool with expert-tuned defaults.",
   },
   {
     num: "03",
@@ -89,10 +89,10 @@ export function HomePage() {
       >
         <div className="flex items-center gap-3">
           <div className="size-9 rounded-md bg-primary flex items-center justify-center text-primary-foreground font-display font-semibold text-base">
-            K
+            B
           </div>
           <span className="font-display text-xl tracking-tight">
-            Kendrew<span className="text-primary">.AI</span>
+            Bindwave
           </span>
         </div>
         <div className="flex items-center gap-7">
@@ -222,7 +222,7 @@ export function HomePage() {
             style={{ animationDelay: "0.5s" }}
           >
             Upload a PDB, describe your design goal, and launch jobs on
-            five state-of-the-art generative models. Kendrew handles tool
+            five state-of-the-art generative models. Bindwave handles tool
             selection, configuration, and result analysis.
           </p>
           <div
@@ -252,7 +252,7 @@ export function HomePage() {
             Five engines, one conversation.
           </h2>
           <p className="text-base text-muted-foreground max-w-sm">
-            Kendrew selects the right model for your design goal and
+            Bindwave selects the right model for your design goal and
             handles configuration automatically.
           </p>
         </div>
@@ -336,7 +336,7 @@ export function HomePage() {
       {/* ── Footer ── */}
       <footer className="px-8 md:px-16 py-8 border-t border-border/20" style={{ background: "oklch(0.10 0.006 260)" }}>
         <div className="max-w-5xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground/60">
-          <span className="font-display">Kendrew.AI &copy; {new Date().getFullYear()}</span>
+          <span className="font-display">Bindwave &copy; {new Date().getFullYear()}</span>
           <div className="flex items-center gap-6">
             <Link to="/terms" className="hover:text-foreground transition-colors">Terms of Service</Link>
             <Link to="/privacy" className="hover:text-foreground transition-colors">Privacy Policy</Link>
