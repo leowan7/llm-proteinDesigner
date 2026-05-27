@@ -201,7 +201,7 @@ async def main() -> int:
     print(f"\nQueued. job_id = {job_id}", flush=True)
     print("Watch:", flush=True)
     print(f"  docker compose logs -f worker | grep {job_id[:8]}", flush=True)
-    print(f"  modal app logs kendrew-{args.tool}-prod", flush=True)
+    print(f"  modal app logs ranomics-{args.tool}-prod", flush=True)
     return 0
 
 

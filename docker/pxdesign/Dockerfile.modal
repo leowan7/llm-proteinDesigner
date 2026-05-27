@@ -203,9 +203,12 @@ RUN mkdir -p $PXDESIGN_DIR/release_data/ccd_cache && \
 ENV PROTENIX_DATA_ROOT_DIR=$PXDESIGN_DIR/release_data/ccd_cache
 
 # ---------- Pipeline utilities ----------
+# pydantic is required by /opt/contracts (vendored from tools-hub/contracts/)
+# which run_pipeline.py imports for ToolPayload validation.
 RUN python3 -m pip install --no-cache-dir \
     gemmi \
-    requests
+    requests \
+    "pydantic>=2,<3"
 
 # ---------- Smoke-test fixture (PD-L1 IgV, chain A, residues 18-132) ----------
 # See docs/SMOKE-TEST-SPEC.md. When JOB_PAYLOAD has tier=smoke|mini_pilot and no

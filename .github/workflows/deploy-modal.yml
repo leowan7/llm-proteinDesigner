@@ -152,7 +152,7 @@ jobs:
             echo "Environment: \`staging\`"
             echo
             for app in bindcraft boltzgen pxdesign rfantibody rfdiffusion; do
-              echo "<details><summary><code>kendrew-${app}-prod</code></summary>"
+              echo "<details><summary><code>ranomics-${app}-prod</code></summary>"
               echo
               echo '```'
               if [ -f "deploy-logs/deploy-${app}.log" ]; then

@@ -1,4 +1,4 @@
-"""One-off: invoke kendrew-pxdesign-prod run_tool via Modal Function SDK.
+"""One-off: invoke ranomics-pxdesign-prod run_tool via Modal Function SDK.
 
 Workaround for `modal run --payload` CLI rejecting `dict` type annotations.
 Usage: python scripts/run_pxdesign_verify.py
@@ -26,10 +26,10 @@ PAYLOAD = {
     "input_pdb_url": "",
 }
 
-print(f"Invoking kendrew-pxdesign-prod::run_tool with tier=mini_pilot N=1")
+print(f"Invoking ranomics-pxdesign-prod::run_tool with tier=mini_pilot N=1")
 print(f"job_id={PAYLOAD['job_id']}", flush=True)
 
-run_tool = modal.Function.from_name("kendrew-pxdesign-prod", "run_tool")
+run_tool = modal.Function.from_name("ranomics-pxdesign-prod", "run_tool")
 
 t0 = time.time()
 result = run_tool.remote(PAYLOAD)

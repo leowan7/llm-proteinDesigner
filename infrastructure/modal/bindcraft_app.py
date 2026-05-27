@@ -94,8 +94,8 @@ def _merged_environment(payload: dict) -> dict[str, str]:
 image = (
     modal.Image.from_dockerfile(_DOCKERFILE, add_python=None)
     .add_local_file(_RUN_PIPELINE_LOCAL, _RUN_PIPELINE_REMOTE, copy=True)
-    # Requires sibling checkout of tools-hub for the shared contract module.
-    .add_local_dir("../tools-hub/contracts", "/opt/contracts", copy=True)
+    # Vendored sync from tools-hub/contracts/ — see contracts/__init__.py header.
+    .add_local_dir("./contracts", "/opt/contracts", copy=True)
 )
 
 app = modal.App(f"ranomics-{_TOOL}-prod")

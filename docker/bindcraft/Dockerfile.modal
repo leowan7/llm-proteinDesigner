@@ -69,6 +69,8 @@ ENV OPENMM_PLATFORM_ORDER=CUDA,OpenCL \
     OPENMM_DEFAULT_PLATFORM=CUDA
 
 # Ensure `requests` is in the BindCraft conda env (used by run_pipeline.py for webhook + uploads)
-RUN ${CONDA_DIR}/envs/BindCraft/bin/pip install --no-cache-dir requests
+# pydantic is required by /opt/contracts (vendored from tools-hub/contracts/)
+# which run_pipeline.py imports for ToolPayload validation.
+RUN ${CONDA_DIR}/envs/BindCraft/bin/pip install --no-cache-dir requests "pydantic>=2,<3"
 
 # NOTE: no COPY or CMD — Modal invokes @app.function bodies directly.

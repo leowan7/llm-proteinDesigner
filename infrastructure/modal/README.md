@@ -1,4 +1,4 @@
-# Kendrew Modal Infrastructure
+# Modal Infrastructure
 
 This directory holds the Modal.com GPU compute infrastructure that replaces the RunPod Pod per-job pattern.
 
@@ -7,11 +7,11 @@ This directory holds the Modal.com GPU compute infrastructure that replaces the 
 | File | Purpose |
 |---|---|
 | `base_image.py` | Shared helpers: tool → Dockerfile map, GPU SKUs, timeout constants, env-var builder. |
-| `bindcraft_app.py` | Modal app `kendrew-bindcraft-prod`, GPU A100-80GB. |
-| `boltzgen_app.py` | Modal app `kendrew-boltzgen-prod`, GPU A100-40GB. |
-| `rfdiffusion_app.py` | Modal app `kendrew-rfdiffusion-prod`, GPU A10G-24GB. |
-| `rfantibody_app.py` | Modal app `kendrew-rfantibody-prod`, GPU A100-40GB. |
-| `pxdesign_app.py` | Modal app `kendrew-pxdesign-prod`, GPU A100-80GB. |
+| `bindcraft_app.py` | Modal app `ranomics-bindcraft-prod`, GPU A100-80GB. |
+| `boltzgen_app.py` | Modal app `ranomics-boltzgen-prod`, GPU A100-40GB. |
+| `rfdiffusion_app.py` | Modal app `ranomics-rfdiffusion-prod`, GPU A10G-24GB. |
+| `rfantibody_app.py` | Modal app `ranomics-rfantibody-prod`, GPU A100-40GB. |
+| `pxdesign_app.py` | Modal app `ranomics-pxdesign-prod`, GPU A100-80GB. |
 
 ## One-time setup
 
@@ -70,7 +70,7 @@ asyncio.run(main())
 "
 ```
 
-Watch `modal app logs kendrew-bindcraft-prod` in a second terminal.
+Watch `modal app logs ranomics-bindcraft-prod` in a second terminal.
 
 ## Rollback (break-glass)
 
