@@ -60,6 +60,8 @@ def _build_run_env(payload: dict) -> dict[str, str]:
     env: dict[str, str] = {
         # RunPod-parity vars expected by the existing run_pipeline.py.
         "JOB_PAYLOAD": json.dumps({
+            # Required by the ToolPayload contract validated in run_pipeline.py.
+            "job_id": str(payload.get("job_id", "")),
             "job_spec": payload.get("job_spec", {}),
             "input_presigned_url": payload.get("input_presigned_url", ""),
             "job_token": payload.get("job_token", ""),
