@@ -435,8 +435,8 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     # PDBs correspond to the highest-scoring model but downstream display
     # uses the aggregate for ranking parity with other tools.
     #
-    # The template (tools-hub/templates/tools/bindcraft_results.html) renders
-    # 5 columns: ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
+    # The web service's bindcraft results template renders 5 columns:
+    # ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
     # populated here or the table renders an em-dash. We accept multiple CSV
     # column names per canonical key because FreeBindCraft (cytokineking fork)
     # ships a different column layout than upstream BindCraft and naming has
@@ -525,6 +525,26 @@ def main():
     job_token = os.environ.get("JOB_TOKEN", "")
 
     job_payload = json.loads(job_payload_str)
+
+    # Validate the payload against the shared contract module mounted at
+    # /opt/contracts by the Modal image build. On import or validation
+    # failure, write a preflight marker and exit non-zero so the wrapper
+    # surfaces a clear contract error rather than a downstream KeyError.
+    import sys
+    sys.path.insert(0, "/opt")
+    try:
+        from contracts.rpc import ToolPayload
+        _validated = ToolPayload.model_validate(job_payload)
+    except Exception as _e:
+        import time as _time
+        print(f"[contract] payload validation failed: {_e}", flush=True)
+        try:
+            with open("/tmp/preflight_failure.json", "w") as _f:
+                json.dump({"error": "payload_validation_failed", "detail": str(_e), "ts": _time.time()}, _f)
+        except Exception:
+            pass
+        sys.exit(1)
+
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
     upload_endpoint = job_payload.get("upload_urls_endpoint", "")
@@ -633,9 +653,11 @@ def main():
             upload_filename = f"design_{rank:03d}.pdb"
 
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver finds the Storage object at
+            # web service's resolver finds the Storage object at
             # {user}/{job}/designs/<basename>. design_name / pdb_name
             # diverges from upload_filename and would 404 the resolver.
+            # The contracts module (/opt/contracts/rpc.py) defines the
+            # upload-URL exchange shape consumed by the web service.
             pdb_key = f"designs/{upload_filename}"
             webhook_candidate = {
                 "rank": rank,

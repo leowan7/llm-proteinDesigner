@@ -3,12 +3,12 @@ name: Deploy Modal apps
 # Live workflow (Stream E, 2026-04-22; enabled Phase 11 D-07, 2026-04-24).
 #
 # On pull_request (paths filtered below):
-#   - Deploys all five Kendrew Modal apps to the `staging` Modal environment.
+#   - Deploys all five tools-hub Modal apps to the `staging` Modal environment.
 #   - Captures FunctionCall / deploy output per app.
 #   - Posts a single PR comment with the deploy summary.
 #
-# On push to main (paths filtered below):
-#   - Deploys all five Kendrew Modal apps to the `main` Modal environment (prod).
+# On push to master (paths filtered below):
+#   - Deploys all five tools-hub Modal apps to the `main` Modal environment (prod).
 #
 # Prerequisites (operator-owned; see Plan 11-03 Block D):
 #   - Modal `staging` environment exists (`modal environment create staging`).
@@ -27,7 +27,7 @@ on:
       - 'backend/pipelines/**'
       - '.github/workflows/deploy-modal.yml'
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - 'infrastructure/modal/**'
       - 'docker/**'
@@ -90,7 +90,7 @@ jobs:
 
       - name: Verify Modal auth
         run: |
-          modal token current
+          modal app list --env "$MODAL_ENVIRONMENT" >/dev/null
 
       - name: Deploy ${{ matrix.app }}
         id: deploy
@@ -152,7 +152,7 @@ jobs:
             echo "Environment: \`staging\`"
             echo
             for app in bindcraft boltzgen pxdesign rfantibody rfdiffusion; do
-              echo "<details><summary><code>kendrew-${app}-prod</code></summary>"
+              echo "<details><summary><code>ranomics-${app}-prod</code></summary>"
               echo
               echo '```'
               if [ -f "deploy-logs/deploy-${app}.log" ]; then

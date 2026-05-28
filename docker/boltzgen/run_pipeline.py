@@ -617,9 +617,9 @@ _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
 
 def _record_webhook_outcome(delivered: bool, detail: str) -> None:
     """Persist webhook delivery status so the Modal wrapper can surface
-    it to tools-hub even when the POST silently fails. Read by run_tool()
+    it to the consuming web service even when the POST silently fails. Read by run_tool()
     in infrastructure/modal/boltzgen_app.py and merged into the function
-    return value, where tools-hub's ModalClient.poll() inspects it."""
+    return value, where the web service's poller inspects it."""
     try:
         with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
             json.dump({"delivered": delivered, "detail": detail}, fh)
@@ -1298,6 +1298,24 @@ def main():
 
     job_payload = json.loads(job_payload_str)
 
+    # Validate the payload against the shared contract module mounted at
+    # /opt/contracts by the Modal image build. On import or validation
+    # failure, write a preflight marker and exit non-zero so the wrapper
+    # surfaces a clear contract error rather than a downstream KeyError.
+    sys.path.insert(0, "/opt")
+    try:
+        from contracts.rpc import ToolPayload
+        _validated = ToolPayload.model_validate(job_payload)
+    except Exception as _e:
+        import time as _time
+        print(f"[contract] payload validation failed: {_e}", flush=True)
+        try:
+            with open("/tmp/preflight_failure.json", "w") as _f:
+                json.dump({"error": "payload_validation_failed", "detail": str(_e), "ts": _time.time()}, _f)
+        except Exception:
+            pass
+        sys.exit(1)
+
     # ---- Smoke / mini_pilot tier: bypass webhook+upload, write to
     #      /tmp/smoke_results.json. See docs/SMOKE-TEST-SPEC.md. ----
     tier = job_payload.get("tier", "")
@@ -1557,9 +1575,11 @@ def main():
             filenames_to_upload.append(upload_filename)
 
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver finds the Storage object at
+            # web service's resolver finds the Storage object at
             # {user}/{job}/designs/<basename>. design_name diverges
-            # from upload_filename and would 404 the resolver.
+            # from upload_filename and would 404 the resolver. The
+            # contracts module (/opt/contracts/rpc.py) defines the
+            # upload-URL exchange shape consumed by the web service.
             candidates.append({
                 "rank": rank,
                 "design_name": design_name,
@@ -1637,11 +1657,11 @@ def main():
                 "proceeding: " + "; ".join(ubi_warnings)
             )
 
-        # Build candidates with inline base64 PDBs so the tools-hub frontend
-        # can render the 3D viewer + PDB-download buttons. Without this the
-        # candidate_table.html template falls back to the em-dash branch
-        # because it keys off cand.pdb_content_b64. Mirrors the smoke/
-        # mini_pilot path (line 496) for consistency.
+        # Build candidates with inline base64 PDBs so the consuming web
+        # service's frontend can render the 3D viewer + PDB-download
+        # buttons. Without this the candidate table template falls back
+        # to the em-dash branch because it keys off cand.pdb_content_b64.
+        # Mirrors the smoke/mini_pilot path (line 496) for consistency.
         webhook_candidates: list[dict] = []
         for c in candidates:
             entry = {

@@ -101,7 +101,7 @@ async def test_run_job_creates_pod():
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("worker.tasks.get_provider", return_value=mock_provider),
-        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
+        patch("worker.tasks.endpoint_for_tool", return_value="ranomics-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.generate_presigned_get_url", return_value="https://s3.example.com/target.pdb"),
         patch("worker.tasks.publish_status", new_callable=AsyncMock) as mock_publish,
         patch("worker.tasks.update_job_status", new_callable=AsyncMock),
@@ -148,7 +148,7 @@ async def test_run_job_idempotent_skip():
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("worker.tasks.get_provider", return_value=mock_provider),
-        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
+        patch("worker.tasks.endpoint_for_tool", return_value="ranomics-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -175,7 +175,7 @@ async def test_run_job_missing_job():
     with (
         patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("worker.tasks.get_provider", return_value=mock_provider),
-        patch("worker.tasks.endpoint_for_tool", return_value="kendrew-rfdiffusion-prod/run_tool"),
+        patch("worker.tasks.endpoint_for_tool", return_value="ranomics-rfdiffusion-prod/run_tool"),
         patch("worker.tasks.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"

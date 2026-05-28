@@ -68,9 +68,11 @@ image = (
         "/opt/pipeline_normalize.py",
         copy=True,
     )
+    # Vendored sync from tools-hub/contracts/ — see contracts/__init__.py header.
+    .add_local_dir("./contracts", "/opt/contracts", copy=True)
 )
 
-app = modal.App(f"kendrew-{_TOOL}-prod")
+app = modal.App(f"ranomics-{_TOOL}-prod")
 
 
 @app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)
@@ -78,7 +80,7 @@ def run_tool(payload: dict) -> dict:
     """Run one BoltzGen session (pilot or chunk of a full-design campaign).
 
     Subprocess stdout/stderr stream to Modal's function logs directly so
-    failures are visible via ``modal app logs kendrew-boltzgen-prod``.
+    failures are visible via ``modal app logs ranomics-boltzgen-prod``.
     """
     import sys
 

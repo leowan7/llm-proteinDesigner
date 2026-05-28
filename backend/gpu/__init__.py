@@ -101,11 +101,11 @@ def endpoint_for_tool(tool: str) -> str:
 
 
 _MODAL_APPS_BY_TOOL: dict[str, str] = {
-    "bindcraft": "kendrew-bindcraft-prod",
-    "boltzgen": "kendrew-boltzgen-prod",
-    "rfdiffusion": "kendrew-rfdiffusion-prod",
-    "rfantibody": "kendrew-rfantibody-prod",
-    "pxdesign": "kendrew-pxdesign-prod",
+    "bindcraft": "ranomics-bindcraft-prod",
+    "boltzgen": "ranomics-boltzgen-prod",
+    "rfdiffusion": "ranomics-rfdiffusion-prod",
+    "rfantibody": "ranomics-rfantibody-prod",
+    "pxdesign": "ranomics-pxdesign-prod",
 }
 
 

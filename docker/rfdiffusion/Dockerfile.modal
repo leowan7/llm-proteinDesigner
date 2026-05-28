@@ -68,7 +68,9 @@ RUN python3 -m pip install --no-cache-dir \
 RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
 # ---------- Python utilities ----------
-RUN python3 -m pip install --no-cache-dir requests biopython pandas
+# pydantic is required by /opt/contracts (vendored from tools-hub/contracts/)
+# which run_pipeline.py imports for ToolPayload validation.
+RUN python3 -m pip install --no-cache-dir requests biopython pandas "pydantic>=2,<3"
 
 # ---------- Bake PD-L1 smoke fixture (per SMOKE-TEST-SPEC.md) ----------
 # Smoke/mini_pilot tiers use this instead of downloading from a URL.

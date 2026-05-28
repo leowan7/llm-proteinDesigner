@@ -664,9 +664,9 @@ _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
 
 def _record_webhook_outcome(delivered: bool, detail: str) -> None:
     """Persist webhook delivery status so the Modal wrapper can surface
-    it to tools-hub even when the POST silently fails. Read by run_tool()
+    it to the consuming web service even when the POST silently fails. Read by run_tool()
     in infrastructure/modal/rfdiffusion_app.py and merged into the function
-    return value, where tools-hub's ModalClient.poll() inspects it."""
+    return value, where the web service's poller inspects it."""
     try:
         with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
             json.dump({"delivered": delivered, "detail": detail}, fh)
@@ -1014,9 +1014,8 @@ def _af2_env_with_jax_cache() -> dict:
     co-tenancy on a single GPU: TF (pulled in for AF2's tf.data feature
     pipeline) defaults to claiming nearly all VRAM at import time; JAX
     then can't allocate during XLA JIT and silently hangs. These flags
-    force both frameworks into growth-allocation mode. Same fix that
-    unblocked tools-hub D2/D3 atomic primitives — see commit f5257b8 in
-    tools-hub and reference_localcolabfold_env_vars.md.
+    force both frameworks into growth-allocation mode (set 6 LocalColabFold
+    env vars to unblock TF/JAX VRAM allocation).
 
     See infrastructure/modal/rfdiffusion_app.py::xla_cache_volume.
     """
@@ -1214,6 +1213,24 @@ def main():
 
     job_payload = json.loads(job_payload_str)
 
+    # Validate the payload against the shared contract module mounted at
+    # /opt/contracts by the Modal image build. On import or validation
+    # failure, write a preflight marker and exit non-zero so the wrapper
+    # surfaces a clear contract error rather than a downstream KeyError.
+    sys.path.insert(0, "/opt")
+    try:
+        from contracts.rpc import ToolPayload
+        _validated = ToolPayload.model_validate(job_payload)
+    except Exception as _e:
+        import time as _time
+        print(f"[contract] payload validation failed: {_e}", flush=True)
+        try:
+            with open("/tmp/preflight_failure.json", "w") as _f:
+                json.dump({"error": "payload_validation_failed", "detail": str(_e), "ts": _time.time()}, _f)
+        except Exception:
+            pass
+        sys.exit(1)
+
     # ---- Smoke / mini_pilot tier: bypass webhook+upload, write to
     #      /tmp/smoke_results.json. See docs/SMOKE-TEST-SPEC.md. ----
     tier = job_payload.get("tier", "")
@@ -1401,9 +1418,11 @@ def main():
 
             upload_filename = f"design_{rank_idx + 1:03d}.pdb"
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver finds the Storage object at
+            # web service's resolver finds the Storage object at
             # {user}/{job}/designs/<basename>. design_name diverges
-            # from upload_filename and would 404 the resolver.
+            # from upload_filename and would 404 the resolver. The
+            # contracts module (/opt/contracts/rpc.py) defines the
+            # upload-URL exchange shape consumed by the web service.
             pdb_key = f"designs/{upload_filename}"
             candidate = {
                 "rank": rank,

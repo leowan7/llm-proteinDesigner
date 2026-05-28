@@ -78,9 +78,11 @@ image = (
         "/opt/pipeline_normalize.py",
         copy=True,
     )
+    # Vendored sync from tools-hub/contracts/ — see contracts/__init__.py header.
+    .add_local_dir("./contracts", "/opt/contracts", copy=True)
 )
 
-app = modal.App(f"kendrew-{_TOOL}-prod")
+app = modal.App(f"ranomics-{_TOOL}-prod")
 
 
 @app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)

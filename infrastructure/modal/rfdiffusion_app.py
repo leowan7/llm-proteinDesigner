@@ -69,9 +69,11 @@ image = (
         "/opt/pipeline_normalize.py",
         copy=True,
     )
+    # Vendored sync from tools-hub/contracts/ — see contracts/__init__.py header.
+    .add_local_dir("./contracts", "/opt/contracts", copy=True)
 )
 
-app = modal.App(f"kendrew-{_TOOL}-prod")
+app = modal.App(f"ranomics-{_TOOL}-prod")
 
 # Persistent XLA/JAX compilation cache. The first mini_pilot run populates
 # ~/.cache/jax with compiled HLO for the AF2 multimer_v3 model (~10-15 min

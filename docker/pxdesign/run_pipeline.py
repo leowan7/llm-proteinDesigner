@@ -467,9 +467,9 @@ _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
 
 def _record_webhook_outcome(delivered: bool, detail: str) -> None:
     """Persist webhook delivery status so the Modal wrapper can surface
-    it to tools-hub even when the POST silently fails. Read by run_tool()
+    it to the consuming web service even when the POST silently fails. Read by run_tool()
     in infrastructure/modal/pxdesign_app.py and merged into the function
-    return value, where tools-hub's ModalClient.poll() inspects it."""
+    return value, where the web service's poller inspects it."""
     try:
         with open(_WEBHOOK_OUTCOME_PATH, "w") as fh:
             json.dump({"delivered": delivered, "detail": detail}, fh)
@@ -1218,7 +1218,7 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
         # hits an unfortunate seed (see VALIDATION-LOG.md 2026-04-28 mini_pilot
         # FAIL — hung at step 157/200 of AF2-IG diffusion at 75 min wallclock).
         # Bumped 4500 -> 5200 (2026-04-29) to leave 200s headroom under the
-        # tools-hub Modal-level 5400s wait cap; matches the agent investigation
+        # web service's Modal-level 5400s wait cap; matches the agent investigation
         # recommendation. When upstream PXDesign / ColabDesign are pinned to
         # the 2026-04-22 known-good SHAs (Dockerfile.modal lines 30, 35), the
         # 4500s envelope was sufficient — the bump compensates for upstream
@@ -1536,12 +1536,14 @@ def run_webhook_tier(job_payload: dict) -> None:
             upload_filename = f"design_{rank:03d}{ext}"
             filenames_to_upload.append(upload_filename)
             # pdb_key MUST share basename with upload_filename so the
-            # tools-hub resolver (/api/jobs/<id>/pdb/<filename>) can find
-            # the Storage object at {user}/{job}/designs/<basename>. Using
-            # the original design_name here created a permanent 404
-            # because tools-hub uploads as design_{rank:03d}.{pdb,cif}
-            # while design_name is the PXDesign internal label
-            # ("design_0", "design_run3-1", etc).
+            # web service's resolver can find the Storage object at
+            # {user}/{job}/designs/<basename>. Using the original
+            # design_name here created a permanent 404 because the
+            # web service uploads as design_{rank:03d}.{pdb,cif} while
+            # design_name is the PXDesign internal label ("design_0",
+            # "design_run3-1", etc). The contracts module
+            # (/opt/contracts/rpc.py) defines the upload-URL exchange
+            # shape consumed by the web service.
             candidates.append({
                 "rank": rank,
                 "pdb_key": f"designs/{upload_filename}",
@@ -1650,6 +1652,24 @@ def main() -> None:
     except json.JSONDecodeError as exc:
         fail_preflight("job_payload_json", f"{exc}")
         return
+
+    # Validate the payload against the shared contract module mounted at
+    # /opt/contracts by the Modal image build. On import or validation
+    # failure, write a preflight marker and exit non-zero so the wrapper
+    # surfaces a clear contract error rather than a downstream KeyError.
+    sys.path.insert(0, "/opt")
+    try:
+        from contracts.rpc import ToolPayload
+        _validated = ToolPayload.model_validate(job_payload)
+    except Exception as _e:
+        import time as _time
+        print(f"[contract] payload validation failed: {_e}", flush=True)
+        try:
+            with open("/tmp/preflight_failure.json", "w") as _f:
+                json.dump({"error": "payload_validation_failed", "detail": str(_e), "ts": _time.time()}, _f)
+        except Exception:
+            pass
+        sys.exit(1)
 
     tier = (job_payload.get("tier") or "").strip().lower()
     logger.info("Dispatching tier=%r", tier)
