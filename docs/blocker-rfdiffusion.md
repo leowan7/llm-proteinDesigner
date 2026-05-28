@@ -124,8 +124,8 @@ These changes are worth keeping even though they didn't unblock mini_pilot on th
 
 ## Artifacts
 
-- Docker image: `kendrew-rfdiffusion-prod` (Modal). No rebuild needed for fixes.
-- Modal app logs: `modal app logs kendrew-rfdiffusion-prod`.
+- Docker image: `ranomics-rfdiffusion-prod` (Modal). No rebuild needed for fixes.
+- Modal app logs: `modal app logs ranomics-rfdiffusion-prod`.
 - Smoke results (post-fix, 83 GPU-s): `smoke_result.status=COMPLETED`, 1 candidate, scores `{ipTM: 0.46, pLDDT: 71.0, i_pAE: 11.9, filter_status: "stub (smoke)"}`, pdb_b64_len=63608.
 - Invocation helper script: `scratch/modal_spike/invoke_rfdiff.py` (uses `modal.Function.from_name` + `.remote()` so dict payload works; `modal run ... --payload` chokes on dict annotation).
 
@@ -249,7 +249,7 @@ modal deploy infrastructure/modal/rfdiffusion_app.py   # only if not already dep
 
 python - <<'PY'
 import modal, time
-f = modal.Function.from_name("kendrew-rfdiffusion-prod", "run_tool")
+f = modal.Function.from_name("ranomics-rfdiffusion-prod", "run_tool")
 payload = {
     "tier": "mini_pilot",
     "job_id": f"mini-pilot-{int(time.time())}",
@@ -312,4 +312,4 @@ Mini_pilot ship-readiness requires 2 consecutive mini_pilot PASS entries. The fi
 ## Do-not
 
 - Do not execute this run inside this Stream E session — Leo pulls the trigger.
-- Do not retry inside the 23-hour Modal function timeout on a stuck run. If `colabfold_batch` emits only heartbeats past the 35 GPU-min envelope above, abort via `modal app stop kendrew-rfdiffusion-prod` to preserve budget and escalate to the "next-try suggestions" further up in this doc.
+- Do not retry inside the 23-hour Modal function timeout on a stuck run. If `colabfold_batch` emits only heartbeats past the 35 GPU-min envelope above, abort via `modal app stop ranomics-rfdiffusion-prod` to preserve budget and escalate to the "next-try suggestions" further up in this doc.

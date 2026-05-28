@@ -15,7 +15,7 @@ DRY_RUN=0
 
 START=$(date +%s)
 
-echo "=== Kendrew rollback drill (dry-run=$DRY_RUN) ==="
+echo "=== Ranomics rollback drill (dry-run=$DRY_RUN) ==="
 echo "Step 1: Identify current prod deploy SHAs"
 echo "  railway deployments --service kendrew-backend-prod --limit 2"
 echo "  vercel ls --scope=<team> kendrew --limit 2"
