@@ -486,6 +486,7 @@ def send_heartbeat(
     stage: str,
     designs_completed: int = 0,
     designs_total: int = 0,
+    new_candidate: dict | None = None,
 ) -> None:
     """Send a heartbeat to the Kendrew backend.
 
@@ -498,6 +499,12 @@ def send_heartbeat(
         stage: Current pipeline stage description.
         designs_completed: Number of designs finished so far.
         designs_total: Total designs requested.
+        new_candidate: Optional per-design candidate dict. When supplied, the
+            heartbeat carries it through tools-hub's /webhooks/heartbeat for
+            live UI streaming. tools-hub validates it server-side via
+            JOB_TOKEN and projects it to a fixed schema, so a malformed
+            candidate is dropped silently. We add a try/except around the
+            assignment so a bad shape cannot crash the pipeline.
     """
     from urllib.parse import urlparse, urlunparse
     parsed = urlparse(webhook_url)
@@ -508,6 +515,12 @@ def send_heartbeat(
         "designs_completed": designs_completed,
         "designs_total": designs_total,
     }
+    try:
+        if isinstance(new_candidate, dict):
+            body["new_candidate"] = new_candidate
+            body["job_token"] = os.environ.get("JOB_TOKEN", "")
+    except Exception as exc:
+        logger.debug("Skipping new_candidate on heartbeat: %s", exc)
     try:
         resp = requests.post(heartbeat_url, json=body, timeout=10)
         logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
@@ -1172,8 +1185,45 @@ def stage_af2_validation(
                     "AF2 scores for %s: ipTM=%.3f pLDDT=%.1f i_pAE=%.1f",
                     design_name, scores["ipTM"], scores["pLDDT"], scores["i_pAE"],
                 )
+            # Build a per-design candidate for live UI streaming. tools-hub
+            # gates this server-side via JOB_TOKEN and projects it to a fixed
+            # schema; a malformed candidate is dropped silently. We swallow
+            # any construction error here so the pipeline cannot crash on a
+            # surprise score shape.
+            candidate = None
+            if scores:
+                try:
+                    iptm_v = scores.get("ipTM")
+                    plddt_v = scores.get("pLDDT")
+                    ipae_v = scores.get("i_pAE")
+                    if (
+                        iptm_v is not None
+                        and plddt_v is not None
+                        and ipae_v is not None
+                        and iptm_v >= IPTM_THRESHOLD
+                        and plddt_v >= PLDDT_THRESHOLD
+                        and ipae_v <= IPAE_THRESHOLD
+                    ):
+                        filter_status = "pass"
+                    else:
+                        filter_status = "below threshold"
+                    candidate = {
+                        "rank": idx + 1,
+                        "pdb_key": None,
+                        "iptm": round(float(iptm_v), 4) if iptm_v is not None else None,
+                        "plddt": round(float(plddt_v), 4) if plddt_v is not None else None,
+                        "i_pae": round(float(ipae_v), 4) if ipae_v is not None else None,
+                        "filter_status": filter_status,
+                    }
+                except Exception as exc:
+                    logger.debug("Failed to build new_candidate: %s", exc)
+                    candidate = None
             if webhook_url and job_id:
-                send_heartbeat(webhook_url, job_id, "Running AF2 validation", idx + 1, len(designed_fastas))
+                send_heartbeat(
+                    webhook_url, job_id, "Running AF2 validation",
+                    idx + 1, len(designed_fastas),
+                    new_candidate=candidate,
+                )
         except RuntimeError as exc:
             logger.warning("AF2 validation failed for %s: %s", design_name, exc)
             continue

@@ -181,6 +181,7 @@ def send_heartbeat(
     stage: str,
     designs_completed: int = 0,
     designs_total: int = 0,
+    new_candidate: dict | None = None,
 ) -> None:
     """Send a heartbeat to the Kendrew backend.
 
@@ -193,6 +194,9 @@ def send_heartbeat(
         stage: Current pipeline stage description.
         designs_completed: Number of designs finished so far.
         designs_total: Total designs requested.
+        new_candidate: Optional per-design candidate for live UI streaming.
+            tools-hub gates it server-side via JOB_TOKEN and projects it to
+            a fixed schema, so a malformed candidate is dropped silently.
     """
     # Derive heartbeat URL safely using urllib rather than brittle string replace
     from urllib.parse import urlparse, urlunparse
@@ -205,6 +209,12 @@ def send_heartbeat(
         "designs_completed": designs_completed,
         "designs_total": designs_total,
     }
+    try:
+        if isinstance(new_candidate, dict):
+            body["new_candidate"] = new_candidate
+            body["job_token"] = os.environ.get("JOB_TOKEN", "")
+    except Exception as exc:
+        logger.debug("Skipping new_candidate on heartbeat: %s", exc)
     try:
         resp = requests.post(heartbeat_url, json=body, timeout=10)
         logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
@@ -686,6 +696,37 @@ def main():
                     upload_output(upload_urls[upload_filename], pdb_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
+
+            # Emit per-candidate heartbeat for live UI streaming. BindCraft
+            # only writes designs that it has already accepted, so default
+            # filter_status to "pass" unless a score row tagged otherwise.
+            # Score keys are canonical (ipTM, pLDDT, i_pAE) per _METRIC_MAP.
+            # pdb_key is included because the candidate's PDB upload has
+            # been attempted just above and the basename matches the
+            # tools-hub resolver path.
+            try:
+                scores_d = candidate.get("scores", {}) or {}
+                iptm_v = scores_d.get("ipTM", scores_d.get("iptm"))
+                plddt_v = scores_d.get("pLDDT", scores_d.get("plddt"))
+                ipae_v = scores_d.get("i_pAE", scores_d.get("ipae"))
+                fstatus = scores_d.get("filter_status") or "pass"
+                new_cand = {
+                    "rank": rank,
+                    "pdb_key": upload_filename,
+                    "iptm": round(float(iptm_v), 4) if isinstance(iptm_v, (int, float)) else None,
+                    "plddt": round(float(plddt_v), 4) if isinstance(plddt_v, (int, float)) else None,
+                    "i_pae": round(float(ipae_v), 4) if isinstance(ipae_v, (int, float)) else None,
+                    "filter_status": fstatus,
+                }
+            except Exception as exc:
+                logger.debug("Failed to build new_candidate: %s", exc)
+                new_cand = None
+            if webhook_url and job_id:
+                send_heartbeat(
+                    webhook_url, job_id, "Uploading candidates",
+                    rank, len(candidates),
+                    new_candidate=new_cand,
+                )
 
         # Upload Kendrew-formatted metrics CSV
         if webhook_candidates:

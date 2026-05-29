@@ -524,8 +524,14 @@ def send_heartbeat(
     stage: str,
     designs_completed: int = 0,
     designs_total: int = 0,
+    new_candidate: dict | None = None,
 ) -> None:
-    """Send a heartbeat to the Kendrew backend."""
+    """Send a heartbeat to the Kendrew backend.
+
+    new_candidate is an optional per-design candidate dict for live UI
+    streaming. tools-hub gates it server-side via JOB_TOKEN and projects
+    it to a fixed schema, so a malformed candidate is dropped silently.
+    """
     parsed = urlparse(webhook_url)
     heartbeat_url = urlunparse(parsed._replace(path="/webhooks/heartbeat"))
     body = {
@@ -534,6 +540,12 @@ def send_heartbeat(
         "designs_completed": designs_completed,
         "designs_total": designs_total,
     }
+    try:
+        if isinstance(new_candidate, dict):
+            body["new_candidate"] = new_candidate
+            body["job_token"] = os.environ.get("JOB_TOKEN", "")
+    except Exception as exc:
+        logger.debug("Skipping new_candidate on heartbeat: %s", exc)
     try:
         resp = requests.post(heartbeat_url, json=body, timeout=10)
         logger.debug("Heartbeat sent: %s (HTTP %d)", stage, resp.status_code)
@@ -1588,6 +1600,35 @@ def main():
                 "local_file": design_file,
                 "upload_filename": upload_filename,
             })
+
+            # Emit per-candidate heartbeat for live UI streaming. boltzgen
+            # parses only ipTM / pLDDT / refolding_rmsd from its metrics
+            # CSV, so i_pae is null. filter_status comes from the score
+            # row (pilot fallback stamps "below threshold"); designs that
+            # cleared filter_and_rank default to "pass".
+            try:
+                scores_d = design.get("scores", {}) or {}
+                iptm_v = scores_d.get("ipTM", scores_d.get("iptm"))
+                plddt_v = scores_d.get("pLDDT", scores_d.get("plddt"))
+                ipae_v = scores_d.get("i_pAE", scores_d.get("ipae"))
+                fstatus = scores_d.get("filter_status") or "pass"
+                new_cand = {
+                    "rank": rank,
+                    "pdb_key": upload_filename,
+                    "iptm": round(float(iptm_v), 4) if isinstance(iptm_v, (int, float)) else None,
+                    "plddt": round(float(plddt_v), 4) if isinstance(plddt_v, (int, float)) else None,
+                    "i_pae": round(float(ipae_v), 4) if isinstance(ipae_v, (int, float)) else None,
+                    "filter_status": fstatus,
+                }
+            except Exception as exc:
+                logger.debug("Failed to build new_candidate: %s", exc)
+                new_cand = None
+            if webhook_url and job_id:
+                send_heartbeat(
+                    webhook_url, job_id, "Ranking candidates",
+                    rank, len(passing),
+                    new_candidate=new_cand,
+                )
 
         if filenames_to_upload:
             filenames_to_upload.append("metrics.csv")
