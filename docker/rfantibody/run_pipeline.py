@@ -706,29 +706,42 @@ def parse_scores_tsv(tsv_path: str) -> list[dict]:
 
 
 def filter_and_rank(designs: list[dict]) -> list[dict]:
-    """Filter designs by RFantibody quality thresholds and rank by ipAE.
+    """Label every design with filter_status and rank by ipAE.
 
     RFantibody uses ipAE (interaction_pae, binder-target PAE) instead of ipTM.
-    Lower ipAE is better, so we sort ascending.
+    Lower ipAE is better, so we sort ascending. A bad result is still a
+    result: every scored design is kept and tagged "pass" or "below
+    threshold" so the UI can show all of them. The in silico thresholds
+    now drive a label, not a gate.
     """
-    passing = []
+    pass_count = 0
     for design in designs:
         scores = design["scores"]
-        pae = scores.get("pAE", 99.0)
-        plddt = scores.get("pLDDT", 0.0)
-        ipae = scores.get("ipAE", 99.0)
+        pae = scores.get("pAE")
+        plddt = scores.get("pLDDT")
+        ipae = scores.get("ipAE")
+        is_pass = (
+            pae is not None
+            and plddt is not None
+            and ipae is not None
+            and pae <= PAE_THRESHOLD
+            and plddt >= PLDDT_THRESHOLD
+            and ipae <= IPAE_THRESHOLD
+        )
+        scores["filter_status"] = "pass" if is_pass else "below threshold"
+        if is_pass:
+            pass_count += 1
 
-        if pae <= PAE_THRESHOLD and plddt >= PLDDT_THRESHOLD and ipae <= IPAE_THRESHOLD:
-            passing.append(design)
-
-    passing.sort(key=lambda x: x["scores"].get("ipAE", 99.0))
+    ranked = list(designs)
+    ranked.sort(key=lambda x: x["scores"].get("ipAE", 99.0))
 
     logger.info(
-        "Filtering: %d / %d pass (pAE<=%.1f, pLDDT>=%.0f, ipAE<=%.1f)",
-        len(passing), len(designs),
+        "Labeling: %d / %d pass (pAE<=%.1f, pLDDT>=%.0f, ipAE<=%.1f); "
+        "all designs emitted with filter_status label",
+        pass_count, len(designs),
         PAE_THRESHOLD, PLDDT_THRESHOLD, IPAE_THRESHOLD,
     )
-    return passing
+    return ranked
 
 
 def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
@@ -1312,27 +1325,11 @@ def main():
         extracted_pdbs = extract_pdbs(predictions_qv, top_hits_dir)
         pdb_map = {Path(p).stem: p for p in extracted_pdbs}
 
-        # ----- Filter and rank -----
+        # ----- Label and rank -----
+        # filter_and_rank now keeps every scored design and tags it with
+        # filter_status. No tier-specific fallback is needed because the
+        # in silico thresholds are a label, not a gate.
         passing = filter_and_rank(all_designs)
-
-        # Pilot tier fallback: E2E pipeline validation must not be gated by
-        # design quality. A pilot with 2 random-target designs almost never
-        # passes pAE<=10 AND pLDDT>=80 AND ipAE<=10, which would leave
-        # `candidates=[]` and fail downstream E2E checks even though the
-        # pipeline worked end-to-end. Emit the top designs by ipAE regardless
-        # of quality, mark filter_status="below threshold" so callers can
-        # tell pilots apart from real runs.
-        if not passing and tier == "pilot" and all_designs:
-            all_designs.sort(key=lambda d: d["scores"].get("ipAE", 99.0))
-            passing = all_designs[:2]
-            for d in passing:
-                d["scores"]["filter_status"] = "below threshold"
-            logger.warning(
-                "No designs passed production thresholds; pilot fallback "
-                "emitting top %d by ipAE (all marked filter_status='below "
-                "threshold') so validation succeeds.",
-                len(passing),
-            )
 
         # ----- Prepare upload list -----
         # Use a separate counter for emitted rank so designs without a
@@ -1486,7 +1483,10 @@ def main():
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "rf2_scored": len(all_designs),
-            "passing_filters": len(passing),
+            "passing_filters": sum(
+                1 for c in candidates
+                if c.get("scores", {}).get("filter_status") == "pass"
+            ),
             "framework": framework,
             "cdr_lengths": cdr_lengths,
             "runtime_minutes": round(elapsed_minutes, 1),

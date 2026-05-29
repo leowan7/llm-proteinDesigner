@@ -1225,26 +1225,42 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
 
 
 def filter_and_rank(designs: list[dict]) -> list[dict]:
-    """Filter designs by quality thresholds and rank by ipTM."""
-    passing = []
+    """Label every design with filter_status and rank by ipTM.
+
+    A bad result is still a result: every design from the metrics CSV is
+    kept and tagged "pass" or "below threshold" so the UI can show all of
+    them. The in silico thresholds (ipTM, pLDDT, refolding RMSD) now
+    drive a label, not a gate. Boltzgen has no PAE column so i_pAE is
+    not part of the label decision.
+    """
+    pass_count = 0
     for design in designs:
         scores = design["scores"]
-        iptm = scores.get("ipTM", 0.0)
-        plddt = scores.get("pLDDT", 0.0)
-        rmsd = scores.get("refolding_rmsd", 99.0)
+        iptm = scores.get("ipTM")
+        plddt = scores.get("pLDDT")
+        rmsd = scores.get("refolding_rmsd")
+        is_pass = (
+            iptm is not None
+            and plddt is not None
+            and rmsd is not None
+            and iptm >= IPTM_THRESHOLD
+            and plddt >= PLDDT_THRESHOLD
+            and rmsd <= RMSD_THRESHOLD
+        )
+        scores["filter_status"] = "pass" if is_pass else "below threshold"
+        if is_pass:
+            pass_count += 1
 
-        if iptm >= IPTM_THRESHOLD and plddt >= PLDDT_THRESHOLD and rmsd <= RMSD_THRESHOLD:
-            passing.append(design)
-
-    # Rank by ipTM descending
-    passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
+    ranked = list(designs)
+    ranked.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
     logger.info(
-        "Filtering: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, RMSD<=%.1f)",
-        len(passing), len(designs),
+        "Labeling: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, RMSD<=%.1f); "
+        "all designs emitted with filter_status label",
+        pass_count, len(designs),
         IPTM_THRESHOLD, PLDDT_THRESHOLD, RMSD_THRESHOLD,
     )
-    return passing
+    return ranked
 
 
 def check_ubiquitin_risk(design_files: list[str]) -> list[str]:
@@ -1498,10 +1514,11 @@ def main():
             })
             return
 
-        # ----- Build structure file map (needed up front so the pilot fallback
-        # can intersect ipTM-top-N with designs that actually have structures
-        # on disk; BoltzGen only writes CIFs for its own internally-ranked
-        # final_5_designs/, so a pure top-by-ipTM fallback drops 4/5 designs).
+        # ----- Build structure file map. BoltzGen only writes CIFs for its
+        # own internally-ranked final_5_designs/, so the per-design loop
+        # below silently skips any scored design without a matching file
+        # on disk (the tools-hub UI cannot render a candidate without a
+        # CIF/PDB).
         design_files = find_design_files(output_dir, budget)
 
         # Build a lookup from design name stem to file path
@@ -1514,41 +1531,13 @@ def main():
                 if stem.startswith(prefix):
                     design_file_map[stem[len(prefix):]] = fpath
 
-        def _has_structure_file(design_name: str) -> bool:
-            """Return True if the design has a matching CIF/PDB on disk."""
-            if design_name in design_file_map:
-                return True
-            for key in design_file_map:
-                if design_name in key or key in design_name:
-                    return True
-            return False
-
-        # ----- Filter and rank -----
+        # ----- Label and rank -----
+        # filter_and_rank now keeps every scored design and tags it with
+        # filter_status. Designs without a structure file on disk are
+        # still dropped in the per-design loop below because the tools-hub
+        # UI cannot render a candidate without a CIF/PDB; that is a
+        # transport constraint, not a quality gate.
         passing = filter_and_rank(all_designs)
-        # Pilot tier fallback: E2E pipeline validation must not be gated by
-        # design quality — a pilot with a random target + low num_designs
-        # often produces designs below production thresholds. Upload the top
-        # N by ipTM regardless so the job can COMPLETE with candidates and
-        # prove the MinIO-upload / webhook / parse_results path works. The
-        # filter_status field records that these didn't pass production
-        # thresholds so downstream agents know not to trust the score.
-        # IMPORTANT: only consider designs that actually have a structure file
-        # — BoltzGen writes CIFs only for its own internally-ranked top-N, so
-        # a naive top-by-ipTM fallback drops most candidates silently and
-        # leaves the user with 1 candidate when the UI promises up to budget.
-        if not passing and tier == "pilot" and all_designs:
-            structured = [d for d in all_designs if _has_structure_file(d["design_name"])]
-            structured.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
-            passing = structured[: max(1, budget)]
-            for d in passing:
-                d["scores"]["filter_status"] = "below threshold"
-            logger.warning(
-                "No designs passed production thresholds; pilot fallback "
-                "emitting top %d by ipTM (filtered to designs with structure "
-                "files; all marked filter_status='below threshold') so "
-                "validation succeeds.",
-                len(passing),
-            )
 
         # ----- Prepare upload list -----
         # rank_idx is the index into `passing`, but designs without a matching
@@ -1727,7 +1716,10 @@ def main():
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "boltzgen_scored": len(all_designs),
-            "passing_filters": len(passing),
+            "passing_filters": sum(
+                1 for c in candidates
+                if c.get("scores", {}).get("filter_status") == "pass"
+            ),
             "runtime_minutes": round(elapsed_minutes, 1),
             "next_steps": next_steps,
         }

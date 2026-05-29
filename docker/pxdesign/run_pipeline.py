@@ -1486,45 +1486,44 @@ def run_webhook_tier(job_payload: dict) -> None:
         parsed_results = parse_summary_csv(summary_csv)
         design_files = find_design_files(output_dir)
 
-        tier = (job_payload.get("tier") or "").strip().lower()
-
-        passing = []
+        # Label every design instead of gating. A bad result is still a
+        # result: every parsed design is kept and tagged "pass" or
+        # "below threshold" so the UI can show all of them. PXDesign also
+        # ships its own pass/fail in the summary CSV (preserved in
+        # scores["filter_status"] by parse_summary_csv), so the label is
+        # "pass" if either PXDesign's own decision is "pass" or all three
+        # in silico thresholds are met.
+        pass_count = 0
         for result in parsed_results:
             scores = result["scores"]
-            iptm = scores.get("ipTM", 0.0)
-            plddt = scores.get("pLDDT", 0.0)
-            pae = scores.get("pAE", 99.0)
+            iptm = scores.get("ipTM")
+            plddt = scores.get("pLDDT")
+            pae = scores.get("pAE")
 
             pxdesign_passed = scores.get("filter_status", "") == "pass"
             threshold_passed = (
-                iptm >= IPTM_THRESHOLD
+                iptm is not None
+                and plddt is not None
+                and pae is not None
+                and iptm >= IPTM_THRESHOLD
                 and plddt >= PLDDT_THRESHOLD
                 and pae <= PAE_THRESHOLD
             )
-            if pxdesign_passed or threshold_passed:
-                passing.append(result)
+            is_pass = pxdesign_passed or threshold_passed
+            scores["filter_status"] = "pass" if is_pass else "below threshold"
+            if is_pass:
+                pass_count += 1
 
+        passing = list(parsed_results)
         passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
-        # Pilot fallback: when no design clears the production threshold,
-        # surface the top-ipTM rows with filter_status="below threshold" so
-        # users see the score distribution rather than an empty candidates
-        # table. Mirrors rfdiffusion / rfantibody / boltzgen pilot fallback
-        # (Kendrew commit d19080c). Only fires at pilot tier — sprint/full
-        # keep strict filtering since deeper sampling makes a true zero a
-        # real signal.
-        if not passing and tier == "pilot" and parsed_results:
-            parsed_results.sort(
-                key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True,
-            )
-            passing = parsed_results[:2]
-            for r in passing:
-                r["scores"]["filter_status"] = "below threshold"
-            logger.info(
-                "Pilot fallback: 0/%d designs cleared thresholds; surfacing "
-                "top %d by ipTM with filter_status='below threshold'",
-                len(parsed_results), len(passing),
-            )
+        logger.info(
+            "Labeling: %d / %d pass (pxdesign-internal OR ipTM>=%.2f "
+            "AND pLDDT>=%.0f AND pAE<=%.0f); all designs emitted with "
+            "filter_status label",
+            pass_count, len(parsed_results),
+            IPTM_THRESHOLD, PLDDT_THRESHOLD, PAE_THRESHOLD,
+        )
 
         candidates = []
         filenames_to_upload = []

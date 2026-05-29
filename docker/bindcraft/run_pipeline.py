@@ -508,6 +508,12 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
                 pdb_name, design_key, list(metrics_by_name.keys()),
             )
 
+        # BindCraft writes only Accepted designs to its output; everything
+        # in pdb_files is already past BindCraft's internal filter. Stamp
+        # filter_status explicitly so the field is always present for the
+        # tools-hub UI.
+        scores["filter_status"] = "pass"
+
         candidates.append({
             "rank": rank,
             "pdb_path": pdb_path,

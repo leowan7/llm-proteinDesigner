@@ -1404,41 +1404,36 @@ def main():
             })
             return
 
-        # ----- Filter and rank -----
-        passing = [
-            r for r in af2_results
-            if (
-                r["scores"]["ipTM"] >= IPTM_THRESHOLD
-                and r["scores"]["pLDDT"] >= PLDDT_THRESHOLD
-                and r["scores"]["i_pAE"] <= IPAE_THRESHOLD
+        # ----- Label and rank -----
+        # A bad result is still a result. Every AF2 scored design is kept
+        # and tagged with filter_status so the UI can show all of them.
+        # The in silico thresholds (ipTM, pLDDT, i_pAE) now drive a label,
+        # not a gate.
+        pass_count = 0
+        for r in af2_results:
+            iptm_v = r["scores"].get("ipTM")
+            plddt_v = r["scores"].get("pLDDT")
+            ipae_v = r["scores"].get("i_pAE")
+            is_pass = (
+                iptm_v is not None
+                and plddt_v is not None
+                and ipae_v is not None
+                and iptm_v >= IPTM_THRESHOLD
+                and plddt_v >= PLDDT_THRESHOLD
+                and ipae_v <= IPAE_THRESHOLD
             )
-        ]
-        passing.sort(key=lambda x: x["scores"]["ipTM"], reverse=True)
+            r["scores"]["filter_status"] = "pass" if is_pass else "below threshold"
+            if is_pass:
+                pass_count += 1
+        passing = list(af2_results)
+        passing.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
         logger.info(
-            "Filtering: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, i_pAE<=%.0f)",
-            len(passing), len(af2_results),
+            "Labeling: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, i_pAE<=%.0f); "
+            "all designs emitted with filter_status label",
+            pass_count, len(af2_results),
             IPTM_THRESHOLD, PLDDT_THRESHOLD, IPAE_THRESHOLD,
         )
-
-        # Pilot tier fallback: E2E pipeline validation must not be gated by
-        # design quality. A pilot with 2 random-target designs almost never
-        # passes IPTM>=0.70 AND pLDDT>=80 AND i_pAE<=10, which would leave
-        # `candidates=[]` and fail downstream E2E checks even though the
-        # pipeline worked end-to-end. Emit the top designs by ipTM regardless
-        # of quality, mark filter_status="below threshold" so callers can
-        # tell pilots apart from real runs.
-        if not passing and tier == "pilot" and af2_results:
-            af2_results.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
-            passing = af2_results[:2]
-            for r in passing:
-                r["scores"]["filter_status"] = "below threshold"
-            logger.warning(
-                "No designs passed production thresholds; pilot fallback emitting "
-                "top %d by ipTM (all marked filter_status='below threshold') so "
-                "validation succeeds.",
-                len(passing),
-            )
 
         # ----- Upload outputs (on-demand URLs) -----
         candidates = []
