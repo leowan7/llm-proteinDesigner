@@ -301,6 +301,14 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     num_designs = int(params.get("num_designs", 1))
     target_chain = job_spec["target_chain"]
 
+    # Heartbeat config for live UI streaming. Reading env here lets the
+    # smoke and mini_pilot path stream per design heartbeats from
+    # stage_proteinmpnn and stage_af2_validation, the same way the
+    # legacy full pilot path does. Without this both stages were getting
+    # passed empty strings and every heartbeat was being suppressed.
+    webhook_url = os.environ.get("WEBHOOK_URL", "")
+    job_id = os.environ.get("JOB_ID", "unknown")
+
     # Copy baked fixture into work dir so RFdiffusion can write adjacent.
     target_pdb = os.path.join(work_dir, "target.pdb")
     shutil.copy(SMOKE_TARGET_PDB, target_pdb)
@@ -342,7 +350,7 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     try:
         designed_fastas = stage_proteinmpnn(
             backbone_pdbs, target_chain, mpnn_output,
-            webhook_url="", job_id="",
+            webhook_url=webhook_url, job_id=job_id,
         )
     except RuntimeError as exc:
         return {
@@ -369,7 +377,7 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
         try:
             af2_results = stage_af2_validation(
                 designed_fastas, target_pdb, target_chain, af2_output,
-                webhook_url="", job_id="", tier=tier,
+                webhook_url=webhook_url, job_id=job_id, tier=tier,
             )
         except RuntimeError as exc:
             return {
