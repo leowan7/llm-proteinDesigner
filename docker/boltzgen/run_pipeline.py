@@ -1399,6 +1399,23 @@ def main():
     params = job_spec.get("parameters", {})
     yaml_spec = params.get("yaml_spec") or {}
     protocol = params.get("protocol", "protein-anything")
+    # Defensive preflight: reject unknown --protocol values before
+    # spinning up Boltz-2 so a typo cannot burn ~$0.50+ of GPU time
+    # before the CLI fails out. Mirrors the upstream
+    # boltzgen run --protocol choices.
+    ALLOWED_PROTOCOLS = {
+        "protein-anything",
+        "peptide-anything",
+        "protein-small_molecule",
+        "nanobody-anything",
+        "antibody-anything",
+    }
+    if protocol not in ALLOWED_PROTOCOLS:
+        logger.error("Unknown protocol %r; must be one of %s", protocol, sorted(ALLOWED_PROTOCOLS))
+        post_webhook(webhook_url, job_id, pod_id, {
+            "error": f"Unknown protocol '{protocol}'. Allowed: {sorted(ALLOWED_PROTOCOLS)}",
+        })
+        return
     num_designs = params.get("num_designs", 10000)
     # Pilot tier clamps budget to 5; honour it container-side as well.
     # tier is read from job_payload (line ~1296), not job_spec — the wrapper
