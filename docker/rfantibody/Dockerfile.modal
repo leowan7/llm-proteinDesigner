@@ -52,11 +52,9 @@ RUN cd $RFANTIBODY_DIR && \
     ls -lh weights/ && \
     echo "Weight download complete"
 
-# ---------- Validate bundled framework PDBs ----------
+# ---------- Validate bundled framework PDB ----------
 RUN test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/h-NbBCII10.pdb && \
-    echo "VHH framework OK" && \
-    test -f $RFANTIBODY_DIR/scripts/examples/example_inputs/hu-4D5-8_Fv.pdb && \
-    echo "scFv framework OK"
+    echo "VHH framework OK"
 
 # ---------- Pipeline utilities ----------
 # biopython is required by backend/pdb_utils/pipeline_normalize.py, which is

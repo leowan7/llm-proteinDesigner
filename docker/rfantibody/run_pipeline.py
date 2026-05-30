@@ -57,10 +57,12 @@ logger = logging.getLogger("rfantibody_pipeline")
 # ---------------------------------------------------------------------------
 RFANTIBODY_DIR = os.environ.get("RFANTIBODY_DIR", "/opt/rfantibody")
 
-# Bundled framework PDBs (HLT-marked, from RFantibody repo examples)
+# Bundled framework PDB (HLT-marked, from RFantibody repo examples).
+# Only VHH (single-domain heavy-chain antibody) is supported by this
+# wrapper -- ProteinMPNN below only redesigns heavy-chain CDRs
+# (H1/H2/H3), so scFv would silently degrade to a VHH-style run.
 FRAMEWORKS = {
     "VHH": os.path.join(RFANTIBODY_DIR, "scripts/examples/example_inputs/h-NbBCII10.pdb"),
-    "scFv": os.path.join(RFANTIBODY_DIR, "scripts/examples/example_inputs/hu-4D5-8_Fv.pdb"),
 }
 
 # Filtering thresholds. RFantibody's qvscorefile does NOT emit ipTM — it uses
