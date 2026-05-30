@@ -1037,6 +1037,26 @@ def run_smoke_pipeline(tier: str) -> None:
         top_n = 1 if tier == "smoke" else 2
         selected = all_designs[:top_n]
 
+        # Stamp filter_status on every score dict so the UI shows pass or
+        # below threshold instead of a blank dash. Mirrors filter_and_rank
+        # which the pilot path runs but the smoke path bypasses.
+        for design in selected:
+            scores = design["scores"]
+            if "filter_status" in scores:
+                continue
+            pae_v = scores.get("pAE")
+            plddt_v = scores.get("pLDDT")
+            ipae_v = scores.get("ipAE")
+            is_pass = (
+                pae_v is not None
+                and plddt_v is not None
+                and ipae_v is not None
+                and pae_v <= PAE_THRESHOLD
+                and plddt_v >= PLDDT_THRESHOLD
+                and ipae_v <= IPAE_THRESHOLD
+            )
+            scores["filter_status"] = "pass" if is_pass else "below threshold"
+
         candidates = []
         for rank_idx, design in enumerate(selected):
             design_name = design["design_name"]

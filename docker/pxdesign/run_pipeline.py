@@ -1286,6 +1286,31 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
             key=lambda r: r["scores"].get("ipTM", 0.0), reverse=True,
         )
 
+        # Stamp filter_status on every score dict so the UI shows pass or
+        # below threshold instead of a blank dash. Mirrors the OR
+        # semantics that main() applies: pass if PXDesign internal label
+        # is "pass" or all three in silico thresholds are met. The
+        # summary CSV parser pre-populates filter_status with "pass",
+        # "fail", or "unknown" (see parse_summary_csv); we overwrite to
+        # "pass" or "below threshold" so the UI gets one of two labels.
+        for result in parsed_results:
+            scores = result["scores"]
+            iptm = scores.get("ipTM")
+            plddt = scores.get("pLDDT")
+            pae = scores.get("pAE")
+            pxdesign_passed = scores.get("filter_status", "") == "pass"
+            threshold_passed = (
+                iptm is not None
+                and plddt is not None
+                and pae is not None
+                and iptm >= IPTM_THRESHOLD
+                and plddt >= PLDDT_THRESHOLD
+                and pae <= PAE_THRESHOLD
+            )
+            scores["filter_status"] = (
+                "pass" if (pxdesign_passed or threshold_passed) else "below threshold"
+            )
+
         # Match requested N (or all if fewer were produced)
         top_results = parsed_results[:num_designs]
 

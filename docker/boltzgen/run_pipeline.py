@@ -490,6 +490,25 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
                     "gpu_seconds": int(time.time() - start),
                 }
             scores = _stub_scores(rank)
+        # Stamp filter_status so the UI shows pass or below threshold
+        # instead of a blank dash. Mirrors filter_and_rank which the pilot
+        # path runs but the smoke path bypasses. BoltzGen has no PAE
+        # column, so the label uses ipTM, pLDDT, and refolding_rmsd only.
+        # Stub scores already carry filter_status="stub (smoke)" so we
+        # only stamp when absent.
+        if "filter_status" not in scores:
+            iptm = scores.get("ipTM")
+            plddt = scores.get("pLDDT")
+            rmsd = scores.get("refolding_rmsd")
+            is_pass = (
+                iptm is not None
+                and plddt is not None
+                and rmsd is not None
+                and iptm >= IPTM_THRESHOLD
+                and plddt >= PLDDT_THRESHOLD
+                and rmsd <= RMSD_THRESHOLD
+            )
+            scores["filter_status"] = "pass" if is_pass else "below threshold"
         candidates.append({
             "rank": rank,
             "pdb_key": f"design_{rank:03d}.pdb",

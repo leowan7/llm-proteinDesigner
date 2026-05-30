@@ -403,6 +403,27 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     af2_results.sort(key=lambda r: r["scores"].get("ipTM", 0.0), reverse=True)
     af2_results = af2_results[:num_designs]
 
+    # Stamp filter_status on every score dict so the UI shows pass or
+    # below threshold instead of a blank dash. Mirrors the labeling
+    # semantics that main() applies. Skip rows where filter_status is
+    # already set (skip_af2 stub rows carry "stub (smoke)").
+    for r in af2_results:
+        scores = r["scores"]
+        if "filter_status" in scores:
+            continue
+        iptm = scores.get("ipTM")
+        plddt = scores.get("pLDDT")
+        ipae = scores.get("i_pAE")
+        is_pass = (
+            iptm is not None
+            and plddt is not None
+            and ipae is not None
+            and iptm >= IPTM_THRESHOLD
+            and plddt >= PLDDT_THRESHOLD
+            and ipae <= IPAE_THRESHOLD
+        )
+        scores["filter_status"] = "pass" if is_pass else "below threshold"
+
     candidates = []
     for rank_idx, r in enumerate(af2_results):
         design_name = r["design_name"]
