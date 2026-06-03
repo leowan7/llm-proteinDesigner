@@ -19,10 +19,14 @@ Session management:
 
 import asyncio
 import json
+import logging
 
 import anthropic
+import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel
 
 from agent.system_prompt import AGENT_SYSTEM_PROMPT
@@ -185,10 +189,15 @@ async def agent_message(
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except anthropic.APIError as exc:
+            logger.exception("Agent SSE: anthropic.APIError")
+            sentry_sdk.capture_exception(exc)
             error_msg = getattr(exc, "message", str(exc))
             yield f"data: {json.dumps({'type': 'error', 'text': f'Agent error: {error_msg}'})}\n\n"
-        except Exception:
-            # Do not leak internal error details to the client
+        except Exception as exc:
+            # Do not leak internal error details to the client, but DO log them
+            # server-side and capture to Sentry so prod incidents are debuggable.
+            logger.exception("Agent SSE: unhandled exception")
+            sentry_sdk.capture_exception(exc)
             yield f"data: {json.dumps({'type': 'error', 'text': 'An unexpected error occurred. Please try again.'})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
