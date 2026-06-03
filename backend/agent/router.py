@@ -25,8 +25,6 @@ import anthropic
 import sentry_sdk
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-
-logger = logging.getLogger(__name__)
 from pydantic import BaseModel
 
 from agent.system_prompt import AGENT_SYSTEM_PROMPT
@@ -40,6 +38,8 @@ from sessions.queries import (
     update_agent_history,
     update_session_title,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
