@@ -27,12 +27,12 @@ const COOKIES: CookieRow[] = [
     flags: "HttpOnly, Secure (in production), SameSite=Lax",
   },
   {
-    name: "csrftoken",
+    name: "csrftoken_v2",
     purpose:
       "Double-submit CSRF token paired with the X-CSRFToken request header to defeat cross-site request forgery on state-changing endpoints.",
     expiry: "Session",
     path: "/",
-    flags: "Secure (in production), SameSite=Lax (readable by our own JS to echo in header)",
+    flags: "Secure (in production), SameSite=Lax, Domain=.bindwave.com (readable by our own JS to echo in header)",
   },
 ];
 

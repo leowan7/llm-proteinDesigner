@@ -2,7 +2,7 @@
  * API client for FastAPI backend.
  *
  * All requests include credentials (cookies) for HTTP-only cookie auth.
- * CSRF: reads csrftoken cookie and sends it in x-csrftoken header on mutating requests.
+ * CSRF: reads csrftoken_v2 cookie and sends it in x-csrftoken header on mutating requests.
  * On 401 response, attempts one token refresh before failing.
  */
 

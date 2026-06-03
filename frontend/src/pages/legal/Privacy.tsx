@@ -67,7 +67,7 @@ export default function PrivacyPage() {
       <h3 id="cookies">Cookies</h3>
       <p>
         We use only three strictly-necessary cookies — <code>access_token</code>,{" "}
-        <code>refresh_token</code>, <code>csrftoken</code> — for authentication and
+        <code>refresh_token</code>, <code>csrftoken_v2</code> — for authentication and
         CSRF protection. We do not set analytics, advertising, or cross-site tracking
         cookies. See the <a href="/legal/cookies">Cookie Policy</a> for details.
       </p>
