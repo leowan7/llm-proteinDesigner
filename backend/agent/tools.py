@@ -7,8 +7,13 @@ Exports:
 """
 
 import json
+import logging
+
+import sentry_sdk
 
 from agent.wizard import WIZARD_PARAMS
+
+logger = logging.getLogger(__name__)
 
 TOOL_DEFINITIONS = [
     {
@@ -584,6 +589,9 @@ async def _handle_extract_interface(tool_input: dict) -> str:
             "message": str(exc),
         })
     except Exception as exc:
+        logger.exception("extract_interface failed for pdb=%s chains=%s/%s",
+                         pdb_path, target_chain, partner_chain)
+        sentry_sdk.capture_exception(exc)
         return json.dumps({
             "status": "error",
             "message": f"Interface extraction failed: {exc}",
@@ -635,7 +643,13 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
                 "message": "Hotspot SASA check skipped (pdb_utils not installed).",
             })
         except Exception as exc:
-            # SASA computation failed — never block launch for this
+            # SASA computation failed — never block launch for this (the
+            # ReviewCard still gets a "pass" so the user can proceed), but
+            # Sentry-capture so we know when SASA is silently skipping. A
+            # surge of these means pdb_utils.validate is broken in prod.
+            logger.exception("Hotspot SASA check failed for pdb=%s chain=%s residues=%s",
+                             pdb_path, chain_id, hotspot_residues)
+            sentry_sdk.capture_exception(exc)
             results.append({
                 "check_name": "hotspot_accessibility",
                 "status": "pass",
@@ -706,8 +720,15 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
                     tool,
                     json.dumps(job_spec),
                 )
-        except Exception:
-            # Job creation failed — log but don't block the validation result
+        except Exception as exc:
+            # Job creation failed — log but don't block the validation
+            # result. The ReviewCard renders without a launchable job_id;
+            # the user sees the validation but the Launch button is dead
+            # until the next call. Sentry capture is critical because
+            # silent draft-job failures break the launch flow.
+            logger.exception("validate_preflight: draft job creation failed for user=%s tool=%s",
+                             user_id, tool)
+            sentry_sdk.capture_exception(exc)
             job_id = None
 
     return json.dumps({

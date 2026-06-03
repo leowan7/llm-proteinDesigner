@@ -241,9 +241,12 @@ async def _generate_title_background(
         await update_session_title(
             user_id=user_id, session_id=session_id, title=title
         )
-    except Exception:
-        # Title generation is best-effort; failures are non-fatal
-        pass
+    except Exception as exc:
+        # Title generation is best-effort; failures are non-fatal but should
+        # not be invisible -- log + capture so we know if title generation has
+        # silently broken (e.g. anthropic API change, model deprecation).
+        logger.exception("Title generation failed for session %s", session_id)
+        sentry_sdk.capture_exception(exc)
 
 
 def _tool_status_text(tool_name: str) -> str:

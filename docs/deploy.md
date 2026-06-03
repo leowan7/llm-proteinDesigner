@@ -139,6 +139,7 @@ drill remains DEFERRED until the staging Railway stack is wired.
 | External liveness | UptimeRobot monitor 803167433 on app.bindwave.com/health (staging monitor DEFERRED) | email to leo@ranomics.com |
 | Daily GPU spend | arq cron `check_daily_gpu_spend` | Resend email to leo@ranomics.com |
 | Post-deploy smoke | GitHub Actions smoke.yml | Sentry + email on fail (Slack not installed) |
+| Worker process exceptions | Sentry (kendrew-backend) via `backend/worker/main.py` `sentry_sdk.init` | email to leo@ranomics.com (added 2026-06-03 — arq worker is separate Railway service, not covered by FastAPI Sentry integration) |
 
 Sentry Performance traces sample 100% of the 5 D-14 hot paths:
 - `POST /agent/message`
@@ -146,6 +147,27 @@ Sentry Performance traces sample 100% of the 5 D-14 hot paths:
 - `POST /webhooks/runpod`
 - `POST /webhooks/heartbeat`
 - `POST /jobs/{job_id}/upload-urls`
+
+### Sentry coverage matrix (added 2026-06-03)
+
+The FastAPI app initializes Sentry in `backend/main.py` with the
+Starlette+FastAPI integrations, which auto-capture unhandled exceptions
+from HTTP request handlers. Two extensions were added during the
+post-Phase-11 sweep:
+
+- **Worker process** (`backend/worker/main.py`): the arq worker runs as
+  a separate Railway service with no HTTP surface, so the FastAPI
+  integrations do not apply. `sentry_sdk.init` is called at module top
+  (no integrations, traces+profiles=0) so any unhandled exception in
+  `run_job` / `resume_session` / the 6 cron jobs reaches Sentry.
+- **Explicit-capture sweep** for the "log + swallow + continue" pattern
+  in all 4 modules (worker crons, webhooks/router, agent/router, agent/tools).
+  Auto-capture only fires on unhandled exceptions, so any `except Exception:`
+  block that returns gracefully to the caller was previously invisible to
+  Sentry even though FastApiIntegration was active. The sweep added
+  `logger.exception(...) + sentry_sdk.capture_exception(exc)` after the
+  existing log line at every swallow site. Behavior unchanged; visibility
+  added.
 
 ## Deployment Flow
 
