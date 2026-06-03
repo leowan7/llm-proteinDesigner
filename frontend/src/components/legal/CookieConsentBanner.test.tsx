@@ -78,7 +78,12 @@ describe("CookieConsentBanner via CookieConsentProvider", () => {
     const region = screen.getByRole("region", { name: /cookie/i });
     expect(region.textContent).not.toContain("access_token");
     expect(region.textContent).not.toContain("refresh_token");
+    // Bare "csrftoken" still catches the legacy name AND any future variant
+    // via substring match; the explicit "csrftoken_v2" line documents the
+    // current cookie name (renamed in commit dc543ba to force re-issue
+    // after the parent-domain scope fix).
     expect(region.textContent).not.toContain("csrftoken");
+    expect(region.textContent).not.toContain("csrftoken_v2");
   });
 
   it("contains a Learn more link to /legal/cookies", () => {
