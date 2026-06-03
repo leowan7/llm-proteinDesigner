@@ -76,7 +76,18 @@ async def checkout_session(
 
     Returns:
         JSON with `url` field containing the Stripe Checkout session URL.
+
+    Raises:
+        503 if Stripe is not configured on this deployment (empty
+        STRIPE_SECRET_KEY). Matches the fallback /billing/payment-status uses,
+        and the frontend ReviewCard catches the error and surfaces "Payment
+        setup unavailable" — better than a 500 traceback.
     """
+    if not settings.stripe_secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stripe billing is not configured on this deployment.",
+        )
     stripe_customer_id = await _resolve_stripe_customer(user_id)
     checkout_url = create_setup_session(
         stripe_customer_id=stripe_customer_id,
@@ -140,7 +151,14 @@ async def get_payment_method(user_id: str = Depends(get_current_user)):
     Returns:
         Dict with ``has_payment_method`` bool. If True, also includes
         ``brand``, ``last4``, ``exp_month``, ``exp_year``.
+
+        If Stripe is not configured (empty STRIPE_SECRET_KEY), returns
+        ``{"has_payment_method": False}`` so the frontend can render its
+        "no card on file" UI instead of throwing a 500 on the upstream
+        stripe.Customer.retrieve call.
     """
+    if not settings.stripe_secret_key:
+        return {"has_payment_method": False}
     stripe_customer_id = await _resolve_stripe_customer(user_id)
 
     customer = stripe.Customer.retrieve(
