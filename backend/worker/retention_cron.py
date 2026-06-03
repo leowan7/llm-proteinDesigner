@@ -43,6 +43,8 @@ PostgreSQL-side type coercion is required.
 import datetime
 import logging
 
+import sentry_sdk
+
 from db.connection import get_db_pool
 from jobs.notifications import send_retention_warning_email
 from storage.client import delete_job_objects
@@ -157,10 +159,11 @@ async def send_retention_warnings(ctx: dict | None = None) -> int:
                 )
             sent += 1
         except Exception as exc:
-            logger.error(
-                "send_retention_warnings: job=%s email failed: %s",
-                job_id, exc,
+            logger.exception(
+                "send_retention_warnings: job=%s email failed",
+                job_id,
             )
+            sentry_sdk.capture_exception(exc)
             # Swallow — the next cron run retries this row.
 
     logger.info("send_retention_warnings: %d warning(s) sent", sent)
@@ -243,10 +246,11 @@ async def execute_retention_deletions(ctx: dict | None = None) -> int:
             )
             deleted += 1
         except Exception as exc:
-            logger.error(
-                "execute_retention_deletions: job=%s failed: %s",
-                job_id, exc,
+            logger.exception(
+                "execute_retention_deletions: job=%s failed",
+                job_id,
             )
+            sentry_sdk.capture_exception(exc)
             # Swallow — row stays unstamped; next cron retries.
 
     logger.info("execute_retention_deletions: %d job(s) expired", deleted)

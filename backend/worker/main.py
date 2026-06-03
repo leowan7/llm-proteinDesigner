@@ -9,6 +9,7 @@ GPU jobs are long-running and memory-intensive; parallelism handled at the
 infrastructure level by running multiple worker containers.
 """
 
+import sentry_sdk
 from arq.connections import RedisSettings
 from arq.cron import cron
 
@@ -19,6 +20,25 @@ from worker.deletion_cron import process_pending_deletions
 from worker.retention_cron import retention_cron
 from worker.session_orchestrator import resume_session
 from worker.tasks import run_job
+
+# Initialize Sentry error tracking for the arq worker process.
+#
+# The FastAPI app initializes its own Sentry instance in backend/main.py with
+# the StarletteIntegration/FastApiIntegration for HTTP-request tracing. The
+# arq worker is a separate Railway service with no HTTP surface — cron jobs
+# (cleanup, retention, deletion, gpu-spend-alert) and queued tasks (run_job,
+# resume_session) would otherwise be invisible to Sentry, with failures only
+# surfacing in Railway stdout logs.
+#
+# Skip traces_sampler/profiles entirely — there are no HTTP transactions here
+# and Sentry's default sampling for non-HTTP code is fine for free-tier quota.
+if settings.sentry_dsn:
+    sentry_sdk.init(
+        dsn=settings.sentry_dsn,
+        traces_sample_rate=0.0,
+        profiles_sample_rate=0.0,
+        environment=("production" if not settings.debug else "development"),
+    )
 
 
 class WorkerSettings:

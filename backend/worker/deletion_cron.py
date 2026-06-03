@@ -13,6 +13,8 @@ retries them.
 """
 import logging
 
+import sentry_sdk
+
 from db.connection import get_db_pool
 from user.deletion import GRACE_PERIOD_DAYS, execute_hard_delete
 
@@ -56,10 +58,11 @@ async def process_pending_deletions(ctx: dict | None = None) -> int:
             await execute_hard_delete(user_id, row["email"], stripe_customer_id)
             deleted += 1
         except Exception as exc:
-            logger.error(
-                "process_pending_deletions: user=%s failed: %s",
-                user_id, exc,
+            logger.exception(
+                "process_pending_deletions: user=%s failed",
+                user_id,
             )
+            sentry_sdk.capture_exception(exc)
             # Swallow — one bad row must not block the rest. Row stays
             # pending; the next cron run will retry.
     logger.info("process_pending_deletions: %d user(s) hard-deleted", deleted)

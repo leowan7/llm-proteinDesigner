@@ -16,6 +16,7 @@ import logging
 import secrets
 
 import redis.asyncio as aioredis
+import sentry_sdk
 
 from config import settings
 from db.connection import get_db_pool
@@ -180,6 +181,7 @@ async def run_job(ctx: dict, job_id: str) -> None:
         )
     except Exception as exc:
         logger.exception("run_job: ensure_pdb_in_s3 failed for job %s", job_id)
+        sentry_sdk.capture_exception(exc)
         await update_job_status(
             job_id, "failed", stage="Failed",
             error_category=f"Target PDB upload failed: {type(exc).__name__}: {exc}",
@@ -247,6 +249,7 @@ async def run_job(ctx: dict, job_id: str) -> None:
         pod_id = await provider.submit_job(submission)
     except Exception as exc:
         logger.exception("run_job: provider.submit_job failed for job %s", job_id)
+        sentry_sdk.capture_exception(exc)
         await update_job_status(
             job_id,
             "failed",

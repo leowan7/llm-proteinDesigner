@@ -15,6 +15,8 @@ import asyncio
 import datetime
 import logging
 
+import sentry_sdk
+
 from config import settings
 from db.connection import get_db_pool
 from gpu import get_provider
@@ -96,7 +98,8 @@ async def cleanup_orphan_pods(ctx: dict | None = None) -> int:
         # detect_stale_jobs for orphan detection.
         pods = []
     except Exception as exc:
-        logger.error("Failed to list GPU provider jobs: %s", exc)
+        logger.exception("Failed to list GPU provider jobs")
+        sentry_sdk.capture_exception(exc)
         return 0
 
     if not pods:
@@ -154,7 +157,8 @@ async def cleanup_orphan_pods(ctx: dict | None = None) -> int:
                 await provider.terminate_pod(pod_id)
                 terminated += 1
             except Exception as exc:
-                logger.error("Failed to terminate pod %s: %s", pod_id, exc)
+                logger.exception("Failed to terminate pod %s", pod_id)
+                sentry_sdk.capture_exception(exc)
 
     logger.info("Orphan cleanup complete: %d pods terminated", terminated)
     return terminated
@@ -268,10 +272,11 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
                 await provider.cancel_job("", pod_id)
                 logger.info("Cancelled GPU job %s for stale job %s", pod_id, job_id)
             except Exception as exc:
-                logger.error(
-                    "Failed to cancel GPU job %s for stale job %s: %s",
-                    pod_id, job_id, exc,
+                logger.exception(
+                    "Failed to cancel GPU job %s for stale job %s",
+                    pod_id, job_id,
                 )
+                sentry_sdk.capture_exception(exc)
 
         # Publish SSE failure event
         await publish_status(job_id, "failed", "Job timed out")
@@ -340,7 +345,8 @@ async def check_daily_gpu_spend(ctx: dict | None = None) -> None:
                 })
                 logger.info("GPU spend alert email sent")
             except Exception as exc:
-                logger.error("Failed to send GPU spend alert: %s", exc)
+                logger.exception("Failed to send GPU spend alert")
+                sentry_sdk.capture_exception(exc)
 
 
 async def main():

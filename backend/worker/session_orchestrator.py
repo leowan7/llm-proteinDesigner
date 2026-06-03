@@ -31,6 +31,7 @@ import json
 import logging
 import time
 
+import sentry_sdk
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings
 
@@ -120,10 +121,11 @@ async def spawn_session(
         s3_key = ensure_pdb_in_s3(
             spec_data["target_pdb_path"], user_id=str(row["user_id"]), job_id=job_id,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "session_orchestrator.spawn_session: ensure_pdb_in_s3 failed for job %s", job_id,
         )
+        sentry_sdk.capture_exception(exc)
         return
 
     if s3_key != spec_data["target_pdb_path"]:
@@ -181,6 +183,7 @@ async def spawn_session(
             "session_orchestrator: provider.submit_job failed for job %s session %d",
             job_id, session_index,
         )
+        sentry_sdk.capture_exception(exc)
         async with pool.acquire() as conn:
             await conn.execute(
                 """UPDATE public.jobs
