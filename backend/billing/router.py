@@ -167,6 +167,28 @@ async def get_payment_method(user_id: str = Depends(get_current_user)):
     )
 
     pm = customer.invoice_settings.default_payment_method
+
+    # Self-heal: Stripe Checkout in setup mode attaches the PaymentMethod to
+    # the customer (via the SetupIntent) but does NOT automatically set it as
+    # invoice_settings.default_payment_method. The canonical fix is a
+    # setup_intent.succeeded webhook handler, but until that's wired (see
+    # PROVISIONING.md OMITTED list — STRIPE_WEBHOOK_SECRET is empty), we
+    # self-heal at read time: if no default is set but ANY card is attached,
+    # promote the most recent one. Idempotent and safe — subsequent reads
+    # skip the modify because default_payment_method is now populated.
+    if not pm:
+        pms = stripe.PaymentMethod.list(
+            customer=stripe_customer_id,
+            type="card",
+            limit=1,
+        )
+        if pms.data:
+            pm = pms.data[0]
+            stripe.Customer.modify(
+                stripe_customer_id,
+                invoice_settings={"default_payment_method": pm.id},
+            )
+
     if not pm:
         return {"has_payment_method": False}
 
