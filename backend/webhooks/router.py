@@ -25,6 +25,7 @@ import hmac
 import json
 import logging
 
+import sentry_sdk
 from fastapi import APIRouter, HTTPException, Request
 
 from billing.stripe_client import record_gpu_usage
@@ -284,7 +285,12 @@ async def runpod_webhook(request: Request):
             logger.info("Terminated GPU job %s for job %s", stored_pod_id, job_id)
         except Exception as exc:
             # Log but don't fail the webhook — orphan cleanup will catch it.
-            logger.error("Failed to terminate GPU job %s: %s", stored_pod_id, exc)
+            # The webhook still returns 200 so the GPU container exits cleanly;
+            # Sentry capture is the only way Leo sees this without tailing
+            # Railway logs (FastApiIntegration auto-capture would not fire
+            # because we explicitly swallow here).
+            logger.exception("Failed to terminate GPU job %s", stored_pod_id)
+            sentry_sdk.capture_exception(exc)
 
     # Record billing for completed or cancelled jobs (user pays for consumed GPU time).
     if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
