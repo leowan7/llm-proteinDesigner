@@ -186,7 +186,13 @@ export async function getJobList(): Promise<JobListItem[]> {
     credentials: "include",
   });
   if (!response.ok) throw new Error(`Failed to fetch job list: ${response.status}`);
-  return response.json() as Promise<JobListItem[]>;
+  // Backend returns { jobs: [...], has_more: bool } -- not a bare array.
+  // The previous `as Promise<JobListItem[]>` cast lied to the type system;
+  // the runtime value crashed downstream `.filter()` calls (e.g.
+  // JobPage.tsx:152). Discovered live 2026-06-03 when a failure email link
+  // landed on /jobs/<id> and the page rendered blank with a TypeError.
+  const data = (await response.json()) as { jobs: JobListItem[]; has_more?: boolean };
+  return Array.isArray(data) ? data : (data.jobs ?? []);
 }
 
 /**
