@@ -136,6 +136,77 @@ def check_hotspot_accessibility(
     return results
 
 
+def scan_chain_gaps(pdb_path: str, chain_id: str) -> list[tuple[int, int]]:
+    """Find numbering gaps in a chain's standard-AA residues.
+
+    Detects disorder regions (residues missing from the deposited model)
+    that would break RFdiffusion's strict contig builder, which asserts
+    every residue in the contig range exists. Used by validate_preflight
+    to surface a fail/warn BEFORE the user launches a job that would
+    crash inside the container.
+
+    Args:
+        pdb_path: Path to a PDB-format file.
+        chain_id: Chain to scan.
+
+    Returns:
+        List of (gap_start, gap_end) tuples (inclusive endpoints of the
+        MISSING residue range). Empty list if the chain has no gaps.
+        Example: chain numbered 19, 20, ..., 51, 61, 62, ... returns
+        ``[(52, 60)]``. Chains with monotonic +1 numbering return ``[]``.
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("target", pdb_path)
+    if chain_id not in [c.id for c in structure[0]]:
+        return []
+    chain = structure[0][chain_id]
+    resnums = sorted(
+        residue.get_id()[1]
+        for residue in chain
+        if is_aa(residue, standard=True)
+    )
+    gaps: list[tuple[int, int]] = []
+    for prev, curr in zip(resnums, resnums[1:]):
+        if curr > prev + 1:
+            gaps.append((prev + 1, curr - 1))
+    return gaps
+
+
+def check_hotspots_present(
+    pdb_path: str,
+    chain_id: str,
+    hotspot_residues: list[int],
+) -> list[int]:
+    """Return the subset of hotspots that are NOT present in the chain.
+
+    A hotspot residue can be "absent" because (a) the chain has a disorder
+    region covering that number, or (b) the residue is non-standard and
+    excluded from the standard-AA filter. Either way, downstream tools
+    that reference the hotspot by number (RFdiffusion's ppi.hotspot_res,
+    RFantibody's epitope strings) will fail at runtime.
+
+    Args:
+        pdb_path: Path to a PDB-format file.
+        chain_id: Chain to look in.
+        hotspot_residues: Residue numbers the user wants to target.
+
+    Returns:
+        The hotspot residue numbers that are NOT present in the chain's
+        standard-AA residues. Empty list if every hotspot is present.
+    """
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("target", pdb_path)
+    if chain_id not in [c.id for c in structure[0]]:
+        return list(hotspot_residues)
+    chain = structure[0][chain_id]
+    present = {
+        residue.get_id()[1]
+        for residue in chain
+        if is_aa(residue, standard=True)
+    }
+    return [r for r in hotspot_residues if r not in present]
+
+
 def run_preflight_checks(
     summary: StructureSummary, pdb_path: str
 ) -> list[ValidationResult]:

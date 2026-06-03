@@ -656,8 +656,86 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
                 "message": f"Hotspot SASA check skipped: {exc}",
             })
 
-    # Parameter sanity checks against wizard min/max definitions
+    # ---------- Structural pre-flight (chain continuity + hotspot presence)
+    # Catches the class of bug that crashed Phase 11 SC 6 close-out on
+    # 2026-06-03 inside the RFdiffusion container: 1ALU has a disorder gap
+    # at residues 52-60, and RFdiffusion's contig builder asserts every
+    # residue in the contig range exists in the PDB. Surfacing the gap here
+    # turns a $1.65/hr GPU crash into a synchronous validation fail.
     tool = tool_input["tool"]
+    try:
+        from pdb_utils.validate import scan_chain_gaps, check_hotspots_present
+        import asyncio as _asyncio
+
+        loop = _asyncio.get_event_loop()
+        gaps = await loop.run_in_executor(None, scan_chain_gaps, pdb_path, chain_id)
+        missing_hotspots = await loop.run_in_executor(
+            None, check_hotspots_present, pdb_path, chain_id, hotspot_residues
+        )
+
+        # RFdiffusion's contig builder asserts every residue exists; ANY gap
+        # in the chain is fatal. Other tools are more permissive — gap is
+        # just a warn unless it overlaps a hotspot.
+        gap_is_fatal_for_tool = tool == "rfdiffusion"
+        hotspot_in_gap = any(
+            any(start <= r <= end for start, end in gaps)
+            for r in hotspot_residues
+        )
+        if gaps:
+            gap_strs = ", ".join(f"{s}-{e}" if s != e else f"{s}" for s, e in gaps)
+            severity = "fail" if (gap_is_fatal_for_tool or hotspot_in_gap) else "warn"
+            results.append({
+                "check_name": "chain_continuity",
+                "status": severity,
+                "message": (
+                    f"Chain {chain_id} has {len(gaps)} numbering gap(s) at "
+                    f"residue(s) {gap_strs}. "
+                    + (
+                        "RFdiffusion's contig builder requires contiguous "
+                        "residues and will assert at runtime. "
+                        if gap_is_fatal_for_tool
+                        else ""
+                    )
+                    + (
+                        "Hotspot residue(s) fall inside a gap. "
+                        if hotspot_in_gap
+                        else ""
+                    )
+                    + "Pick a different PDB or a chain without disorder regions."
+                ),
+            })
+        else:
+            results.append({
+                "check_name": "chain_continuity",
+                "status": "pass",
+                "message": f"Chain {chain_id} has contiguous residue numbering.",
+            })
+
+        if missing_hotspots:
+            results.append({
+                "check_name": "hotspot_present",
+                "status": "fail",
+                "message": (
+                    f"Hotspot residue(s) {missing_hotspots} are not present in "
+                    f"chain {chain_id} (disordered, non-standard, or out of range). "
+                    f"Pick hotspots from residues that exist in the model."
+                ),
+            })
+    except ImportError:
+        # pdb_utils.validate not available (Plan 02-02 not yet run)
+        pass
+    except Exception as exc:
+        logger.exception("Structural pre-flight failed for pdb=%s chain=%s",
+                         pdb_path, chain_id)
+        sentry_sdk.capture_exception(exc)
+        # Don't block launch on the CHECK itself failing — just surface it.
+        results.append({
+            "check_name": "structural_preflight",
+            "status": "warn",
+            "message": f"Structural pre-flight check skipped: {exc}",
+        })
+
+    # Parameter sanity checks against wizard min/max definitions
     params = tool_input.get("parameters") or {}
     wizard_defs = {p.name: p for p in WIZARD_PARAMS.get(tool, [])}
     for name, value in params.items():
