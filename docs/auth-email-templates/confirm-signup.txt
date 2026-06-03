@@ -1,0 +1,12 @@
+BINDWAVE
+
+Confirm your email
+
+Welcome to Bindwave. Open the link below to verify your email address and
+finish setting up your account.
+
+{{ .ConfirmationURL }}
+
+If you did not sign up for Bindwave, you can ignore this email.
+
+Bindwave - https://bindwave.com

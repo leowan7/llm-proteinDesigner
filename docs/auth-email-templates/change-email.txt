@@ -1,0 +1,16 @@
+BINDWAVE
+
+Confirm your new email
+
+You requested to change the email on your Bindwave account.
+
+From: {{ .Email }}
+To:   {{ .NewEmail }}
+
+Confirm this change by opening the link below.
+
+{{ .ConfirmationURL }}
+
+If you did not request this change, contact us at jobs@bindwave.com.
+
+Bindwave - https://bindwave.com

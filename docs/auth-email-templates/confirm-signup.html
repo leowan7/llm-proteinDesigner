@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="dark">
+<meta name="supported-color-schemes" content="dark light">
+<title>Confirm your Bindwave email</title>
+</head>
+<body style="margin:0;padding:0;background-color:#1a1a1d;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;color:#e8e8e8;-webkit-font-smoothing:antialiased;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#1a1a1d" style="background-color:#1a1a1d;">
+  <tr>
+    <td align="center" style="padding:48px 24px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="560" style="max-width:560px;width:100%;">
+        <tr>
+          <td style="padding-bottom:40px;">
+            <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;letter-spacing:0.22em;color:#9e9e9e;text-transform:uppercase;">Bindwave</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:20px;">
+            <h1 style="margin:0;font-family:Georgia,'Times New Roman',serif;font-size:30px;line-height:1.25;color:#f4f4f4;font-weight:400;">Confirm your email</h1>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:32px;">
+            <p style="margin:0;font-size:16px;line-height:1.6;color:#c2c2c2;">Welcome to Bindwave. Click the button below to verify your email address and finish setting up your account.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:32px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td bgcolor="#7873ff" style="background-color:#7873ff;border-radius:6px;">
+                  <a href="{{ .ConfirmationURL }}" style="display:inline-block;padding:14px 26px;font-size:15px;font-weight:500;color:#ffffff;text-decoration:none;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;">Confirm email</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding-bottom:32px;">
+            <p style="margin:0;font-size:13px;line-height:1.6;color:#7a7a7a;">If the button does not work, copy and paste this URL into your browser:</p>
+            <p style="margin:8px 0 0;font-size:13px;line-height:1.5;color:#a2a0ff;word-break:break-all;"><a href="{{ .ConfirmationURL }}" style="color:#a2a0ff;text-decoration:none;">{{ .ConfirmationURL }}</a></p>
+          </td>
+        </tr>
+        <tr>
+          <td style="border-top:1px solid #33333a;padding-top:24px;">
+            <p style="margin:0;font-size:12px;line-height:1.6;color:#7a7a7a;">If you did not sign up for Bindwave, you can ignore this email.</p>
+            <p style="margin:8px 0 0;font-size:12px;line-height:1.6;color:#7a7a7a;">Bindwave &middot; <a href="https://bindwave.com" style="color:#9e9e9e;text-decoration:none;">bindwave.com</a></p>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

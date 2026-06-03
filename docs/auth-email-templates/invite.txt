@@ -1,0 +1,12 @@
+BINDWAVE
+
+You're invited to Bindwave
+
+Someone invited you to join Bindwave. Open the link below to accept the
+invitation and set up your account.
+
+{{ .ConfirmationURL }}
+
+If you did not expect this invitation, you can safely ignore it.
+
+Bindwave - https://bindwave.com

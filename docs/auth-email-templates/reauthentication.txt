@@ -1,0 +1,13 @@
+BINDWAVE
+
+Confirm it's you
+
+Use this code in Bindwave to confirm your request. The code expires
+shortly.
+
+{{ .Token }}
+
+If you did not request this code, ignore this email and change your
+password at https://bindwave.com.
+
+Bindwave - https://bindwave.com
