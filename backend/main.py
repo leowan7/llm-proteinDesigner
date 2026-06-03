@@ -97,6 +97,7 @@ if not settings.testing:
         CSRFMiddleware,
         secret=settings.csrf_secret,
         sensitive_cookies={"access_token", "refresh_token"},
+        cookie_name="csrftoken_v2",
         cookie_samesite="lax",
         cookie_secure=settings.cookie_secure,
         cookie_domain=settings.csrf_cookie_domain or None,

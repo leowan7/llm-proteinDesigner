@@ -9,11 +9,15 @@
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 /**
- * Reads the csrftoken cookie value from document.cookie.
+ * Reads the csrftoken_v2 cookie value from document.cookie.
  * Returns null if no CSRF token cookie is present.
+ *
+ * Name bumped from "csrftoken" to "csrftoken_v2" to force browsers carrying
+ * pre-domain-scoping cookies to drop the orphaned value and pick up the new
+ * one issued with Domain=.bindwave.com (visible cross-subdomain).
  */
 function getCsrfToken(): string | null {
-  const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]*)/);
+  const match = document.cookie.match(/(?:^|;\s*)csrftoken_v2=([^;]*)/);
   return match ? decodeURIComponent(match[1]) : null;
 }
 
