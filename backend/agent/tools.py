@@ -697,11 +697,27 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
         try:
             import uuid
             from db.connection import get_db_pool
+            from storage.client import ensure_pdb_in_s3
 
             job_id = str(uuid.uuid4())
+
+            # Hoist PDB into S3 here, in the BACKEND container where the local
+            # /tmp file from resolve_structure actually exists. The agent's
+            # resolve_structure writes to /tmp/structures/<id>.pdb inside the
+            # backend container, but the arq worker that processes /jobs/launch
+            # runs in a separate Railway service with a separate /tmp. Without
+            # this hoist, worker/tasks.py:ensure_pdb_in_s3 would always raise
+            # FileNotFoundError and the job would fail before reaching Modal,
+            # which is exactly what blocked SC 6 close-out on 2026-06-03.
+            #
+            # ensure_pdb_in_s3 is idempotent: if pdb_path already looks like an
+            # S3 key (e.g. resolve_structure was updated in a future change to
+            # upload directly), it returns the key unchanged.
+            s3_pdb_path = ensure_pdb_in_s3(pdb_path, user_id=user_id, job_id=job_id)
+
             job_spec = {
                 "tool": tool,
-                "target_pdb_path": pdb_path,
+                "target_pdb_path": s3_pdb_path,
                 "target_chain": chain_id,
                 "hotspot_residues": hotspot_residues,
                 "parameters": params,
