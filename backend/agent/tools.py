@@ -76,7 +76,14 @@ TOOL_DEFINITIONS = [
         "description": (
             "Collect tool-specific parameters for the design job. "
             "Returns the parameter schema with Kendrew-curated defaults for the selected tool. "
-            "Use after the user has confirmed the recommended tool."
+            "Use after the user has confirmed the recommended tool. "
+            "ALWAYS pass user_overrides for any parameter the user has named explicitly "
+            "(e.g. user says '100 designs' -> {\"num_designs\": 100}; user says 'noise 0.5' -> "
+            "{\"noise_scale\": 0.5}). Defaults are only correct when the user has not specified "
+            "a value. "
+            "Call this tool AGAIN with updated user_overrides if the user later asks to change "
+            "any parameter on the rendered ReviewCard -- the new call replaces the previous "
+            "ReviewCard with the updated values."
         ),
         "input_schema": {
             "type": "object",
@@ -96,7 +103,17 @@ TOOL_DEFINITIONS = [
                 },
                 "user_overrides": {
                     "type": "object",
-                    "description": "User-specified parameter overrides (name: value pairs).",
+                    "description": (
+                        "User-specified parameter overrides as name:value pairs. "
+                        "Valid parameter names per tool: "
+                        "rfdiffusion = {num_designs, binder_length, noise_scale}; "
+                        "bindcraft = {num_designs, design_cycles, mpnn_sampling_temp, filter_score_threshold}; "
+                        "rfantibody = {num_designs, antibody_type, cdr_loops}; "
+                        "boltzgen = {num_designs, budget, protocol}; "
+                        "pxdesign = {num_designs, mode, generator}. "
+                        "Unknown keys are silently ignored, so when in doubt include the value -- "
+                        "skipping a user-named value is worse than including an extra one."
+                    ),
                 },
             },
             "required": ["tool", "target_chain"],
