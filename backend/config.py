@@ -125,9 +125,13 @@ class Settings(BaseSettings):
     # Sentry frontend (separate DSN for browser project)
     sentry_dsn_frontend: str = ""
 
-    # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec)
+    # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec).
+    # Customer rate = gpu_price_per_second * (1 + gpu_markup_percent/100).
+    # At 400% markup: $0.0000917 * 5.00 = $0.0004585/sec = $1.65/hr customer-facing.
+    # MUST match the Stripe Price unit_amount on the gpu_seconds meter, otherwise
+    # /billing/estimate + ReviewCard show numbers Stripe doesn't actually charge.
     gpu_price_per_second: float = 0.0000917
-    gpu_markup_percent: float = 30.0
+    gpu_markup_percent: float = 400.0
 
     def model_post_init(self, __context) -> None:
         """Resolve deprecated runpod_webhook_secret to webhook_hmac_secret if the new one is empty.
