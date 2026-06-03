@@ -99,6 +99,7 @@ if not settings.testing:
         sensitive_cookies={"access_token", "refresh_token"},
         cookie_samesite="lax",
         cookie_secure=settings.cookie_secure,
+        cookie_domain=settings.csrf_cookie_domain or None,
     )
 
 # Rate limiting — after CORS, before routers

@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     # CSRF
     csrf_secret: str = "local-dev-csrf-secret-change-in-prod"
     cookie_secure: bool = False
+    # Cross-subdomain cookie sharing. Empty (default) scopes the csrftoken cookie
+    # to the exact backend host. In prod the frontend lives on a sister subdomain
+    # (bindwave.com -> app.bindwave.com), so JS at bindwave.com cannot read a
+    # cookie scoped to app.bindwave.com and the double-submit header is never
+    # sent. Set to ".bindwave.com" in prod.
+    csrf_cookie_domain: str = ""
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173"]
