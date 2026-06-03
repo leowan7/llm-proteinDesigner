@@ -116,8 +116,19 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     resend_from_email: str = "Bindwave <jobs@bindwave.com>"
 
-    # App base URL (used in email links and Stripe return URLs)
+    # App base URL — BACKEND host (Railway). Used for internal
+    # backend-to-container API endpoints (upload-urls, webhooks) and Stripe
+    # return URLs (Stripe redirects back via the API host). NOT for
+    # user-facing email links — those use frontend_base_url.
     app_base_url: str = "http://localhost:8000"
+
+    # Frontend base URL — Vercel host. Used for all user-facing links in
+    # emails (job-detail pages, settings page, etc.). Discovered 2026-06-03
+    # during Phase 11 SC 6 close-out: failure emails were linking users to
+    # `https://app.bindwave.com/jobs/{id}` (the JSON API) instead of
+    # `https://bindwave.com/jobs/{id}` (the SPA UI), which 401'd as soon
+    # as the user's session expired.
+    frontend_base_url: str = "http://localhost:5173"
 
     # Upload URL expiry for on-demand container uploads (seconds)
     upload_url_expiry_seconds: int = 3600

@@ -79,7 +79,7 @@ async def send_completion_email(
         num_designs: Number of designs generated, shown in subject.
         runtime_min: Approximate runtime in minutes, shown in body.
     """
-    job_url = f"{settings.app_base_url}/jobs/{job_id}"
+    job_url = f"{settings.frontend_base_url}/jobs/{job_id}"
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
@@ -105,7 +105,7 @@ async def send_failure_email(
         job_id: Job UUID string (used to build the details URL).
         error_category: Human-readable error category string from the provider.
     """
-    job_url = f"{settings.app_base_url}/jobs/{job_id}"
+    job_url = f"{settings.frontend_base_url}/jobs/{job_id}"
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
@@ -143,7 +143,7 @@ async def send_daily_progress_email(
         top_ipsae: Best ipSAE/ipTM score observed so far (None if nothing has
             passed default filters yet).
     """
-    job_url = f"{settings.app_base_url}/jobs/{job_id}/progress"
+    job_url = f"{settings.frontend_base_url}/jobs/{job_id}/progress"
     top_line = (
         f"Best score so far: ipSAE {top_ipsae:.3f}."
         if top_ipsae is not None
@@ -185,7 +185,7 @@ async def send_first_filter_pass_email(
         ipsae: ipSAE / ipTM score.
         plddt: pLDDT score.
     """
-    job_url = f"{settings.app_base_url}/jobs/{job_id}/progress"
+    job_url = f"{settings.frontend_base_url}/jobs/{job_id}/progress"
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
@@ -275,8 +275,8 @@ async def send_retention_warning_email(
         retention_days: The user's current retention window (default 90).
     """
     label = job_name or f"Job {job_id[:8]}"
-    settings_url = f"{settings.app_base_url}/settings?tab=privacy"
-    job_url = f"{settings.app_base_url}/jobs/{job_id}"
+    settings_url = f"{settings.frontend_base_url}/settings?tab=privacy"
+    job_url = f"{settings.frontend_base_url}/jobs/{job_id}"
     # Uniform f-string block — mixed quote styles previously caused a SyntaxError
     # on import (W11); every anchor uses double-quoted HTML attributes, and the
     # f-string itself is a single concatenated expression.

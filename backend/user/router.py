@@ -469,7 +469,7 @@ async def request_account_deletion(
     scheduled_for = updated["deletion_requested_at"] + datetime.timedelta(
         days=GRACE_PERIOD_DAYS,
     )
-    cancel_url = f"{settings.app_base_url}/settings?tab=privacy"
+    cancel_url = f"{settings.frontend_base_url}/settings?tab=privacy"
     background_tasks.add_task(
         send_deletion_scheduled_email,
         updated["email"],
