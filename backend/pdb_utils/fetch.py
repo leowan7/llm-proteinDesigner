@@ -109,7 +109,7 @@ async def fetch_pdb_metadata(pdb_id: str, client: httpx.AsyncClient) -> dict:
 
 
 async def fetch_pdb_file(pdb_id: str, client: httpx.AsyncClient) -> bytes:
-    """Download an mmCIF structure file from RCSB by PDB accession.
+    """Download a PDB-format structure file from RCSB by PDB accession.
 
     Args:
         pdb_id: 4-character PDB accession string (e.g. '4ZS7'). Case-insensitive;
@@ -117,13 +117,22 @@ async def fetch_pdb_file(pdb_id: str, client: httpx.AsyncClient) -> bytes:
         client: An open httpx.AsyncClient instance.
 
     Returns:
-        Raw bytes of the mmCIF file from RCSB.
+        Raw bytes of the PDB-format file from RCSB.
 
     Raises:
         httpx.HTTPStatusError: If RCSB returns a non-2xx response, including
-                               404 for unknown accessions.
+                               404 for unknown accessions. (Very large
+                               structures with >62 chains or >100k residues
+                               are only served as .cif and will 404 here;
+                               this is a known follow-up.)
+
+    History: Previously fetched .cif (mmCIF) format but saved with a .pdb
+    extension at the resolve_structure call site. The downstream container's
+    PDBParser then crashed on mmCIF tokens like 'U' from `_entry.id`, which
+    blocked Phase 11 SC 6 close-out on 2026-06-03. Switched to .pdb so the
+    file is genuinely PDB format and downstream parsing works.
     """
-    url = f"{settings.rcsb_base_url}/download/{pdb_id.upper()}.cif"
+    url = f"{settings.rcsb_base_url}/download/{pdb_id.upper()}.pdb"
     response = await client.get(url, timeout=30.0)
     response.raise_for_status()
     return response.content

@@ -719,12 +719,23 @@ def _record_webhook_outcome(delivered: bool, detail: str) -> None:
 def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> None:
     """POST results to the Kendrew backend webhook.
 
+    Signs the body with HMAC-SHA256 against WEBHOOK_HMAC_SECRET (injected
+    by the Modal app via a Modal Secret). The backend
+    (webhooks/router.py:validate_webhook_signature) validates against the
+    SAME secret (Phase 11 D-10 dual-secret rotation supports a _PREV value
+    during rotation windows). Without the signature, the backend returns 401
+    and the completion notification never lands. Discovered live during the
+    2026-06-03 SC 6 close-out attempt.
+
     Args:
         webhook_url: Backend webhook endpoint URL.
         job_id: Kendrew job UUID.
         pod_id: RunPod pod ID (for backend to terminate).
         payload: Results dict (candidates, counts, etc.).
     """
+    import hashlib
+    import hmac
+
     if not webhook_url:
         logger.error(
             "post_webhook: empty webhook_url for job %s; cannot deliver result",
@@ -743,9 +754,29 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
     if "error" in payload:
         body["error"] = {"category": "Pipeline error", "message": payload["error"]}
 
+    # Serialize body to bytes BEFORE signing, then post the same bytes so
+    # the HMAC matches what the backend re-hashes. Using `json=body` would
+    # let requests apply its own serialization (different whitespace,
+    # different sort order) and the signature would mismatch.
+    body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
+
+    secret = os.environ.get("WEBHOOK_HMAC_SECRET", "")
+    headers = {"Content-Type": "application/json"}
+    if secret:
+        signature = hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+        headers["X-Modal-Signature"] = signature
+    else:
+        # No secret in env means Modal Secret isn't attached -- backend will
+        # 401 in prod (where webhook_hmac_secret is set). Log loudly so the
+        # next deploy notices.
+        logger.warning(
+            "post_webhook: WEBHOOK_HMAC_SECRET not in env; backend will 401. "
+            "Modal Secret 'ranomics-webhook' must be attached to the app."
+        )
+
     logger.info("Posting webhook to %s", webhook_url)
     try:
-        resp = requests.post(webhook_url, json=body, timeout=30)
+        resp = requests.post(webhook_url, data=body_bytes, headers=headers, timeout=30)
         logger.info("Webhook response: %d", resp.status_code)
         resp.raise_for_status()
         _record_webhook_outcome(True, f"http {resp.status_code}")

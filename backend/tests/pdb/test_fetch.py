@@ -70,9 +70,9 @@ class TestRCSBFetch:
     @pytest.mark.anyio
     @respx.mock
     async def test_fetch_by_pdb_id(self):
-        """Fetching a valid PDB ID (e.g. '4ZS7') returns non-empty CIF bytes."""
-        respx.get("https://files.rcsb.org/download/4ZS7.cif").mock(
-            return_value=httpx.Response(200, content=b"data_4ZS7\n_entry.id 4ZS7\n")
+        """Fetching a valid PDB ID (e.g. '4ZS7') returns non-empty PDB bytes."""
+        respx.get("https://files.rcsb.org/download/4ZS7.pdb").mock(
+            return_value=httpx.Response(200, content=b"HEADER    TEST\nATOM      1  N   ALA A   1\n")
         )
         async with httpx.AsyncClient() as client:
             content = await fetch_pdb_file("4ZS7", client)
@@ -83,7 +83,7 @@ class TestRCSBFetch:
     @respx.mock
     async def test_fetch_invalid_pdb_id_raises(self):
         """Fetching a nonexistent PDB ID raises httpx.HTTPStatusError (404)."""
-        respx.get("https://files.rcsb.org/download/XXXX.cif").mock(
+        respx.get("https://files.rcsb.org/download/XXXX.pdb").mock(
             return_value=httpx.Response(404)
         )
         with pytest.raises(httpx.HTTPStatusError) as exc_info:

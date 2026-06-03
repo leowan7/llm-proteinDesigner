@@ -92,6 +92,14 @@ xla_cache_volume = modal.Volume.from_name(
     gpu=_GPU,
     timeout=_MAX_SESSION_S,
     volumes={"/root/.cache/jax": xla_cache_volume},
+    # Inject WEBHOOK_HMAC_SECRET so run_pipeline.py:post_webhook can sign
+    # completion notifications. Without this, the backend's
+    # validate_webhook_signature returns 401 and the completion never lands
+    # (discovered live during 2026-06-03 Phase 11 SC 6 close-out). The
+    # Modal Secret 'ranomics-webhook' must hold the same value as Railway's
+    # WEBHOOK_HMAC_SECRET env var (PROVISIONING.md "Locally-generated
+    # secrets" section).
+    secrets=[modal.Secret.from_name("ranomics-webhook")],
 )
 def run_tool(payload: dict) -> dict:
     """Run one RFdiffusion session.
