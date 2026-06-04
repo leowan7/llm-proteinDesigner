@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In Progress
-stopped_at: Phase 12 Plan 05 complete
-last_updated: "2026-06-04T11:45:00.000Z"
+stopped_at: Phase 12 complete (deployment gated by docs/runbook-phase-12-rollout.md)
+last_updated: "2026-06-04T12:05:00.000Z"
 progress:
   total_phases: 13
-  completed_phases: 9
+  completed_phases: 10
   total_plans: 61
-  completed_plans: 60
-  percent: 98
+  completed_plans: 61
+  percent: 100
 ---
 
 # Project State
@@ -24,8 +24,10 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 
 ## Current Position
 
-Phase: 12
-Plan: 12-06 (Wave 3 — Playwright E2E spec exercising create-org → invite → accept → run-job → owner views billing; drop deprecated users.stripe_customer_id column; REQUIREMENTS.md ORG-01..ORG-08 traceability update; Phase 12 rollout runbook). 12-01 + 12-02 + 12-03 + 12-04 + 12-05 complete; final plan 12-06 in `.planning/phases/12-teams-and-organizations/`.
+Phase: 12 — COMPLETE (implementation; deployment gated by `docs/runbook-phase-12-rollout.md`)
+Plan: 12-06 (final plan of Phase 12) closed 2026-06-04. All 6 Phase 12 plans complete; ORG-01..ORG-08 marked Validated in REQUIREMENTS.md; Phase 12 entry in ROADMAP.md updated to 6/6 complete.
+
+Next position: Phase 13 (Public API) — first plan TBD.
 
 ## Performance Metrics
 
@@ -67,6 +69,7 @@ Plan: 12-06 (Wave 3 — Playwright E2E spec exercising create-org → invite →
 | Phase 12-teams-and-organizations P03 | 19min | 2 tasks | 20 files |
 | Phase 12-teams-and-organizations P04 | 6min | 2 tasks | 4 files |
 | Phase 12-teams-and-organizations P05 | 24min | 2 tasks | 21 files |
+| Phase 12-teams-and-organizations P06 | 11min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -141,6 +144,9 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: X-Org-Id header opt-out is an explicit list (4 prefix matches + POST /organizations exact match) in api.ts, not an allowlist — minimises blast radius when new routes ship without touching api.ts
 - [Phase 12-teams-and-organizations]: OrganizationSwitcher is hidden whenever orgs.length <= 1 (covers both solo users + single-tenant deployments where the feature flag is off and /organizations/mine returns 404 → orgs=[])
 - [Phase 12-teams-and-organizations]: setActiveOrg writes localStorage BEFORE reload so post-reload OrgProvider.refresh() picks up the new value via resolveActiveOrgId(); AcceptInvitation page additionally pre-seeds localStorage and navigate("/jobs") as a fallback for the public route case where setActiveOrg's no-op fallback would otherwise leave the user staring at "Joined!"
+- [Phase 12-teams-and-organizations]: Playwright E2E for full teams flow (12-06) lives at frontend/e2e/organizations.spec.ts (NOT tests/e2e/) to match playwright.config.ts testDir; two BrowserContext instances simulate the two-user flow; per-test test.skip cascade gates execution on feature-flag presence + seed accounts so the spec is informational on flag-off CI and load-bearing on flag-on staging/prod
+- [Phase 12-teams-and-organizations]: Invitation copy-link contract resolved (12-06) — POST /organizations/{id}/invitations now returns the bearer token; GET list endpoint conditionally returns token only when caller_role == owner; frontend InvitationRow.token: string | null; InvitationsTab.handleCopyLink uses invite.token (was invite.id, which silently produced broken accept URLs)
+- [Phase 12-teams-and-organizations]: Drop-column migration (20260606000001) ships in the repo but is NOT applied by the merge — runbook step 9 gates the actual run on verify-script exit 0 + 24h clean prod monitoring; rollback past that point requires a forward migration + backfill from organizations.stripe_customer_id
 
 ### Pending Todos
 
@@ -154,6 +160,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T11:45:00.000Z
-Stopped at: Completed 12-05-PLAN.md (Wave 2 frontend org context + switcher + invitation accept page + members/invitations/settings tabs + owner-gated billing + launched-by column + 4 Vitest specs)
-Resume file: .planning/phases/12-teams-and-organizations/12-06-PLAN.md
+Last session: 2026-06-04T12:05:00.000Z
+Stopped at: Completed 12-06-PLAN.md (final plan of Phase 12 — Playwright E2E spec + drop-column migration + Phase 12 rollout runbook + REQUIREMENTS.md ORG-01..ORG-08 validation + ROADMAP.md Phase 12 6/6 complete + invitation-token contract bug-fix)
+Resume file: Phase 13 first plan (Public API) — to be planned next session
+Deployment status: Phase 12 implementation complete in repo; production cutover gated by docs/runbook-phase-12-rollout.md (9 ordered steps + 24h watch + decisive rollback gate)
