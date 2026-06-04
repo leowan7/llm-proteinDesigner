@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In Progress
-stopped_at: Phase 12 Plan 01 complete
-last_updated: "2026-06-04T10:21:01.000Z"
+stopped_at: Phase 12 Plan 02 complete
+last_updated: "2026-06-04T10:39:48.000Z"
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 61
-  completed_plans: 56
-  percent: 92
+  completed_plans: 57
+  percent: 93
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 12
-Plan: 12-02 (Wave 1 — backend orgs module). 12-01 complete; remaining plans 12-02 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
+Plan: 12-03 (Wave 2 — backend cutover: jobs/billing/webhooks org-scoped). 12-01 + 12-02 complete; remaining plans 12-03 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
 
 ## Performance Metrics
 
@@ -63,6 +63,7 @@ Plan: 12-02 (Wave 1 — backend orgs module). 12-01 complete; remaining plans 12
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
 | Phase 06-ui-improvements P04 | 387 | 2 tasks | 9 files |
 | Phase 12-teams-and-organizations P01 | 5min | 2 tasks | 6 files |
+| Phase 12-teams-and-organizations P02 | 13min | 2 tasks | 16 files |
 
 ## Accumulated Context
 
@@ -117,6 +118,12 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: Stripe customer_id MOVED (not copied) from public.users to auto-created personal org so existing metered subscriptions stay attached to same Stripe customer
 - [Phase 12-teams-and-organizations]: users.stripe_customer_id is DEPRECATED via COMMENT but NOT dropped in plan 12-01; drop deferred to plan 12-06 (20260606000001) so backend rollback is safe within 24h verification window
 - [Phase 12-teams-and-organizations]: test_rls_jobs_org.py uses set_config('request.jwt.claims', value, true) instead of literal SET LOCAL — asyncpg cannot bind parameters into SET LOCAL with dotted GUC names; behavior equivalent
+- [Phase 12-teams-and-organizations]: get_active_org enforces X-Org-Id header presence (400 if missing); routes that legitimately have no active-org context (GET /organizations/mine, POST /organizations, POST /invitations/accept) use only get_current_user not get_active_org
+- [Phase 12-teams-and-organizations]: require_role(*allowed) is a factory returning an inner FastAPI dep that consumes get_active_org and returns just org_id on success; handlers want the id not the (org_id, role) tuple
+- [Phase 12-teams-and-organizations]: POST /organizations uses set_config('request.jwt.claims', $1, true) on the connection before fetchval'ing the SECURITY DEFINER RPC so auth.uid() resolves correctly from the service_role pool
+- [Phase 12-teams-and-organizations]: settings.organizations_enabled default-False; main.py conditional include_router so single-tenant routes stay unchanged until Plan 12-04 flips the flag
+- [Phase 12-teams-and-organizations]: Pydantic v2 form Annotated[str, StringConstraints(...)] over Field(strip_whitespace=True) — the Field-arg form is deprecated in Pydantic v2 and warns on every test
+- [Phase 12-teams-and-organizations]: Tests build isolated FastAPI sub-apps per test (FastAPI() + include_router + dependency_overrides) rather than mounting on main.app — avoids depending on global flag state at import time
 
 ### Pending Todos
 
@@ -130,6 +137,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T10:21:01.000Z
-Stopped at: Completed 12-01-PLAN.md (Wave 0 foundation migration + tests)
-Resume file: .planning/phases/12-teams-and-organizations/12-02-PLAN.md
+Last session: 2026-06-04T10:39:48.000Z
+Stopped at: Completed 12-02-PLAN.md (Wave 1 backend orgs module behind feature flag)
+Resume file: .planning/phases/12-teams-and-organizations/12-03-PLAN.md

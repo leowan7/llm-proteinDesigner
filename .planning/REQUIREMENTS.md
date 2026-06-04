@@ -49,14 +49,14 @@
 
 ### Organizations (Phase 12)
 
-- [ ] **ORG-01**: User can create an organization and invite team members by email (DB foundation laid in 12-01; router + invites in 12-02)
-- [ ] **ORG-02**: Organization roles owner / scientist / viewer with documented permission matrix (DB ENUM + RLS helpers laid in 12-01; backend enforcement in 12-02)
+- [ ] **ORG-01**: User can create an organization and invite team members by email (DB foundation 12-01; router + invites + notifications 12-02; frontend invite UI in 12-05)
+- [ ] **ORG-02**: Organization roles owner / scientist / viewer with documented permission matrix (DB ENUM + RLS helpers 12-01; get_active_org + require_role backend enforcement 12-02; jobs/billing route gating in 12-03)
 - [ ] **ORG-03**: All jobs within an organization are visible to all org members (RLS policies laid in 12-01; jobs router cutover in 12-03)
 - [ ] **ORG-04**: Organization-level billing — one Stripe customer per org (column moved in 12-01; stripe_client cutover in 12-03; metadata stamping in 12-04)
-- [ ] **ORG-05**: Owner can remove members and transfer ownership (last-owner trigger laid in 12-01; routers in 12-02)
-- [ ] **ORG-06**: User can belong to multiple organizations and switch between them (frontend X-Org-Id wiring in 12-05)
+- [ ] **ORG-05**: Owner can remove members and transfer ownership (last-owner trigger laid in 12-01; transfer + remove endpoints 12-02; frontend members UI 12-05)
+- [ ] **ORG-06**: User can belong to multiple organizations and switch between them (GET /organizations/mine + X-Org-Id resolver 12-02; frontend X-Org-Id wiring in 12-05)
 - [ ] **ORG-07**: Existing single-tenant users migrated without data loss (personal-org backfill in 12-01)
-- [ ] **ORG-08**: Last owner cannot leave an organization (DB-enforced trigger in 12-01)
+- [ ] **ORG-08**: Last owner cannot leave an organization (DB-enforced trigger 12-01; route translation 12-02)
 
 ## v2 Requirements
 
@@ -136,14 +136,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BILL-02 | Phase 3 | Complete |
 | BILL-03 | Phase 3 | Complete |
 | BILL-04 | Phase 3 | Complete |
-| ORG-01 | Phase 12 | In Progress (DB foundation done 12-01) |
-| ORG-02 | Phase 12 | In Progress (DB foundation done 12-01) |
-| ORG-03 | Phase 12 | In Progress (RLS foundation done 12-01) |
+| ORG-01 | Phase 12 | In Progress (DB foundation 12-01; backend routes + invitations 12-02 behind flag) |
+| ORG-02 | Phase 12 | In Progress (DB foundation 12-01; require_role enforcement 12-02 behind flag) |
+| ORG-03 | Phase 12 | In Progress (RLS foundation done 12-01; cutover 12-03) |
 | ORG-04 | Phase 12 | In Progress (Stripe column moved 12-01) |
-| ORG-05 | Phase 12 | In Progress (last-owner trigger done 12-01) |
-| ORG-06 | Phase 12 | Planned (frontend 12-05) |
+| ORG-05 | Phase 12 | In Progress (last-owner trigger 12-01; transfer + remove endpoints 12-02) |
+| ORG-06 | Phase 12 | In Progress (GET /organizations/mine + X-Org-Id resolver 12-02; frontend 12-05) |
 | ORG-07 | Phase 12 | In Progress (backfill done 12-01) |
-| ORG-08 | Phase 12 | In Progress (trigger done 12-01) |
+| ORG-08 | Phase 12 | In Progress (trigger 12-01; route translation 12-02) |
 | TEST-01 | Phase 9 | Planned |
 | TEST-02 | Phase 9 | Planned |
 | TEST-03 | Phase 9 | Planned |
@@ -159,4 +159,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-03-18*
-*Last updated: 2026-06-04 — added ORG-01..ORG-08 for Phase 12 (Teams & Organizations) per 12-RESEARCH.md §2*
+*Last updated: 2026-06-04 — ORG-01/ORG-02/ORG-05/ORG-06/ORG-08 advanced to "In Progress (backend routes 12-02 behind flag)" per Plan 12-02 close-out*
