@@ -123,11 +123,20 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     await publish_status(job_id, "cancelled", "Cancelled")
 
     # Record partial billing if GPU time was consumed.
+    #
+    # Phase 12: the cancel path runs from both the user-scoped router and the
+    # admin router. Neither can rely on the calling user being a member of the
+    # job's org (admins are not org members), so we resolve the billing
+    # customer the same way the webhook handler does: JOIN through
+    # jobs.organization_id to organizations.stripe_customer_id.
     if gpu_seconds > 0:
         async with pool.acquire() as conn:
             cust_row = await conn.fetchrow(
-                "SELECT stripe_customer_id FROM public.users WHERE id = $1",
-                user_id,
+                """SELECT o.stripe_customer_id
+                   FROM public.jobs j
+                   JOIN public.organizations o ON o.id = j.organization_id
+                   WHERE j.id = $1""",
+                job_id,
             )
         if cust_row and cust_row["stripe_customer_id"]:
             record_gpu_usage(cust_row["stripe_customer_id"], job_id, gpu_seconds)

@@ -5,7 +5,9 @@ The stripe library uses synchronous HTTP internally; wrap calls in a thread
 executor if you need to call from async context without blocking the event loop.
 
 Key design decisions:
-- stripe_customer_id is cached in the users table to avoid redundant Stripe API calls.
+- Phase 12: stripe_customer_id lives on public.organizations (not public.users).
+  Personal orgs (one per user, auto-created at signup) hold the customer ID that
+  used to live on public.users.stripe_customer_id.
 - record_gpu_usage uses Stripe Billing Meters API (not legacy Usage Records).
   The 'value' field in the meter event payload MUST be a string, not an int.
 - check_payment_method inspects invoice_settings.default_payment_method,
@@ -24,44 +26,43 @@ stripe.api_key = settings.stripe_secret_key
 
 async def get_or_create_customer(
     email: str,
-    user_id: str,
+    org_id: str,
+    org_name: str,
     pool: asyncpg.Pool,
 ) -> str:
-    """Return the Stripe customer ID for a user, creating one if needed.
+    """Return the Stripe customer ID for an organization, creating one if needed.
 
-    Checks the users table for an existing stripe_customer_id. If absent,
-    creates a new Stripe Customer and stores the ID in the database.
+    Phase 12: Stripe customer lives at the org level. Personal orgs (one per
+    user, auto-created at signup) hold the customer ID that used to live on
+    public.users.stripe_customer_id.
 
     Args:
-        email: User's email address (used when creating a new Stripe customer).
-        user_id: Application user UUID (stored as Stripe customer metadata).
-        pool: asyncpg connection pool for DB reads/writes.
+        email: Billing contact email (owner's email or org's billing_email).
+        org_id: Organization UUID.
+        org_name: Organization name (used as Stripe customer metadata).
+        pool: Database pool.
 
     Returns:
-        Stripe customer ID string (e.g. "cus_...").
+        Stripe customer ID (cus_...).
     """
-    # Check DB first to avoid redundant Stripe API calls
     row = await pool.fetchrow(
-        "SELECT stripe_customer_id FROM public.users WHERE id = $1",
-        user_id,
+        "SELECT stripe_customer_id FROM public.organizations WHERE id = $1",
+        org_id,
     )
     if row and row["stripe_customer_id"]:
         return row["stripe_customer_id"]
-
-    # Create a new Stripe customer
     customer = stripe.Customer.create(
         email=email,
-        metadata={"user_id": user_id},
+        metadata={
+            "organization_id": org_id,
+            "kendrew_org_name": org_name,
+        },
     )
-    customer_id: str = customer.id
-
-    # Persist to DB
     await pool.execute(
-        "UPDATE public.users SET stripe_customer_id = $1 WHERE id = $2",
-        customer_id,
-        user_id,
+        "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
+        customer.id, org_id,
     )
-    return customer_id
+    return customer.id
 
 
 def create_setup_session(stripe_customer_id: str, return_url: str) -> str:

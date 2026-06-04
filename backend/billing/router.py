@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from auth.dependencies import get_current_user
+from auth.org_dependencies import require_role
 from billing.estimate import estimate_cost_range
 from billing.stripe_client import (
     check_payment_method,
@@ -29,33 +30,41 @@ class ReturnUrlRequest(BaseModel):
     return_url: str
 
 
-async def _resolve_stripe_customer(user_id: str) -> str:
-    """Resolve the Stripe customer ID for the authenticated user.
+async def _resolve_stripe_customer(org_id: str) -> str:
+    """Resolve the Stripe customer ID for an organization, creating one if needed.
 
-    Fetches or creates the Supabase-linked Stripe customer. Raises 503
-    if the database pool cannot be acquired.
+    Phase 12: Reads the deterministic-first owner's email as the billing contact
+    (oldest owner membership wins; predictable for migrated personal orgs).
 
     Args:
-        user_id: Authenticated user's UUID (from JWT sub claim).
+        org_id: Organization UUID.
 
     Returns:
         Stripe customer ID string (e.g. "cus_...").
     """
     pool = await get_db_pool()
-    # get_or_create_customer needs the user's email; fetch from users table.
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT email, stripe_customer_id FROM public.users WHERE id = $1",
-            user_id,
+        org_row = await conn.fetchrow(
+            "SELECT id, name FROM public.organizations WHERE id = $1", org_id,
         )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
+        if org_row is None:
+            raise HTTPException(status_code=404, detail="Organization not found")
+        owner_row = await conn.fetchrow(
+            """SELECT u.email FROM public.organization_memberships m
+               JOIN public.users u ON u.id = m.user_id
+               WHERE m.organization_id = $1 AND m.role = 'owner'
+               ORDER BY m.created_at ASC LIMIT 1""",
+            org_id,
         )
+        if owner_row is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Organization has no owner; cannot resolve billing contact",
+            )
     return await get_or_create_customer(
-        email=row["email"],
-        user_id=user_id,
+        email=owner_row["email"],
+        org_id=str(org_row["id"]),
+        org_name=org_row["name"],
         pool=pool,
     )
 
@@ -63,12 +72,13 @@ async def _resolve_stripe_customer(user_id: str) -> str:
 @router.post("/checkout-session")
 async def checkout_session(
     body: ReturnUrlRequest,
-    user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner")),
 ):
     """BILL-03: Create a Stripe Checkout session in setup mode for card collection.
 
-    The returned URL should be used to redirect the user to the Stripe-hosted
-    checkout page where they can enter their payment details.
+    Phase 12: owner-only. Scopes the Stripe customer to the active organization
+    (X-Org-Id header). The returned URL should be used to redirect the user to
+    the Stripe-hosted checkout page where they can enter their payment details.
 
     Args:
         body.return_url: Base URL Stripe redirects to after setup completes or
@@ -88,7 +98,7 @@ async def checkout_session(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Stripe billing is not configured on this deployment.",
         )
-    stripe_customer_id = await _resolve_stripe_customer(user_id)
+    stripe_customer_id = await _resolve_stripe_customer(org_id)
     checkout_url = create_setup_session(
         stripe_customer_id=stripe_customer_id,
         return_url=body.return_url,
@@ -99,19 +109,20 @@ async def checkout_session(
 @router.post("/portal-session")
 async def portal_session(
     body: ReturnUrlRequest,
-    user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner")),
 ):
     """Create a Stripe Billing Portal session for payment method management.
 
-    Allows authenticated users to view or update their saved payment methods.
+    Phase 12: owner-only. Allows the org owner to view or update saved payment
+    methods for the active organization.
 
     Args:
-        body.return_url: URL Stripe redirects to when the user exits the portal.
+        body.return_url: URL Stripe redirects to when the customer exits the portal.
 
     Returns:
         JSON with `url` field containing the Stripe Billing Portal session URL.
     """
-    stripe_customer_id = await _resolve_stripe_customer(user_id)
+    stripe_customer_id = await _resolve_stripe_customer(org_id)
     portal_url = create_portal_session(
         stripe_customer_id=stripe_customer_id,
         return_url=body.return_url,
@@ -120,11 +131,11 @@ async def portal_session(
 
 
 @router.get("/payment-status")
-async def payment_status(user_id: str = Depends(get_current_user)):
-    """BILL-03: Check whether the authenticated user has a payment method on file.
+async def payment_status(org_id: str = Depends(require_role("owner"))):
+    """BILL-03: Check whether the active organization has a payment method on file.
 
-    Used by the job dispatch gate to determine whether to proceed or prompt
-    the user to add a payment method.
+    Phase 12: owner-only. Used by the job dispatch gate to determine whether
+    to proceed or prompt the owner to add a payment method.
 
     Returns:
         JSON with `has_payment_method` bool. Returns True if Stripe is not
@@ -132,21 +143,22 @@ async def payment_status(user_id: str = Depends(get_current_user)):
     """
     if not settings.stripe_secret_key:
         return {"has_payment_method": True}
-    stripe_customer_id = await _resolve_stripe_customer(user_id)
+    stripe_customer_id = await _resolve_stripe_customer(org_id)
     has_method = check_payment_method(stripe_customer_id)
     return {"has_payment_method": has_method}
 
 
 @router.get("/payment-method")
-async def get_payment_method(user_id: str = Depends(get_current_user)):
-    """Return the authenticated user's default Stripe payment method details.
+async def get_payment_method(org_id: str = Depends(require_role("owner"))):
+    """Return the active org's default Stripe payment method details.
 
-    Retrieves the card brand, last 4 digits, and expiry from the Stripe
-    customer's ``invoice_settings.default_payment_method``. This is the
-    payment method set when the user completed a Stripe Checkout setup session.
+    Phase 12: owner-only. Retrieves the card brand, last 4 digits, and expiry
+    from the Stripe customer's ``invoice_settings.default_payment_method``.
+    This is the payment method set when the owner completed a Stripe Checkout
+    setup session.
 
     Args:
-        user_id: Injected by the auth dependency.
+        org_id: Injected by require_role("owner") — the active organization.
 
     Returns:
         Dict with ``has_payment_method`` bool. If True, also includes
@@ -159,7 +171,7 @@ async def get_payment_method(user_id: str = Depends(get_current_user)):
     """
     if not settings.stripe_secret_key:
         return {"has_payment_method": False}
-    stripe_customer_id = await _resolve_stripe_customer(user_id)
+    stripe_customer_id = await _resolve_stripe_customer(org_id)
 
     customer = stripe.Customer.retrieve(
         stripe_customer_id,

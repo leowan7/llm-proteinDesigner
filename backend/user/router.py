@@ -20,6 +20,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from pydantic import BaseModel
 
 from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from config import settings
 from db.connection import get_db_pool
 from jobs.notifications import send_deletion_scheduled_email
@@ -94,8 +95,17 @@ RETENTION_MAX_DAYS = 365
 # ---------------------------------------------------------------------------
 
 @router.get("/usage")
-async def get_usage(user_id: str = Depends(get_current_user)):
-    """Return the current calendar-month billing summary for the authenticated user.
+async def get_usage(
+    user_id: str = Depends(get_current_user),
+    active: tuple[str, str] = Depends(get_active_org),
+):
+    """Return the current calendar-month billing summary for the active organization.
+
+    Phase 12: scoped through the X-Org-Id header to the active organization.
+    Owners see all rows in the org; scientists see only the rows THEY launched
+    (``created_by_user_id = user_id``). Viewers are rejected — there's no use
+    case for read-only members to see spend (they don't launch jobs and don't
+    pay).
 
     Aggregates completed jobs created on or after the first day of the current
     month (UTC). Returns total spend in USD, job count, and a list of the
@@ -103,37 +113,69 @@ async def get_usage(user_id: str = Depends(get_current_user)):
 
     Args:
         user_id: Injected by the auth dependency.
+        active: ``(org_id, role)`` tuple injected by ``get_active_org``.
 
     Returns:
         Dict with ``period_start``, ``job_count``, ``total_spend_usd``, and
         ``recent_charges`` list.
+
+    Raises:
+        HTTPException 403: If the caller is a viewer.
     """
+    org_id, role = active
+    if role not in ("owner", "scientist"):
+        raise HTTPException(status_code=403, detail="Viewers cannot view usage")
     pool = await get_db_pool()
 
     async with pool.acquire() as conn:
-        # Aggregate totals for the current calendar month.
-        summary_row = await conn.fetchrow(
-            """SELECT COUNT(*) AS job_count,
-                      COALESCE(SUM(gpu_cost_usd), 0) AS total_spend,
-                      date_trunc('month', now()) AS period_start
-               FROM public.jobs
-               WHERE user_id = $1
-                 AND created_at >= date_trunc('month', now())
-                 AND status = 'complete'""",
-            user_id,
-        )
-
-        # Recent charges for itemised display (last 10 this month).
-        charge_rows = await conn.fetch(
-            """SELECT id, name, tool, completed_at, gpu_cost_usd
-               FROM public.jobs
-               WHERE user_id = $1
-                 AND created_at >= date_trunc('month', now())
-                 AND status = 'complete'
-               ORDER BY completed_at DESC
-               LIMIT 10""",
-            user_id,
-        )
+        if role == "owner":
+            # Owners see all jobs in the org.
+            summary_row = await conn.fetchrow(
+                """SELECT COUNT(*) AS job_count,
+                          COALESCE(SUM(gpu_cost_usd), 0) AS total_spend,
+                          date_trunc('month', now()) AS period_start
+                   FROM public.jobs
+                   WHERE organization_id = $1
+                     AND created_at >= date_trunc('month', now())
+                     AND status = 'complete'""",
+                org_id,
+            )
+            charge_rows = await conn.fetch(
+                """SELECT id, name, tool, completed_at, gpu_cost_usd
+                   FROM public.jobs
+                   WHERE organization_id = $1
+                     AND created_at >= date_trunc('month', now())
+                     AND status = 'complete'
+                   ORDER BY completed_at DESC
+                   LIMIT 10""",
+                org_id,
+            )
+        else:
+            # Scientists see only the jobs they launched.
+            summary_row = await conn.fetchrow(
+                """SELECT COUNT(*) AS job_count,
+                          COALESCE(SUM(gpu_cost_usd), 0) AS total_spend,
+                          date_trunc('month', now()) AS period_start
+                   FROM public.jobs
+                   WHERE organization_id = $1
+                     AND created_by_user_id = $2
+                     AND created_at >= date_trunc('month', now())
+                     AND status = 'complete'""",
+                org_id,
+                user_id,
+            )
+            charge_rows = await conn.fetch(
+                """SELECT id, name, tool, completed_at, gpu_cost_usd
+                   FROM public.jobs
+                   WHERE organization_id = $1
+                     AND created_by_user_id = $2
+                     AND created_at >= date_trunc('month', now())
+                     AND status = 'complete'
+                   ORDER BY completed_at DESC
+                   LIMIT 10""",
+                org_id,
+                user_id,
+            )
 
     recent_charges = [
         {

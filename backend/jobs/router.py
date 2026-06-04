@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
+from auth.org_dependencies import require_role
 from middleware.rate_limit import limiter
 from billing.stripe_client import check_payment_method, get_or_create_customer
 from config import settings
@@ -106,23 +107,27 @@ async def launch_job_endpoint(
     request: Request,
     body: LaunchRequest,
     user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner", "scientist")),
 ):
     """BILL-04 / JOB-01: Payment gate check then job dispatch.
 
-    Verifies the authenticated user has a Stripe payment method on file before
-    calling launch_job(). Returns 402 if no payment method is found so the
-    frontend can redirect to Stripe Checkout.
+    Phase 12: org-scoped via require_role("owner", "scientist"). Viewers cannot
+    launch jobs. Stripe customer is resolved through the active organization,
+    not the calling user. Audit field ``created_by_user_id`` records who
+    clicked Launch.
 
     Args:
         body.job_id: UUID of an existing job row (created by the agent wizard).
         user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
         JSON with job_id and status="queued" on success.
 
     Raises:
-        HTTPException 402: If the user has no payment method configured.
-        HTTPException 404: If the job row does not exist for this user.
+        HTTPException 402: If the org has no payment method configured.
+        HTTPException 403: If the user is a viewer (handled by require_role).
+        HTTPException 404: If the job row does not exist in this org.
     """
     # Validate job_id is a valid UUID format.
     try:
@@ -132,29 +137,41 @@ async def launch_job_endpoint(
 
     pool = await get_db_pool()
 
-    # Fetch job row to validate ownership and get job_spec.
+    # Fetch job row scoped to the active org and get job_spec.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT job_spec FROM public.jobs WHERE id = $1 AND user_id = $2",
+            "SELECT job_spec FROM public.jobs WHERE id = $1 AND organization_id = $2",
             body.job_id,
-            user_id,
+            org_id,
         )
     if not row:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Job not found")
 
-    # Resolve Stripe customer and check payment method (skip if Stripe not configured).
+    # Resolve Stripe customer scoped to the org and check payment method (skip if Stripe not configured).
     if settings.stripe_secret_key:
         async with pool.acquire() as conn:
-            user_row = await conn.fetchrow(
-                "SELECT email, stripe_customer_id FROM public.users WHERE id = $1",
-                user_id,
+            org_row = await conn.fetchrow(
+                "SELECT id, name FROM public.organizations WHERE id = $1", org_id,
             )
-        if not user_row:
-            raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="User not found")
+            if org_row is None:
+                raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Organization not found")
+            owner_row = await conn.fetchrow(
+                """SELECT u.email FROM public.organization_memberships m
+                   JOIN public.users u ON u.id = m.user_id
+                   WHERE m.organization_id = $1 AND m.role = 'owner'
+                   ORDER BY m.created_at ASC LIMIT 1""",
+                org_id,
+            )
+        if owner_row is None:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail="Organization has no owner; cannot resolve billing contact",
+            )
 
         stripe_customer_id = await get_or_create_customer(
-            email=user_row["email"],
-            user_id=user_id,
+            email=owner_row["email"],
+            org_id=str(org_row["id"]),
+            org_name=org_row["name"],
             pool=pool,
         )
 
@@ -192,20 +209,20 @@ async def launch_job_endpoint(
     tool = spec_data.get("tool", "")
 
     # Gate: full_design requires at least one previously-completed pilot on the
-    # same tool for this user. Prevents expensive campaigns on an unvalidated
-    # tool+target combination.
+    # same tool within this organization. Org-scoped: any completed pilot in
+    # the org qualifies any org member to launch a full-design (RESEARCH §13).
     if body.job_tier == "full_design":
         async with pool.acquire() as conn:
             pilot_row = await conn.fetchrow(
                 """
                 SELECT 1 FROM public.jobs
-                WHERE user_id = $1
+                WHERE organization_id = $1
                   AND job_tier = 'pilot'
                   AND status = 'complete'
                   AND job_spec::jsonb ->> 'tool' = $2
                 LIMIT 1
                 """,
-                user_id,
+                org_id,
                 tool,
             )
         if not pilot_row:
@@ -222,6 +239,8 @@ async def launch_job_endpoint(
         job_id=body.job_id,
         job_spec=job_spec,
         user_id=user_id,
+        organization_id=org_id,
+        created_by_user_id=user_id,
         pool=pool,
         job_tier=body.job_tier,
         total_budget_hours=body.total_budget_hours,
@@ -338,26 +357,32 @@ async def list_jobs(
     limit: int = Query(default=25, ge=1, le=100),
     status: str | None = Query(default=None),
     before: str | None = Query(default=None),
-    user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner", "scientist", "viewer")),
 ):
-    """Return paginated job history for the current user.
+    """Return paginated job history for the active organization.
+
+    Phase 12: org-scoped — every member of the active org sees every org job,
+    regardless of who launched it. The ``created_by_user_id`` + ``created_by_email``
+    columns surface the launcher in the response so the UI can render
+    "launched by Alice".
 
     Supports keyset pagination via the ``before`` cursor (ISO timestamp) and
     optional status filtering. Results are ordered by created_at descending so
     the newest jobs appear first.
 
     Args:
-        limit: Maximum number of jobs to return (1–100, default 25).
+        limit: Maximum number of jobs to return (1-100, default 25).
         status: Optional status filter. Accepted values: ``running``,
             ``complete``, ``failed``. Omit for all statuses. Returns 400
             for any other value.
         before: ISO 8601 timestamp cursor. Only jobs created before this
             timestamp are returned, enabling keyset pagination. Returns 400
             if the value cannot be parsed as a timestamp.
-        user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
-        Dict with ``jobs`` list and ``has_more`` bool.
+        Dict with ``jobs`` list and ``has_more`` bool. Each job row includes
+        ``created_by_user_id`` and ``created_by_email``.
 
     Raises:
         HTTPException 400: If ``status`` is not in ALLOWED_STATUS_FILTERS or
@@ -387,16 +412,17 @@ async def list_jobs(
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, tool, status, name, created_at, completed_at,
-                      gpu_cost_usd, results->>'candidate_count' AS candidate_count,
-                      session_id
-               FROM public.jobs
-               WHERE user_id = $1
-                 AND ($2::text IS NULL OR status = $2)
-                 AND ($3::timestamptz IS NULL OR created_at < $3)
-               ORDER BY created_at DESC
+            """SELECT j.id, j.tool, j.status, j.name, j.created_at, j.completed_at,
+                      j.gpu_cost_usd, j.results->>'candidate_count' AS candidate_count,
+                      j.session_id, j.created_by_user_id, u.email AS created_by_email
+               FROM public.jobs j
+               LEFT JOIN public.users u ON u.id = j.created_by_user_id
+               WHERE j.organization_id = $1
+                 AND ($2::text IS NULL OR j.status = $2)
+                 AND ($3::timestamptz IS NULL OR j.created_at < $3)
+               ORDER BY j.created_at DESC
                LIMIT $4""",
-            user_id,
+            org_id,
             status,
             before_dt,
             limit,
@@ -413,6 +439,8 @@ async def list_jobs(
             "gpu_cost_usd": float(r["gpu_cost_usd"]) if r["gpu_cost_usd"] else None,
             "candidate_count": int(r["candidate_count"]) if r["candidate_count"] else None,
             "session_id": str(r["session_id"]) if r["session_id"] else None,
+            "created_by_user_id": str(r["created_by_user_id"]) if r["created_by_user_id"] else None,
+            "created_by_email": r["created_by_email"],
         }
         for r in rows
     ]
@@ -422,8 +450,16 @@ async def list_jobs(
 
 
 @router.get("/{job_id}/status")
-async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user)):
+async def job_status_stream(
+    job_id: str,
+    user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner", "scientist", "viewer")),
+):
     """Stream job status events via Server-Sent Events.
+
+    Phase 12: org-scoped — any member of the active org can stream status for
+    any job in that org. SSE limit is still tracked per user_id so a single
+    user can't open many concurrent streams across orgs.
 
     Emits the current state immediately. For non-terminal jobs, subscribes to
     the Redis pub/sub channel and forwards events until a terminal status is
@@ -432,6 +468,7 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
     Args:
         job_id: Job UUID string.
         user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
         StreamingResponse with media_type="text/event-stream".
@@ -442,9 +479,9 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, stage FROM public.jobs WHERE id = $1 AND user_id = $2",
+            "SELECT status, stage FROM public.jobs WHERE id = $1 AND organization_id = $2",
             job_id,
-            user_id,
+            org_id,
         )
     if not row:
         await _release_sse_slot(user_id)
@@ -466,15 +503,23 @@ async def job_status_stream(job_id: str, user_id: str = Depends(get_current_user
 
 @router.get("/{job_id}/download")
 @limiter.limit("10/minute")
-async def download_all_designs(request: Request, job_id: str, user_id: str = Depends(get_current_user)):
+async def download_all_designs(
+    request: Request,
+    job_id: str,
+    user_id: str = Depends(get_current_user),
+    org_id: str = Depends(require_role("owner", "scientist", "viewer")),
+):
     """Download all design outputs for a completed job as a ZIP archive.
 
-    Fetches all objects under ``users/{user_id}/jobs/{job_id}/outputs/`` from
-    S3/MinIO and returns them as a single ZIP file.
+    Phase 12: org-scoped — any member of the active org can download outputs
+    for any complete job in that org. The S3 storage key prefix still uses
+    the row's original ``user_id`` (the launcher) since storage paths are
+    immutable; we read that from the job row, not from the caller.
 
     Args:
         job_id: Job UUID string.
         user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
         StreamingResponse with media_type="application/zip".
@@ -485,15 +530,17 @@ async def download_all_designs(request: Request, job_id: str, user_id: str = Dep
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status FROM public.jobs WHERE id = $1 AND user_id = $2",
+            "SELECT status, user_id FROM public.jobs WHERE id = $1 AND organization_id = $2",
             job_id,
-            user_id,
+            org_id,
         )
     if not row or row["status"] != "complete":
         raise HTTPException(status_code=404, detail="No completed job found")
 
+    # Storage prefix is keyed to the original launcher's user_id, not the caller.
+    storage_user_id = str(row["user_id"])
     s3 = get_s3_client()
-    prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
+    prefix = f"users/{storage_user_id}/jobs/{job_id}/outputs/"
     objects = s3.list_objects_v2(Bucket=settings.s3_bucket_name, Prefix=prefix)
 
     buffer = io.BytesIO()
@@ -512,32 +559,39 @@ async def download_all_designs(request: Request, job_id: str, user_id: str = Dep
 
 
 @router.post("/{job_id}/cancel")
-async def cancel_job(job_id: str, user_id: str = Depends(get_current_user)):
+async def cancel_job(
+    job_id: str,
+    org_id: str = Depends(require_role("owner", "scientist")),
+):
     """Cancel a running job.
 
-    Verifies ownership (user must own the job), then delegates to the shared
+    Phase 12: org-scoped via require_role("owner", "scientist"). Viewers cannot
+    cancel. Owners and scientists can cancel any running or queued job in the
+    active org, regardless of who launched it.
+
+    Verifies the job belongs to the active org, then delegates to the shared
     cancel_job_by_id service which handles RunPod cancellation, partial billing,
     DB update, and SSE event publication.
 
     Args:
         job_id: Job UUID string.
-        user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
         Dict with status, gpu_seconds consumed, and gpu_cost_usd charged.
 
     Raises:
-        HTTPException 404: If no running or queued job is found for this user.
+        HTTPException 404: If no running or queued job is found in this org.
     """
     pool = await get_db_pool()
 
-    # Ownership check — user can only cancel their own jobs.
+    # Org-scoped check — only org members can cancel; viewer blocked by require_role.
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT id FROM public.jobs
-               WHERE id = $1 AND user_id = $2 AND status IN ('running', 'queued')""",
+               WHERE id = $1 AND organization_id = $2 AND status IN ('running', 'queued')""",
             job_id,
-            user_id,
+            org_id,
         )
     if not row:
         raise HTTPException(status_code=404, detail="No running job found")
@@ -614,25 +668,31 @@ async def get_upload_urls(job_id: str, body: UploadUrlsRequest, request: Request
 # ---------------------------------------------------------------------------
 
 @router.get("/{job_id}")
-async def get_job(job_id: str, user_id: str = Depends(get_current_user)):
+async def get_job(
+    job_id: str,
+    org_id: str = Depends(require_role("owner", "scientist", "viewer")),
+):
     """Return full job data including candidates with presigned download URLs.
+
+    Phase 12: org-scoped — any member of the active org can read any job in
+    the org (jobs.organization_id is the access key, not user_id).
 
     Args:
         job_id: Job UUID string.
-        user_id: Injected by the auth dependency.
+        org_id: Injected by require_role — the active organization.
 
     Returns:
         Dict with all job fields and a candidates list (empty if not complete).
 
     Raises:
-        HTTPException 404: If the job does not exist for this user.
+        HTTPException 404: If the job does not exist in this org.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM public.jobs WHERE id = $1 AND user_id = $2",
+            "SELECT * FROM public.jobs WHERE id = $1 AND organization_id = $2",
             job_id,
-            user_id,
+            org_id,
         )
     if not row:
         raise HTTPException(status_code=404, detail="Job not found")
