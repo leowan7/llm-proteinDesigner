@@ -5,11 +5,13 @@
  * - Skip navigation link (sr-only, visible on focus) as first child
  * - SidebarTrigger (collapse/expand sidebar) with tooltip and aria-label
  * - Bindwave logo mark + wordmark
+ * - OrganizationSwitcher (Plan 12-05) — renders only when user has >1 org
  * - Optional session title (passed from AuthenticatedLayout)
  */
 
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { OrganizationSwitcher } from "@/components/org/OrganizationSwitcher";
 
 interface AppHeaderProps {
   /** Optional title for the active session, shown in header center area */
@@ -51,6 +53,9 @@ export function AppHeader({ sessionTitle }: AppHeaderProps) {
           Bindwave
         </span>
       </div>
+
+      {/* Organization switcher — hidden when user has 0 or 1 org */}
+      <OrganizationSwitcher />
 
       {/* Session title — shown when a session is active */}
       {sessionTitle && (
