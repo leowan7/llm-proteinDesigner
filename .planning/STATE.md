@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In Progress
-stopped_at: Phase 12 Plan 02 complete
-last_updated: "2026-06-04T10:39:48.000Z"
+stopped_at: Phase 12 Plan 03 complete
+last_updated: "2026-06-04T11:05:28.000Z"
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 61
-  completed_plans: 57
-  percent: 93
+  completed_plans: 58
+  percent: 95
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 12
-Plan: 12-03 (Wave 2 — backend cutover: jobs/billing/webhooks org-scoped). 12-01 + 12-02 complete; remaining plans 12-03 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
+Plan: 12-04 (Wave 2 parallel — Stripe metadata stamping one-shot script). 12-01 + 12-02 + 12-03 complete; remaining plans 12-04 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
 
 ## Performance Metrics
 
@@ -64,6 +64,7 @@ Plan: 12-03 (Wave 2 — backend cutover: jobs/billing/webhooks org-scoped). 12-0
 | Phase 06-ui-improvements P04 | 387 | 2 tasks | 9 files |
 | Phase 12-teams-and-organizations P01 | 5min | 2 tasks | 6 files |
 | Phase 12-teams-and-organizations P02 | 13min | 2 tasks | 16 files |
+| Phase 12-teams-and-organizations P03 | 19min | 2 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -124,6 +125,12 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: settings.organizations_enabled default-False; main.py conditional include_router so single-tenant routes stay unchanged until Plan 12-04 flips the flag
 - [Phase 12-teams-and-organizations]: Pydantic v2 form Annotated[str, StringConstraints(...)] over Field(strip_whitespace=True) — the Field-arg form is deprecated in Pydantic v2 and warns on every test
 - [Phase 12-teams-and-organizations]: Tests build isolated FastAPI sub-apps per test (FastAPI() + include_router + dependency_overrides) rather than mounting on main.app — avoids depending on global flag state at import time
+- [Phase 12-teams-and-organizations]: Webhook handler routes billing via JOIN through jobs.organization_id (not via users.stripe_customer_id) — service-role pool bypasses RLS in the unauth webhook context, and the JOIN gives the correct org-scoped customer for both personal and team orgs
+- [Phase 12-teams-and-organizations]: jobs/service.cancel_job_by_id is also a cutover surface (not in plan's enumerated files) — billing block rewritten via the same org JOIN pattern; cancel runs from both user and admin paths so neither can rely on is_member_of()
+- [Phase 12-teams-and-organizations]: /user/usage owner sees all org jobs, scientist sees only created_by_user_id=self, viewer 403 — no use case for read-only members to see org spend
+- [Phase 12-teams-and-organizations]: Full-design pilot eligibility flipped from user_id-scoped to organization_id-scoped — any org-completed pilot qualifies any org member, matches org-shared-jobs design
+- [Phase 12-teams-and-organizations]: Download endpoint reads user_id from the job row for the S3 prefix (immutable storage path) but gates access by org_id — separates audit trail from access control
+- [Phase 12-teams-and-organizations]: Single-tenant existing tests still pass under cutover via app.dependency_overrides[get_active_org] = (org_id, role) tuple — feature flag only governs main.py mount, but the routers themselves now unconditionally depend on get_active_org
 
 ### Pending Todos
 
@@ -137,6 +144,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T10:39:48.000Z
-Stopped at: Completed 12-02-PLAN.md (Wave 1 backend orgs module behind feature flag)
-Resume file: .planning/phases/12-teams-and-organizations/12-03-PLAN.md
+Last session: 2026-06-04T11:05:28.000Z
+Stopped at: Completed 12-03-PLAN.md (Wave 2 backend cutover to org-scope)
+Resume file: .planning/phases/12-teams-and-organizations/12-04-PLAN.md
