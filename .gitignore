@@ -48,3 +48,5 @@ frontend/.planning/
 
 # Phase 11 deployment — secrets collected locally, never committed
 .planning/phases/11-deployment/11-02-PROVISIONING.md
+.vercel
+.env*

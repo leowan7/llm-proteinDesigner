@@ -300,7 +300,7 @@ The parser produces 2 candidates, each with `scores = {ipTM, pLDDT, i_pAE, filte
 | `ipTM` | 0.15 – 0.95 (real AF2 multimer output) | < 0.10 on one candidate — real but low | exactly 0.46 on rank-1 with `filter_status="stub (smoke)"` — stub leaked into mini_pilot |
 | `pLDDT` | 40.0 – 95.0 | < 40 on both | exactly 71.0 with stub marker — stub leaked |
 | `i_pAE` | 3.0 – 30.0 (Å) | > 25.0 on both | exactly 11.9 with stub marker — stub leaked |
-| `filter_status` | absent, `"pass"`, `"fail"`, or `"fail (pilot fallback)"` | — | contains the substring `"stub"` — this is the silent-fallback anti-pattern |
+| `filter_status` | absent, `"pass"`, `"fail"`, or `"below threshold"` | — | contains the substring `"stub"` — this is the silent-fallback anti-pattern |
 | PDB | base64 decodes to ≥ 500 ATOM lines across target+binder chains | — | empty or < 100 ATOM lines |
 
 Both candidates must satisfy these bounds and `status` must be `COMPLETED`. Any `status=FAILED` with `error.bucket` is a clean fail (not a silent lie) and can be diagnosed from logs.
