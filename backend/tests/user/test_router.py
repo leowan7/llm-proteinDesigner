@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from httpx import ASGITransport, AsyncClient
 from main import app
 
@@ -65,10 +66,21 @@ def _make_ctx(conn):
 
 @pytest.fixture(autouse=True)
 def override_auth():
-    """Override get_current_user for every test in this module."""
+    """Override get_current_user for every test in this module.
+
+    Phase 12: also override get_active_org so the cutover /user/usage endpoint
+    resolves to an owner-of-personal-org context. The other /user/* endpoints
+    do not depend on get_active_org — overriding it has no effect on them.
+    """
     app.dependency_overrides[get_current_user] = _mock_user
+
+    async def _mock_active():
+        return ("org-personal", "owner")
+
+    app.dependency_overrides[get_active_org] = _mock_active
     yield
     app.dependency_overrides.pop(get_current_user, None)
+    app.dependency_overrides.pop(get_active_org, None)
 
 
 # ---------------------------------------------------------------------------
