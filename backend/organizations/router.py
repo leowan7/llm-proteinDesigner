@@ -374,11 +374,18 @@ async def list_invitations(
     else:
         clause = "revoked_at IS NOT NULL"
 
+    # Owner-only fields: only owners get the raw token so they can copy the
+    # accept link. Members + scientists + viewers see the invitation row but
+    # not the bearer credential. RESEARCH §14.1 and the contract resolution
+    # documented in Plan 12-06 SUMMARY.
+    _active_org_id, caller_role = active
+    include_token = caller_role == "owner"
+
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT id, email, role::text AS role, expires_at,
-                       accepted_at, revoked_at, created_at
+                       accepted_at, revoked_at, created_at, token
                 FROM public.organization_invitations
                 WHERE organization_id = $1 AND {clause}
                 ORDER BY created_at DESC""",
@@ -394,6 +401,7 @@ async def list_invitations(
                 "accepted_at": r["accepted_at"].isoformat() if r["accepted_at"] else None,
                 "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "token": r["token"] if include_token else None,
             }
             for r in rows
         ]
@@ -435,11 +443,15 @@ async def create_invitation(
         accept_url=accept_url,
         expires_at=expires_at,
     )
+    # Return the token so the owner can build a copy-link in the UI without a
+    # second round-trip. The endpoint is gated by require_role("owner"), so
+    # only owners ever see the bearer credential. Plan 12-06 bug-fix.
     return {
         "id": str(invite_row["id"]),
         "email": body.email,
         "role": body.role,
         "expires_at": expires_at.isoformat(),
+        "token": token,
     }
 
 
