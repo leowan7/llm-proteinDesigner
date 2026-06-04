@@ -122,6 +122,18 @@ app.include_router(sessions_router)
 app.include_router(user_router)
 app.include_router(admin_router)
 
+# Phase 12: Teams & Organizations -- gated by feature flag during rollout.
+# Mount only when settings.organizations_enabled is True so existing
+# single-tenant routes continue to behave identically until Plans 12-03 +
+# 12-04 land (RESEARCH §12.1 step 5).
+if settings.organizations_enabled:
+    from organizations.router import (
+        router as orgs_router,
+        invitations_router,
+    )
+    app.include_router(orgs_router)
+    app.include_router(invitations_router)
+
 # Phase 11 SC 8: synthetic-error endpoint for Sentry verification (dev only).
 if settings.debug or settings.testing:
     from debug_routes import router as debug_router

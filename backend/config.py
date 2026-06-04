@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     # Sentry frontend (separate DSN for browser project)
     sentry_dsn_frontend: str = ""
 
+    # Phase 12: Teams & Organizations. Default-False so this code can deploy
+    # to production behind the flag while Plan 12-03 (route cutover) and
+    # Plan 12-04 (Stripe metadata stamp) land. Flip to True after Plan 12-04
+    # per RESEARCH §12.1 step 5.
+    organizations_enabled: bool = False
+
     # GPU pricing (dollars per second — A6000 at $0.33/hr = $0.0000917/sec).
     # Customer rate = gpu_price_per_second * (1 + gpu_markup_percent/100).
     # At 400% markup: $0.0000917 * 5.00 = $0.0004585/sec = $1.65/hr customer-facing.
