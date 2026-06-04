@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-stopped_at: Phase 11 context gathered
-last_updated: "2026-04-24T15:37:09.409Z"
+status: In Progress
+stopped_at: Phase 12 Plan 01 complete
+last_updated: "2026-06-04T10:21:01.000Z"
 progress:
   total_phases: 13
-  completed_phases: 8
-  total_plans: 55
-  completed_plans: 43
-  percent: 78
+  completed_phases: 9
+  total_plans: 61
+  completed_plans: 56
+  percent: 92
 ---
 
 # Project State
@@ -20,20 +20,20 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 10 — legal-and-compliance
+**Current focus:** Phase 12 — teams-and-organizations
 
 ## Current Position
 
-Phase: 11
-Plan: Not started
+Phase: 12
+Plan: 12-02 (Wave 1 — backend orgs module). 12-01 complete; remaining plans 12-02 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 21
-- Average duration: 15 min
-- Total execution time: 0.25 hours
+- Total plans completed: 22
+- Average duration: 14 min
+- Total execution time: 0.33 hours
 
 **By Phase:**
 
@@ -62,6 +62,7 @@ Plan: Not started
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
 | Phase 06-ui-improvements P04 | 387 | 2 tasks | 9 files |
+| Phase 12-teams-and-organizations P01 | 5min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -111,6 +112,11 @@ Recent decisions affecting current work:
 - [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
 - [Phase 06-ui-improvements]: ChatInput injectedValue prop pattern for prompt injection rather than lifting full text state
 - [Phase 06-ui-improvements]: GreetingCard onPromptClick threaded through MessageList to avoid breaking MessageList props contract
+- [Phase 12-teams-and-organizations]: RLS helpers use LANGUAGE plpgsql (not sql) — Postgres inlines SQL functions during planning, dropping SECURITY DEFINER context and triggering infinite recursion in RLS predicates (research §14.1)
+- [Phase 12-teams-and-organizations]: Last-owner invariant is DB-enforced via BEFORE UPDATE OR DELETE trigger on organization_memberships — application-level checks race under concurrent DELETEs
+- [Phase 12-teams-and-organizations]: Stripe customer_id MOVED (not copied) from public.users to auto-created personal org so existing metered subscriptions stay attached to same Stripe customer
+- [Phase 12-teams-and-organizations]: users.stripe_customer_id is DEPRECATED via COMMENT but NOT dropped in plan 12-01; drop deferred to plan 12-06 (20260606000001) so backend rollback is safe within 24h verification window
+- [Phase 12-teams-and-organizations]: test_rls_jobs_org.py uses set_config('request.jwt.claims', value, true) instead of literal SET LOCAL — asyncpg cannot bind parameters into SET LOCAL with dotted GUC names; behavior equivalent
 
 ### Pending Todos
 
@@ -124,6 +130,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-24T14:34:14.125Z
-Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-deployment/11-CONTEXT.md
+Last session: 2026-06-04T10:21:01.000Z
+Stopped at: Completed 12-01-PLAN.md (Wave 0 foundation migration + tests)
+Resume file: .planning/phases/12-teams-and-organizations/12-02-PLAN.md
