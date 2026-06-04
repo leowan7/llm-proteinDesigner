@@ -23,7 +23,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 9: Testing & CI/CD** - Automated test suite (unit, integration, E2E), CI pipeline, pre-deploy gates
 - [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness
  (completed 2026-04-23)
-- [ ] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL
+- [x] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL (completed 2026-06-04)
 - [ ] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer)
 - [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
 
@@ -229,11 +229,12 @@ Plans:
   9. Rollback possible within 5 minutes via Railway/Vercel deploy history
 **Plans**: 5 plans
 Plans:
-- [ ] 11-01-PLAN.md — Wave 0 test scaffolds, Supabase CLI in Dockerfile, debug Sentry route, validation scripts
-- [ ] 11-02-PLAN.md — Wave 1 external resource provisioning (Supabase, Upstash, R2, Modal, Cloudflare, Resend)
-- [ ] 11-03-PLAN.md — Wave 2 platform deploys (railway.toml, deploy-modal.yml flip, Cloudflare DNS, Railway services, Vercel project)
-- [ ] 11-04-PLAN.md — Wave 3 code changes (dual-secret webhook, asyncpg Supavisor fix, full .env.example audit)
-- [ ] 11-05-PLAN.md — Wave 4 monitoring (Sentry hot-path Performance, UptimeRobot, docs/deploy.md, ROADMAP SC 6 + SC 8 correction)
+- [x] 11-01-PLAN.md — Wave 0 test scaffolds, Supabase CLI in Dockerfile, debug Sentry route, validation scripts
+- [x] 11-02-PLAN.md — Wave 1 external resource provisioning (Supabase, Upstash, R2, Modal, Cloudflare, Resend)
+- [x] 11-03-PLAN.md — Wave 2 platform deploys (railway.toml, deploy-modal.yml flip, Cloudflare DNS, Railway services, Vercel project)
+- [x] 11-04-PLAN.md — Wave 3 code changes (dual-secret webhook, asyncpg Supavisor fix, full .env.example audit)
+- [x] 11-05-PLAN.md — Wave 4 monitoring (Sentry hot-path Performance, UptimeRobot, docs/deploy.md, ROADMAP SC 6 + SC 8 correction)
+**Verified**: 2026-06-04 — see `.planning/phases/11-deployment/11-UAT.md` for full verification record. All 9 success criteria PASS, end-to-end E2E run job `6973ea6c-f448-4ea6-bca8-5f2ce31ce4fc` reached `status: complete` for $0.07 GPU spend.
 
 ### Phase 12: Teams & Organizations
 **Goal**: Biopharma teams can use the platform under a shared organization with centralized billing and role-based access. This is how you sell to companies, not individuals.
