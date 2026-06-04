@@ -67,7 +67,13 @@ export interface JobData {
   created_at: string | null;
 }
 
-/** Summary item from GET /jobs list (paginated) */
+/** Summary item from GET /jobs list (paginated)
+ *
+ * Plan 12-05: jobs are now org-scoped, so the list response includes
+ * `created_by_user_id` and `created_by_email` populated by Plan 12-03's
+ * backend cutover. Existing single-tenant jobs were backfilled to the
+ * job-owner's user id + email by migration 20260604000002.
+ */
 export interface JobListItem {
   id: string;
   tool: string | null;
@@ -78,6 +84,10 @@ export interface JobListItem {
   gpu_cost_usd: number | null;
   candidate_count: number | null;
   session_id: string | null;
+  /** UUID of the org member who launched the job. */
+  created_by_user_id?: string | null;
+  /** Email of the org member who launched the job. */
+  created_by_email?: string | null;
 }
 
 /** Cost estimate from GET /billing/estimate */

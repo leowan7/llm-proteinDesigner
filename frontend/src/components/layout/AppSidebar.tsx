@@ -48,6 +48,7 @@ import { useState } from "react";
 import { createPersistentSession, deleteSessionApi } from "@/lib/sessions";
 import { api } from "@/lib/api";
 import { clearSentryUser } from "@/lib/sentry";
+import { clearActiveOrgOnLogout } from "@/components/org/OrganizationContext";
 import type { SessionSummary } from "@/lib/sessions";
 
 interface AppSidebarProps {
@@ -255,6 +256,9 @@ export function AppSidebar({ sessions, sessionsLoading, activeSessionId, onRefre
       // Redirect anyway
     }
     clearSentryUser();
+    // Plan 12-05: drop the cached active org id so a different user signing
+    // in on the same browser starts with a fresh resolution.
+    clearActiveOrgOnLogout();
     navigate("/login");
   }, [navigate]);
 
