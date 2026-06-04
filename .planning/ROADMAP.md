@@ -247,12 +247,12 @@ Plans:
   4. Organization-level billing: one Stripe subscription, one invoice, usage aggregated across all members
   5. Owner can remove members and transfer ownership
   6. User can belong to multiple organizations and switch between them
-**Plans**: 6 plans (3/6 complete)
+**Plans**: 6 plans (4/6 complete)
 Plans:
 - [x] 12-01-PLAN.md — Wave 0 foundation: SQL migration, SECURITY DEFINER PL/pgSQL helpers, last-owner trigger, jobs RLS rewrite, personal-org backfill + Wave 0 test scaffolds (completed 2026-06-04)
 - [x] 12-02-PLAN.md — Wave 1 backend orgs module: organizations/router + service + models + notifications + get_active_org + require_role + feature flag + 8 unit-test files (completed 2026-06-04)
 - [x] 12-03-PLAN.md — Wave 2 backend cutover: jobs/billing/webhooks/user routers org-scoped; stripe_client reads organizations.stripe_customer_id; signup auto-creates personal org; jobs.created_by_user_id + 5 cutover tests (completed 2026-06-04)
-- [ ] 12-04-PLAN.md — Wave 2 Stripe metadata stamping (parallel): one-shot script pushing organization_id + kendrew_org_name onto migrated Stripe customers; dry-run + test-mode + verify script + 5 unit tests
+- [x] 12-04-PLAN.md — Wave 2 Stripe metadata stamping (parallel): one-shot script pushing organization_id + kendrew_org_name onto migrated Stripe customers; dry-run + test-mode + verify script + 11 unit tests (completed 2026-06-04)
 - [ ] 12-05-PLAN.md — Wave 2 frontend (parallel): OrganizationContext, OrganizationSwitcher, MembersTab, InvitationsTab, OrgSettingsTab, CreateOrganization + AcceptInvitation pages, X-Org-Id header injection, owner-gated billing, launched-by column + 4 Vitest specs
 - [ ] 12-06-PLAN.md — Wave 3 verification + cleanup: Playwright E2E spec, drop deprecated users.stripe_customer_id column, REQUIREMENTS.md ORG-01..ORG-08 traceability update, ROADMAP.md update, Phase 12 rollout runbook
 
@@ -308,7 +308,7 @@ real GPU output and cannot be mocked.
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 12. Teams & Organizations | Multi-user, org billing, RBAC | 3/6 | In Progress | Phase 11 |
+| 12. Teams & Organizations | Multi-user, org billing, RBAC | 4/6 | In Progress | Phase 11 |
 | 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | Phase 11 |
 
 **Completed:**
