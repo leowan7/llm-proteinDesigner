@@ -187,7 +187,7 @@ def _pick_altloc_per_residue(residue) -> tuple[dict, int]:
 
 def normalize_for_pipeline(
     input_path: str,
-    output_path: str,
+    output_path: Optional[str] = None,
     *,
     target_chain: Optional[str] = None,
     keep_hetatm: bool = False,
@@ -205,9 +205,17 @@ def normalize_for_pipeline(
     cleaned PDB. Designed to produce input that gemmi.read_structure() will
     not crash on when followed by remove_ligands_and_waters().
 
+    When ``output_path is None`` the function runs in **preview mode**: every
+    in-memory check still happens (so the returned report's ``changes``,
+    ``altloc_records_collapsed``, ``residues_kept_per_chain`` etc. are
+    populated), but no file is written. Callers use this to drive the
+    tools-hub preflight panel — surface "we'd clean X, Y, Z" before the
+    user clicks Run, without leaving cleaned-PDB temp files around.
+
     Args:
         input_path: User upload (.pdb, .ent, .cif, .mmcif).
-        output_path: Where to write the cleaned PDB.
+        output_path: Where to write the cleaned PDB. Pass ``None`` for a
+            dry-run preview that only fills in the report.
         target_chain: If given, drop all other chains. Case-sensitive.
         keep_hetatm: If False (default), drop all HETATM residues except
             those in hetatm_whitelist.
@@ -413,6 +421,16 @@ def normalize_for_pipeline(
             f"atom record(s) (kept highest-occupancy altloc per atom)"
         )
 
+    # Dry-run preview: caller only wants the report (chains kept, altloc
+    # records collapsed, MSE remapped, etc.) — skip the file write and
+    # any renumber pass, which both produce side effects only useful to
+    # callers that will actually hand the cleaned PDB to a downstream
+    # tool. The renumber map is still computed below for symmetry; it's
+    # cheap and the report's contract is to expose it.
+    if output_path is None:
+        report.renumber_map = renumber_map
+        return report
+
     # --- Write a first pass with original numbering --------------------------
     selector = _PipelineSelect(
         keep_chains=keep_chains,
@@ -496,7 +514,7 @@ def _blank_altloc_column(path: str) -> None:
 # -- Per-tool presets ---------------------------------------------------------
 
 def normalize_for_pxdesign(
-    input_path: str, output_path: str, *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: str
 ) -> PipelineNormalizationReport:
     """pxdesign preset: single chain, strip everything non-polymer, renumber."""
     return normalize_for_pipeline(
@@ -509,7 +527,7 @@ def normalize_for_pxdesign(
 
 
 def normalize_for_boltzgen(
-    input_path: str, output_path: str, *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: str
 ) -> PipelineNormalizationReport:
     """boltzgen preset: same as pxdesign — single chain, renumbered."""
     return normalize_for_pipeline(
@@ -522,7 +540,7 @@ def normalize_for_boltzgen(
 
 
 def normalize_for_rfdiffusion(
-    input_path: str, output_path: str, *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: str
 ) -> PipelineNormalizationReport:
     """rfdiffusion preset: keep target chain only, preserve original numbering.
 
@@ -540,7 +558,7 @@ def normalize_for_rfdiffusion(
 
 
 def normalize_for_rfantibody(
-    input_path: str, output_path: str, *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: str
 ) -> PipelineNormalizationReport:
     """rfantibody preset: keep antigen chain only, preserve numbering.
 
@@ -555,3 +573,53 @@ def normalize_for_rfantibody(
         drop_zero_backbone=True, convert_modres=True,
         renumber_residues=False,
     )
+
+
+def normalize_for_bindcraft(
+    input_path: str, output_path: Optional[str], *, target_chain: str
+) -> PipelineNormalizationReport:
+    """bindcraft preset: keep target chain only, preserve numbering.
+
+    BindCraft (FreeBindCraft fork) references hotspot residues by original
+    PDB author numbering throughout the AF2 multimer + ColabDesign loop.
+    Renumbering would silently invalidate them. Same logic as rfdiffusion
+    and rfantibody presets.
+    """
+    return normalize_for_pipeline(
+        input_path, output_path,
+        target_chain=target_chain,
+        keep_hetatm=False, keep_waters=False, keep_hydrogens=False,
+        drop_zero_backbone=True, convert_modres=True,
+        renumber_residues=False,
+    )
+
+
+# -- Preview entry point ------------------------------------------------------
+
+def preview_for_tool(
+    tool_slug: str, input_path: str, *, target_chain: str,
+) -> PipelineNormalizationReport:
+    """Dry-run the per-tool normalizer for the preflight panel.
+
+    Routes to the correct ``normalize_for_<tool>`` and passes
+    ``output_path=None`` so the function fills the report (chains kept,
+    altloc records collapsed, MSE remapped, etc.) without writing a
+    cleaned PDB to disk. Callers in tools-hub use the returned report to
+    render the user-visible "We cleaned X, Y, Z. Ready to run." panel.
+
+    Raises ``ValueError`` for unknown ``tool_slug`` so registration drift
+    fails loudly rather than silently dispatching to a wrong preset.
+    """
+    preset_fn = {
+        "rfantibody":   normalize_for_rfantibody,
+        "rfdiffusion":  normalize_for_rfdiffusion,
+        "bindcraft":    normalize_for_bindcraft,
+        "boltzgen":     normalize_for_boltzgen,
+        "pxdesign":     normalize_for_pxdesign,
+    }.get(tool_slug)
+    if preset_fn is None:
+        raise ValueError(
+            f"No pipeline_normalize preset registered for tool {tool_slug!r}. "
+            f"Available: rfantibody, rfdiffusion, bindcraft, boltzgen, pxdesign."
+        )
+    return preset_fn(input_path, None, target_chain=target_chain)
