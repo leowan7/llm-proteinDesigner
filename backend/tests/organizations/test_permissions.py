@@ -158,14 +158,116 @@ async def test_permission_matrix(role, method, path, body, expected):
 
 
 # ---------------------------------------------------------------------------
-# Jobs/Billing role gating — wired in Plan 12-03, not 12-02
+# Jobs/Billing role gating — wired in Plan 12-03 (was an xfail placeholder
+# in 12-02; 12-03 flipped it to a real passing matrix).
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="Plan 12-03 wires require_role on /jobs/launch and /billing/*; "
-           "permission matrix for those rows is covered there.",
-    strict=False,
+
+def _build_jobs_app(active_role: str, user_id: str = "user-rl", org_id: str = "org-rl"):
+    """Build an isolated FastAPI app with the jobs + billing routers mounted.
+
+    Mirrors `_build_app` above but for the routes whose require_role gates
+    Plan 12-03 wired up. Skips rate limiting so the matrix runs deterministically.
+    """
+    from fastapi import FastAPI
+
+    from auth.dependencies import get_current_user
+    from auth.org_dependencies import get_active_org
+    from billing.router import router as billing_router
+    from jobs.router import router as jobs_router
+    from middleware.rate_limit import limiter as _limiter
+
+    _limiter.enabled = False
+    app = FastAPI()
+    app.state.limiter = _limiter
+    app.include_router(jobs_router)
+    app.include_router(billing_router)
+
+    async def _user():
+        return user_id
+
+    async def _active():
+        return (org_id, active_role)
+
+    app.dependency_overrides[get_current_user] = _user
+    app.dependency_overrides[get_active_org] = _active
+    return app
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        ("owner", 200),     # any-role list endpoint
+        ("scientist", 200),
+        ("viewer", 200),    # viewers CAN list (read-only)
+    ],
 )
-async def test_scientist_can_launch_job_xfail():
-    """Placeholder for 12-03: scientist + owner can launch; viewer cannot."""
-    assert False  # not yet implemented
+async def test_list_jobs_role_matrix(role, expected):
+    """Plan 12-03: GET /jobs requires any membership role."""
+    from httpx import ASGITransport, AsyncClient
+
+    pool = _generic_pool()
+    app = _build_jobs_app(active_role=role)
+    with patch("jobs.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/jobs/", headers={"X-Org-Id": "org-rl"})
+    assert r.status_code == expected, r.text
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        # /billing/payment-status is the cheapest billing endpoint to exercise:
+        # no body, no Stripe call (settings.stripe_secret_key empty in tests).
+        ("owner", 200),
+        ("scientist", 403),  # require_role("owner") rejects
+        ("viewer", 403),
+    ],
+)
+async def test_billing_endpoints_owner_only(role, expected):
+    """Plan 12-03: every /billing/* endpoint depends on require_role('owner').
+
+    Uses payment-status as the representative endpoint — same require_role
+    dep is on checkout-session, portal-session, payment-method.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    pool = _generic_pool()
+    app = _build_jobs_app(active_role=role)
+    with patch("billing.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/billing/payment-status", headers={"X-Org-Id": "org-rl"})
+    assert r.status_code == expected, (
+        f"{role} GET /billing/payment-status expected {expected}, got {r.status_code}: {r.text}"
+    )
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        ("owner", 404),     # passes role gate, fails at "no running job" — proves gate let it through
+        ("scientist", 404),
+        ("viewer", 403),    # viewer rejected by require_role
+    ],
+)
+async def test_cancel_job_blocks_viewer(role, expected):
+    """Plan 12-03: POST /jobs/{id}/cancel depends on require_role('owner','scientist').
+
+    Owners + scientists pass the role gate and hit the org-scope SQL lookup,
+    which returns no row (404). Viewers are blocked at the role gate (403).
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    pool = _generic_pool()
+    app = _build_jobs_app(active_role=role)
+    with patch("jobs.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/jobs/some-uuid/cancel", headers={"X-Org-Id": "org-rl"},
+            )
+    assert r.status_code == expected, (
+        f"{role} POST /jobs/.../cancel expected {expected}, got {r.status_code}: {r.text}"
+    )

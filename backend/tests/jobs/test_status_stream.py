@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from main import app
 
 
@@ -21,6 +22,17 @@ def _override_user(user_id: str = "user-123"):
     """Return a FastAPI dependency override that returns a fixed user ID."""
     async def _dep():
         return user_id
+    return _dep
+
+
+def _override_active_org(role: str = "viewer", org_id: str = "org-personal"):
+    """Phase 12: inject the (org_id, role) tuple require_role expects.
+
+    SSE status stream allows any role (owner/scientist/viewer); viewer is the
+    most-permissive default for this read-only path.
+    """
+    async def _dep():
+        return (org_id, role)
     return _dep
 
 
@@ -92,6 +104,7 @@ class TestStatusPublish:
         mock_redis.decr = AsyncMock()
 
         app.dependency_overrides[get_current_user] = _override_user("user-123")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=mock_pool),
@@ -105,6 +118,7 @@ class TestStatusPublish:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         assert response.status_code == 200
         assert "text/event-stream" in response.headers["content-type"]

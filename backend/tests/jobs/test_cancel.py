@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from main import app
 
 
@@ -22,6 +23,18 @@ def _override_user(user_id: str = "user-abc"):
     """Return a FastAPI dependency override that returns a fixed user ID."""
     async def _dep():
         return user_id
+    return _dep
+
+
+def _override_active_org(role: str = "scientist", org_id: str = "org-personal"):
+    """Phase 12: override get_active_org so cutover require_role gates resolve.
+
+    Returns a (org_id, role) tuple as the real dep would. Tests in this file
+    target the user-scoped cancel path which require_role('owner','scientist')
+    gates — scientist is the default role for legacy single-tenant tests.
+    """
+    async def _dep():
+        return (org_id, role)
     return _dep
 
 
@@ -98,6 +111,7 @@ class TestJobCancellation:
         mock_provider.cancel_job = AsyncMock()
 
         app.dependency_overrides[get_current_user] = _override_user("user-abc")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
@@ -115,6 +129,7 @@ class TestJobCancellation:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         assert response.status_code == 200
         data = response.json()
@@ -136,6 +151,7 @@ class TestJobCancellation:
         mock_provider.cancel_job = AsyncMock()
 
         app.dependency_overrides[get_current_user] = _override_user("user-abc")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
@@ -153,6 +169,7 @@ class TestJobCancellation:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         mock_provider.cancel_job.assert_called_once()
         call_args = mock_provider.cancel_job.call_args
@@ -178,6 +195,7 @@ class TestJobCancellation:
         mock_record = MagicMock()
 
         app.dependency_overrides[get_current_user] = _override_user("user-abc")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=router_pool),
@@ -195,6 +213,7 @@ class TestJobCancellation:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         data = response.json()
         gpu_seconds = data["gpu_seconds"]

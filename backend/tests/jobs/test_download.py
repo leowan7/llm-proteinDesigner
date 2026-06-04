@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from main import app
 
 
@@ -22,6 +23,13 @@ def _override_user(user_id: str = "u1"):
     """Return a FastAPI dependency override that yields a fixed user ID."""
     async def _dep():
         return user_id
+    return _dep
+
+
+def _override_active_org(role: str = "scientist", org_id: str = "org-personal"):
+    """Phase 12: inject the (org_id, role) tuple require_role expects."""
+    async def _dep():
+        return (org_id, role)
     return _dep
 
 
@@ -41,9 +49,12 @@ class TestResultDownload:
         mock_s3.get_object = MagicMock(side_effect=fake_get_object)
         return mock_s3
 
-    def _make_pool(self, status="complete"):
+    def _make_pool(self, status="complete", user_id="u1"):
         mock_conn = AsyncMock()
-        mock_conn.fetchrow = AsyncMock(return_value={"status": status})
+        # Phase 12: the org-scoped fetchrow returns status + user_id (the
+        # latter drives the storage-prefix lookup since outputs are keyed to
+        # the original launcher).
+        mock_conn.fetchrow = AsyncMock(return_value={"status": status, "user_id": user_id})
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=mock_conn)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -64,6 +75,7 @@ class TestResultDownload:
         pool_mock = self._make_pool()
 
         app.dependency_overrides[get_current_user] = _override_user("u1")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
@@ -78,6 +90,7 @@ class TestResultDownload:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         assert response.status_code == 200
         assert "application/zip" in response.headers["content-type"]
@@ -95,6 +108,7 @@ class TestResultDownload:
         pool_mock = self._make_pool()
 
         app.dependency_overrides[get_current_user] = _override_user("u1")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
@@ -109,6 +123,7 @@ class TestResultDownload:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         assert response.status_code == 200
         zf = zipfile.ZipFile(io.BytesIO(response.content))
@@ -126,6 +141,7 @@ class TestResultDownload:
         pool_mock = self._make_pool()
 
         app.dependency_overrides[get_current_user] = _override_user("u1")
+        app.dependency_overrides[get_active_org] = _override_active_org()
         try:
             with (
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
@@ -140,6 +156,7 @@ class TestResultDownload:
                     )
         finally:
             app.dependency_overrides.pop(get_current_user, None)
+            app.dependency_overrides.pop(get_active_org, None)
 
         assert response.status_code == 200
         zf = zipfile.ZipFile(io.BytesIO(response.content))
