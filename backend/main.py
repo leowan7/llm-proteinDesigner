@@ -172,4 +172,8 @@ async def health():
 
     healthy = all(v == "ok" for v in checks.values())
     status_code = 200 if healthy else 503
-    return JSONResponse(content=checks, status_code=status_code)
+    # Phase 12 rollout runbook probes /health | jq .organizations_enabled to
+    # confirm the multi-tenancy feature flag state in each environment.
+    # Surface the flag as a non-health-gating top-level field.
+    payload = {**checks, "organizations_enabled": settings.organizations_enabled}
+    return JSONResponse(content=payload, status_code=status_code)
