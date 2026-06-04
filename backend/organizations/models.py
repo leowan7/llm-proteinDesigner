@@ -9,14 +9,22 @@ ever reach the database (where they would surface as a Postgres
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, StringConstraints
 
 
 # Mirrors public.org_role in supabase/migrations/20260605000001_organizations.sql.
 OrgRoleLiteral = Literal["owner", "scientist", "viewer"]
 SelfDowngradeRoleLiteral = Literal["scientist", "viewer"]
+
+
+# Pydantic-v2 form for trimmed, length-bounded org names. Bounds match the
+# database CHECK constraint (name_not_blank) and the UI's input maxlength.
+OrgName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
+]
 
 
 class CreateOrgRequest(BaseModel):
@@ -26,7 +34,7 @@ class CreateOrgRequest(BaseModel):
     ``name_not_blank`` CHECK constraint never fires from a UI typo.
     """
 
-    name: str = Field(min_length=1, max_length=100, strip_whitespace=True)
+    name: OrgName
 
 
 class OrgResponse(BaseModel):
@@ -88,4 +96,4 @@ class MemberRoleUpdate(BaseModel):
 class UpdateOrgRequest(BaseModel):
     """Body for PATCH /organizations/{org_id}."""
 
-    name: str = Field(min_length=1, max_length=100, strip_whitespace=True)
+    name: OrgName
