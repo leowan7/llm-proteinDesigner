@@ -144,6 +144,84 @@ END
 """
 
 
+def _atom_line(
+    serial: int, name: str, altloc: str, resname: str, chain: str, resnum: int,
+    x: float, y: float, z: float, occ: float = 1.0, bfac: float = 10.0,
+    element: str = "",
+) -> str:
+    """Emit a PDB ATOM record with column-perfect alignment.
+
+    PDB v3 fixed-width format. Position reference:
+        cols  1-6   "ATOM  "
+        cols  7-11  atom serial (right)
+        cols 13-16  atom name (left-pad: e.g. " CA ")
+        col  17     altloc (or ' ')
+        cols 18-20  residue name (right)
+        col  22     chain
+        cols 23-26  resnum (right)
+        cols 31-38  x (%8.3f)
+        cols 39-46  y (%8.3f)
+        cols 47-54  z (%8.3f)
+        cols 55-60  occupancy (%6.2f)
+        cols 61-66  temp factor (%6.2f)
+        cols 77-78  element symbol (right)
+    """
+    # Atom-name field is 4 chars; conventional placement is to put the
+    # element symbol at column 13 if it's a metal or 2-letter element, else
+    # leave column 13 blank and right-justify within 13-16.
+    if len(name) >= 4:
+        name_field = name[:4]
+    else:
+        name_field = " " + name.ljust(3)
+    altloc_field = altloc if altloc else " "
+    resname_field = resname[:3].rjust(3)
+    serial_field = str(serial)[:5].rjust(5)
+    resnum_field = str(resnum)[:4].rjust(4)
+    element_field = (element or name.strip()[:1]).rjust(2)
+    return (
+        f"ATOM  {serial_field} {name_field}{altloc_field}{resname_field} "
+        f"{chain}{resnum_field}    "
+        f"{x:8.3f}{y:8.3f}{z:8.3f}{occ:6.2f}{bfac:6.2f}          {element_field}\n"
+    )
+
+
+def _pdb(*lines: str) -> str:
+    return "HEADER    SYNTH\n" + "".join(lines) + "END\n"
+
+
+# Multi-altloc: residue 1 has CA at altloc A (occ 0.5) AND altloc B (occ 0.5).
+# Plus CB split across A/B. Backbone N/C/O at altloc ' '. This is the
+# 3IUT / 3KKU pattern that produced the RFdiffusion "Non-positive
+# determinant" crash for hcruz@indicasat.org.pa on 2026-06-03.
+ALTLOC_MIXED_BACKBONE_PDB = _pdb(
+    _atom_line(1, "N",  "", "ASN", "A", 1,  1.0,  0.0,  1.0, 1.0, 8.0),
+    _atom_line(2, "CA", "A", "ASN", "A", 1, 2.0, -1.0,  1.0, 0.5, 8.5, "C"),
+    _atom_line(3, "CA", "B", "ASN", "A", 1, 2.1, -1.1,  1.1, 0.5, 9.0, "C"),
+    _atom_line(4, "C",  "", "ASN", "A", 1,  3.0, -1.0,  1.0, 1.0, 9.0, "C"),
+    _atom_line(5, "O",  "", "ASN", "A", 1,  3.0, -2.0,  1.0, 1.0, 11.0, "O"),
+    _atom_line(6, "CB", "A", "ASN", "A", 1, 2.5, -2.0,  2.0, 0.5, 9.0, "C"),
+    _atom_line(7, "CB", "B", "ASN", "A", 1, 2.6, -1.9,  2.1, 0.5, 11.0, "C"),
+    _atom_line(8, "N",  "", "GLY", "A", 2,  4.0,  0.0,  1.0, 1.0, 8.0),
+    _atom_line(9, "CA", "", "GLY", "A", 2,  5.0, -1.0,  1.0, 1.0, 8.0, "C"),
+    _atom_line(10, "C", "", "GLY", "A", 2,  6.0, -1.0,  1.0, 1.0, 8.0, "C"),
+    _atom_line(11, "O", "", "GLY", "A", 2,  6.0, -2.0,  1.0, 1.0, 9.0, "O"),
+)
+
+
+# Altloc with mixed occupancy: A=0.7, B=0.3. A coords must win.
+ALTLOC_OCCUPANCY_PDB = _pdb(
+    _atom_line(1, "N",  "", "ALA", "A", 1,  1.0, 1.0, 1.0),
+    _atom_line(2, "CA", "A", "ALA", "A", 1, 2.0, 1.0, 1.0, 0.7, 10.0, "C"),
+    _atom_line(3, "CA", "B", "ALA", "A", 1, 2.5, 1.5, 1.5, 0.3, 10.0, "C"),
+    _atom_line(4, "C",  "", "ALA", "A", 1,  3.0, 1.0, 1.0, 1.0, 10.0, "C"),
+    _atom_line(5, "O",  "", "ALA", "A", 1,  3.0, 2.0, 1.0, 1.0, 10.0, "O"),
+    _atom_line(6, "N",  "", "GLY", "A", 2,  4.0, 1.0, 1.0),
+    _atom_line(7, "CA", "", "GLY", "A", 2,  5.0, 1.0, 1.0, 1.0, 10.0, "C"),
+    _atom_line(8, "C",  "", "GLY", "A", 2,  6.0, 1.0, 1.0, 1.0, 10.0, "C"),
+    _atom_line(9, "O",  "", "GLY", "A", 2,  6.0, 2.0, 1.0, 1.0, 10.0, "O"),
+)
+
+
 # ---------------------------------------------------------------------------
 # Tests: basic happy paths
 # ---------------------------------------------------------------------------
@@ -269,6 +347,73 @@ def test_zero_backbone_kept_when_drop_zero_disabled(tmp_path):
         inp, out, target_chain="A", drop_zero_backbone=False,
     )
     assert report.residues_kept_per_chain.get("A") == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: altloc collapse (rfantibody hcruz@indicasat fix, 2026-06-03)
+# ---------------------------------------------------------------------------
+
+def _count_altloc_letters(path: str) -> int:
+    """Count ATOM/HETATM records whose altloc column (index 16) is a non-blank letter."""
+    n = 0
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith(("ATOM", "HETATM")) and len(line) > 16:
+                if line[16] != " ":
+                    n += 1
+    return n
+
+
+def test_altloc_collapsed_in_output(tmp_path):
+    """Multi-altloc input must collapse to one record per atom name with
+    altloc column blanked. RFdiffusion produced a degenerate rotation
+    frame mid-denoise on multi-altloc 3IUT/3KKU inputs (hcruz incident
+    2026-06-03) because the upstream normalizer let both altloc copies
+    through."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), ALTLOC_MIXED_BACKBONE_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A")
+    # Both residues survive (residue 1 has complete backbone after altloc choice).
+    assert report.residues_kept_per_chain.get("A") == 2
+    # Residue 1 had CA in altloc A AND altloc B, plus CB in altloc A AND altloc B
+    # — 4 altloc records total. After collapse we keep one of each (2), so 2 dropped.
+    assert report.altloc_records_collapsed == 2
+    # Output file has no altloc letters left.
+    assert _count_altloc_letters(out) == 0
+    # And exactly one CA line per residue.
+    out_text = open(out).read()
+    ca_lines = [line for line in out_text.splitlines() if " CA " in line]
+    assert len(ca_lines) == 2  # one per residue, no duplicates
+
+
+def test_altloc_winner_is_highest_occupancy(tmp_path):
+    """When altloc A has occupancy 0.7 and altloc B has 0.3, the A coords
+    must survive."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), ALTLOC_OCCUPANCY_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A")
+    assert report.altloc_records_collapsed == 1
+    out_text = open(out).read()
+    ca_lines = [line for line in out_text.splitlines() if " CA " in line and "ALA" in line]
+    assert len(ca_lines) == 1
+    # The A coords are (2.000, 1.000, 1.000); the B coords are (2.500, 1.500, 1.500).
+    assert "2.000" in ca_lines[0] and "2.500" not in ca_lines[0]
+
+
+def test_altloc_change_recorded_in_changes(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), ALTLOC_MIXED_BACKBONE_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A")
+    assert any("alternate-conformation" in c for c in report.changes)
+
+
+def test_clean_input_records_zero_altloc_collapse(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), CLEAN_TWO_RES_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A")
+    assert report.altloc_records_collapsed == 0
+    # Changes list should NOT mention altloc when there is nothing to collapse.
+    assert not any("alternate-conformation" in c for c in report.changes)
 
 
 # ---------------------------------------------------------------------------

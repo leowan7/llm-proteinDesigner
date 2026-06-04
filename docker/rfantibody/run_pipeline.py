@@ -240,7 +240,7 @@ def preprocess_target_pdb(
     """Filter target PDB to a single chain and drop residues with bad backbones.
 
     RFantibody's RFdiffusion computes rotation frames from the N, CA, C atom
-    triad for every input residue. Two classes of input produce the scipy
+    triad for every input residue. Three classes of input produce the scipy
     "Non-positive determinant in rotation matrix" crash partway through
     sampling:
 
@@ -250,11 +250,20 @@ def preprocess_target_pdb(
     2. Residues with missing or zero-coordinate backbone atoms (common in
        crystal-structure disordered loops). The rotation frame collapses to
        a zero matrix whose determinant is zero.
+    3. Multi-altloc crystal structures (e.g. RCSB 3IUT chain A residue 80
+       has CA at altloc A AND altloc B, both occupancy 0.5). RFdiffusion
+       sees two CA records per residue and produces a degenerate frame
+       mid-denoise. ``pipeline_normalize.normalize_for_rfantibody`` upstream
+       already collapses altlocs, but this routine re-applies the same
+       choice as defense in depth in case it is ever called standalone.
 
     This preprocessor writes a cleaned PDB with:
-      - only ATOM lines on ``target_chain``,
+      - only ATOM/HETATM lines on ``target_chain``,
       - only residues having all four backbone atoms (N, CA, C, O) with
-        non-zero coordinates.
+        non-zero coordinates,
+      - exactly one altloc record per (residue, atom_name), with the altloc
+        column blanked on output. Tie-breaker: an unannotated altloc (' ')
+        wins; else highest occupancy; else alphabetical.
 
     Args:
         input_pdb: Path to the raw uploaded PDB.
@@ -263,32 +272,63 @@ def preprocess_target_pdb(
 
     Returns:
         Dict with counts of ``kept`` and ``dropped`` residues plus the
-        ``other_chains`` discarded.
+        ``other_chains`` discarded and ``altloc_records_dropped``.
     """
-    all_lines = []
-    residues: dict[tuple, dict] = {}  # (chain, resseq, icode) -> {atom: coords}
+    all_lines: list[str] = []
     other_chains: set[str] = set()
+    # (chain, resseq, icode, atom_name) -> (winning_altloc, winning_occ)
+    altloc_winner: dict[tuple, tuple[str, float]] = {}
+    # (chain, resseq, icode) -> {atom_name: (x, y, z)} (merged after altloc pick)
+    residues: dict[tuple, dict] = {}
 
+    def _parse_atom(line: str):
+        atom_name = line[12:16].strip()
+        altloc = line[16] if len(line) > 16 else " "
+        try:
+            resseq = int(line[22:26])
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+            occ = float(line[54:60]) if len(line) >= 60 else 1.0
+        except ValueError:
+            return None
+        icode = line[26] if len(line) > 26 else " "
+        return atom_name, altloc, resseq, icode, (x, y, z), occ
+
+    # First pass: collect lines, decide per-(residue, atom_name) which altloc
+    # wins. ' ' (no altloc) beats any letter; otherwise highest occupancy
+    # with alphabetical altloc as the tie-breaker.
     with open(input_pdb) as fh:
         for line in fh:
             all_lines.append(line)
             if not line.startswith(("ATOM", "HETATM")):
                 continue
-            chain = line[21]
+            chain = line[21] if len(line) > 21 else " "
             if chain != target_chain:
                 other_chains.add(chain)
                 continue
-            atom_name = line[12:16].strip()
-            try:
-                resseq = int(line[22:26])
-                x = float(line[30:38])
-                y = float(line[38:46])
-                z = float(line[46:54])
-            except ValueError:
+            parsed = _parse_atom(line)
+            if parsed is None:
                 continue
-            icode = line[26]
-            key = (chain, resseq, icode)
-            residues.setdefault(key, {})[atom_name] = (x, y, z)
+            atom_name, altloc, resseq, icode, coord, occ = parsed
+            key = (chain, resseq, icode, atom_name)
+            prior = altloc_winner.get(key)
+            if prior is None:
+                altloc_winner[key] = (altloc, occ)
+            else:
+                prior_alt, prior_occ = prior
+                # ' ' always wins over a letter.
+                if prior_alt == " ":
+                    pass
+                elif altloc == " ":
+                    altloc_winner[key] = (altloc, occ)
+                elif occ > prior_occ or (occ == prior_occ and altloc < prior_alt):
+                    altloc_winner[key] = (altloc, occ)
+            # Stash coords in the merged residue dict only when the line
+            # corresponds to the current winner (refreshed after the choice).
+            cur_alt, _ = altloc_winner[key]
+            if altloc == cur_alt:
+                residues.setdefault((chain, resseq, icode), {})[atom_name] = coord
 
     required = {"N", "CA", "C", "O"}
     keep: set[tuple] = set()
@@ -304,29 +344,40 @@ def preprocess_target_pdb(
             continue
         keep.add(key)
 
-    # Write output. Only emit ATOM/HETATM lines for retained residues on the
-    # target chain; keep all non-coordinate lines (HEADER, TITLE, REMARK,
-    # CRYST1, etc.) verbatim for tool compatibility.
+    # Second pass: write output. Only emit ATOM/HETATM lines for retained
+    # residues on the target chain, AND only the altloc-winning record per
+    # (residue, atom_name). Blank the altloc column so downstream parsers
+    # see a clean single-conformation file. Non-coordinate lines (HEADER,
+    # TITLE, REMARK, CRYST1, etc.) flow through verbatim.
+    altloc_dropped = 0
     with open(output_pdb, "w") as fh:
         for line in all_lines:
             if line.startswith(("ATOM", "HETATM")):
-                chain = line[21]
+                chain = line[21] if len(line) > 21 else " "
                 if chain != target_chain:
                     continue
-                try:
-                    resseq = int(line[22:26])
-                except ValueError:
+                parsed = _parse_atom(line)
+                if parsed is None:
                     continue
-                icode = line[26]
-                key = (chain, resseq, icode)
-                if key not in keep:
+                atom_name, altloc, resseq, icode, _coord, _occ = parsed
+                res_key = (chain, resseq, icode)
+                if res_key not in keep:
                     continue
+                winner_key = (chain, resseq, icode, atom_name)
+                cur_alt, _ = altloc_winner.get(winner_key, (" ", 0.0))
+                if altloc != cur_alt:
+                    altloc_dropped += 1
+                    continue
+                # Blank the altloc column on output.
+                if len(line) > 17:
+                    line = line[:16] + " " + line[17:]
             fh.write(line)
 
     stats = {
         "kept": len(keep),
         "dropped_missing_bb": dropped_reasons["missing_bb"],
         "dropped_zero_bb": dropped_reasons["zero_bb"],
+        "altloc_records_dropped": altloc_dropped,
         "other_chains_discarded": sorted(other_chains),
     }
     logger.info("PDB preprocessing: %s", json.dumps(stats))
@@ -444,6 +495,47 @@ def post_webhook(
     except Exception as exc:
         logger.error("Webhook POST failed: %s", exc)
         _record_webhook_outcome(False, f"{type(exc).__name__}: {exc}")
+
+
+def _classify_rfdiffusion_error(raw_message: str, preprocess_stats: dict) -> str:
+    """Convert a raw RFdiffusion exit-1 dump into a user-actionable message.
+
+    The most common deterministic failure on user-uploaded targets is the
+    "Non-positive determinant" crash in ``scipy.spatial.transform.Rotation``:
+    a degenerate (all-zeros) rotation frame is produced mid-denoise, which
+    almost always means the target geometry the model received was internally
+    inconsistent — usually because the input PDB contained alternate
+    conformations the upstream cleanup pass missed, or backbone breaks near
+    a hotspot. Surface that as plain English so the user can act on it
+    instead of pasting the ANSI-coloured stack trace into a support email.
+    """
+    msg = raw_message or ""
+    if "Non-positive determinant" in msg or "rotation matrix" in msg:
+        bits = [
+            "RFdiffusion produced a degenerate frame mid-denoise on your target. "
+            "This is almost always an input-geometry problem rather than a model issue.",
+            "Likely causes (in order of frequency):",
+            "  1. The target PDB contains alternate side-chain conformations (altloc A/B/C). "
+            "Try re-running with the AlphaFold-predicted version of the same protein, or "
+            "rebuild the target with a single conformation.",
+            "  2. Chain breaks or missing backbone atoms (N, CA, C, O) inside or near the "
+            "hotspot region. Re-clean the target PDB so every residue in the epitope "
+            "neighbourhood has a complete backbone.",
+            "  3. Hotspot residue numbers that point at a non-protein atom (HETATM, ligand, "
+            "ion). Confirm the hotspots use the original PDB author numbering and resolve "
+            "to standard amino acids on the target chain.",
+        ]
+        if preprocess_stats:
+            kept = preprocess_stats.get("kept", "?")
+            dropped_bb = preprocess_stats.get("dropped_missing_bb", 0)
+            dropped_alt = preprocess_stats.get("altloc_records_dropped", 0)
+            bits.append(
+                f"Pre-flight cleanup kept {kept} residue(s); dropped "
+                f"{dropped_bb} for missing backbone and "
+                f"{dropped_alt} alt-conformation atom record(s)."
+            )
+        return "\n".join(bits)
+    return f"RFdiffusion failed: {msg}"
 
 
 def _safe_float(value: str, default: float) -> float:
@@ -1284,7 +1376,7 @@ def main():
         except RuntimeError as exc:
             logger.error("RFdiffusion failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"RFdiffusion failed: {exc}",
+                "error": _classify_rfdiffusion_error(str(exc), preprocess_stats),
             })
             return
 

@@ -77,6 +77,9 @@ class PipelineNormalizationReport:
         indices into the cleaned coordinate space.
     models_collapsed
         True if input was multi-model and we kept only one model.
+    altloc_records_collapsed
+        Count of alternate-conformation atom records dropped (e.g. atoms
+        with altloc 'B' or 'C' that lost to a higher-occupancy 'A').
     """
     output_path: str
     changes: list = field(default_factory=list)
@@ -86,21 +89,34 @@ class PipelineNormalizationReport:
     residues_dropped_per_chain: dict = field(default_factory=dict)
     renumber_map: dict = field(default_factory=dict)
     models_collapsed: bool = False
+    altloc_records_collapsed: int = 0
 
 
 class _PipelineSelect(Select):
-    """Biopython PDBIO selector implementing the per-tool cleanup contract."""
+    """Biopython PDBIO selector implementing the per-tool cleanup contract.
+
+    ``keep_atoms`` is the per-atom altloc allowlist computed by
+    ``_pick_altloc_per_residue``: ``(chain_id, resnum, icode, atom_name) ->
+    chosen_altloc``. When an atom's altloc differs from the chosen one for
+    that name, ``accept_atom`` drops it. This is what collapses multi-altloc
+    crystal structures (e.g. 3IUT, 3KKU) down to a single-conformation PDB
+    before RFdiffusion's frame builder sees them — without it, downstream
+    tools encounter two CA records per residue and produce degenerate
+    rotation frames.
+    """
 
     def __init__(
         self,
         *,
         keep_chains: set,
         keep_residues: dict,
+        keep_atoms: dict,
         keep_hydrogens: bool,
         first_model_id,
     ):
         self.keep_chains = keep_chains
         self.keep_residues = keep_residues
+        self.keep_atoms = keep_atoms
         self.keep_hydrogens = keep_hydrogens
         self.first_model_id = first_model_id
 
@@ -118,7 +134,53 @@ class _PipelineSelect(Select):
     def accept_atom(self, atom):
         if not self.keep_hydrogens and atom.element == "H":
             return False
-        return True
+        residue = atom.get_parent()
+        chain_id = residue.get_parent().get_id()
+        _, resnum, icode = residue.get_id()
+        atom_name = atom.get_name().strip()
+        chosen = self.keep_atoms.get((chain_id, resnum, icode, atom_name))
+        if chosen is None:
+            return True
+        atom_altloc = atom.get_altloc() or " "
+        return atom_altloc == chosen
+
+
+def _pick_altloc_per_residue(residue) -> tuple[dict, int]:
+    """For each atom name in this residue, pick which altloc to keep.
+
+    Returns ``(chosen, collapsed_count)`` where ``chosen`` maps
+    ``atom_name -> altloc_str`` and ``collapsed_count`` is the number of
+    alternate-conformation atom records that lose to a higher-occupancy
+    sibling (i.e. the records ``accept_atom`` will drop).
+
+    Tie-breaker: an atom-record with no altloc (``' '``) always wins;
+    otherwise the highest occupancy wins; otherwise alphabetical altloc.
+    This matches the convention "no altloc" = single conformation, which
+    is more trustworthy than any specific altloc letter.
+    """
+    by_name: dict = {}  # atom_name -> list[(altloc, occupancy)]
+    for atom in residue.get_unpacked_list():
+        name = atom.get_name().strip()
+        alt = atom.get_altloc() or " "
+        try:
+            occ = float(atom.get_occupancy())
+        except (TypeError, ValueError):
+            occ = 0.0
+        by_name.setdefault(name, []).append((alt, occ))
+
+    chosen: dict = {}
+    collapsed = 0
+    for name, entries in by_name.items():
+        # Prefer altloc ' ' (single conformation) over any letter.
+        blanks = [e for e in entries if e[0] == " "]
+        if blanks:
+            chosen[name] = " "
+        else:
+            # Highest occupancy wins; ties broken alphabetically.
+            entries_sorted = sorted(entries, key=lambda e: (-e[1], e[0]))
+            chosen[name] = entries_sorted[0][0]
+        collapsed += len(entries) - 1
+    return chosen, collapsed
 
 
 # -- Public entry points ------------------------------------------------------
@@ -228,9 +290,11 @@ def normalize_for_pipeline(
     keep_chains: set = set()
     drop_chain_reasons: dict = {}
     keep_residues: dict = {}  # (chain_id, resnum) -> True
+    keep_atoms: dict = {}     # (chain_id, resnum, icode, atom_name) -> chosen_altloc
     dropped_per_chain: dict = {}
     kept_per_chain: dict = {}
     renumber_map: dict = {}
+    total_altloc_collapsed = 0
 
     for chain in target_model:
         chain_id = chain.get_id()
@@ -243,7 +307,7 @@ def normalize_for_pipeline(
         first_resname_seen = None
 
         for residue in chain:
-            hetflag, resnum, _icode = residue.get_id()
+            hetflag, resnum, icode = residue.get_id()
             resname = residue.get_resname().strip()
             if first_resname_seen is None:
                 first_resname_seen = resname
@@ -265,13 +329,26 @@ def normalize_for_pipeline(
                 dropped_count += 1
                 continue
 
-            # Backbone integrity
+            # Per-atom-name altloc choice. Built unconditionally so multi-
+            # altloc crystal structures get collapsed in the output even
+            # when the caller passes drop_zero_backbone=False.
+            per_atom_altloc, collapsed_here = _pick_altloc_per_residue(residue)
+
+            # Backbone integrity. Use the per-atom-name chosen altloc so
+            # the check sees exactly the records that will survive the write
+            # (otherwise a residue whose only complete backbone is split
+            # across altloc A and altloc B atoms would falsely pass the
+            # "4 backbone atoms present" gate while the writer kept only
+            # one altloc per name).
             if drop_zero_backbone:
                 bb_atoms = {}
-                for atom in residue:
+                for atom in residue.get_unpacked_list():
                     aname = atom.get_name().strip()
-                    if aname in BACKBONE_ATOMS:
-                        bb_atoms[aname] = atom
+                    if aname not in BACKBONE_ATOMS:
+                        continue
+                    if (atom.get_altloc() or " ") != per_atom_altloc.get(aname, " "):
+                        continue
+                    bb_atoms[aname] = atom
                 if len(bb_atoms) < 4:
                     dropped_count += 1
                     continue
@@ -286,6 +363,9 @@ def normalize_for_pipeline(
                     continue
 
             keep_residues[(chain_id, resnum)] = True
+            for aname, alt in per_atom_altloc.items():
+                keep_atoms[(chain_id, resnum, icode, aname)] = alt
+            total_altloc_collapsed += collapsed_here
             kept_count += 1
 
         if kept_count == 0:
@@ -317,6 +397,7 @@ def normalize_for_pipeline(
     ]
     report.residues_kept_per_chain = kept_per_chain
     report.residues_dropped_per_chain = dropped_per_chain
+    report.altloc_records_collapsed = total_altloc_collapsed
     if drop_chain_reasons:
         dropped_summary = ", ".join(report.chains_dropped)
         report.changes.append(f"Dropped chain(s): {dropped_summary}")
@@ -326,11 +407,17 @@ def normalize_for_pipeline(
             f"Dropped {total_dropped} residue(s) (waters, HETATM, "
             f"non-standard, or bad-backbone)"
         )
+    if total_altloc_collapsed:
+        report.changes.append(
+            f"Collapsed {total_altloc_collapsed} alternate-conformation "
+            f"atom record(s) (kept highest-occupancy altloc per atom)"
+        )
 
     # --- Write a first pass with original numbering --------------------------
     selector = _PipelineSelect(
         keep_chains=keep_chains,
         keep_residues=keep_residues,
+        keep_atoms=keep_atoms,
         keep_hydrogens=keep_hydrogens,
         first_model_id=target_model_id,
     )
@@ -370,8 +457,40 @@ def normalize_for_pipeline(
             f"(across {len(report.chains_kept)} chain(s))"
         )
 
+    # Blank altloc column on the output. _PipelineSelect already filtered
+    # multi-altloc records down to one per atom name, so each surviving
+    # atom is unambiguous and the altloc letter is superfluous. Some
+    # downstream parsers (rfantibody's RFdiffusion fork in particular) can
+    # build degenerate rotation frames from any leftover altloc disagreement,
+    # so we strip the letter entirely.
+    if total_altloc_collapsed:
+        _blank_altloc_column(output_path)
+
     report.renumber_map = renumber_map
     return report
+
+
+def _blank_altloc_column(path: str) -> None:
+    """Rewrite ``path`` clearing the altloc column (index 16) of every
+    ATOM/HETATM record. Safe on already-blank files (no-op for those lines)
+    and on files with mixed line endings.
+    """
+    with open(path, "rb") as fh:
+        data = fh.read()
+    out_chunks: list = []
+    start = 0
+    n = len(data)
+    while start < n:
+        end = data.find(b"\n", start)
+        if end == -1:
+            end = n - 1
+        line = data[start:end + 1]
+        if line.startswith((b"ATOM", b"HETATM")) and len(line) > 17:
+            line = line[:16] + b" " + line[17:]
+        out_chunks.append(line)
+        start = end + 1
+    with open(path, "wb") as fh:
+        fh.write(b"".join(out_chunks))
 
 
 # -- Per-tool presets ---------------------------------------------------------
