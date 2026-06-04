@@ -37,12 +37,20 @@ async def process_pending_deletions(ctx: dict | None = None) -> int:
     # WR-06 (10-REVIEW): parameterized interval pattern instead of f-string
     # interpolation. Uniform with retention_cron.py — user-supplied or module
     # constants route through proper asyncpg parameter binding.
+    #
+    # Phase 12 cutover: stripe_customer_id moved from public.users to
+    # public.organizations. Each user's personal org holds the billing
+    # customer that was previously on the user row, so we JOIN through
+    # organization_memberships → organizations WHERE is_personal=true.
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, email, stripe_customer_id
-               FROM public.users
-               WHERE deletion_requested_at IS NOT NULL
-                 AND deletion_requested_at < NOW() - ($1 || ' days')::interval""",
+            """SELECT u.id, u.email, o.stripe_customer_id
+               FROM public.users u
+               LEFT JOIN public.organization_memberships om ON om.user_id = u.id
+               LEFT JOIN public.organizations o
+                 ON o.id = om.organization_id AND o.is_personal = true
+               WHERE u.deletion_requested_at IS NOT NULL
+                 AND u.deletion_requested_at < NOW() - ($1 || ' days')::interval""",
             str(GRACE_PERIOD_DAYS),
         )
     if not rows:
