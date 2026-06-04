@@ -40,6 +40,9 @@ export interface InvitationRow {
   expires_at: string;
   accepted_at: string | null;
   revoked_at: string | null;
+  /** Bearer token for the accept URL. Only populated for owners; null for
+   * scientists/viewers per Plan 12-06 bug-fix. */
+  token: string | null;
 }
 
 export type InvitationInvalidReason =
@@ -132,12 +135,16 @@ export async function transferOwnership(
 // Invitation endpoints
 // ---------------------------------------------------------------------------
 
-/** POST /organizations/{id}/invitations — invite a new member by email. */
+/** POST /organizations/{id}/invitations — invite a new member by email.
+ *
+ * Returns the bearer ``token`` so the owner can build a copy-link without a
+ * second round-trip. Only the POST + the owner-only list endpoint return the
+ * token; non-owner reads see ``token: null``. */
 export async function inviteMember(
   orgId: string,
   email: string,
   role: OrgRole,
-): Promise<{ id: string }> {
+): Promise<{ id: string; token: string }> {
   return api(`/organizations/${orgId}/invitations`, {
     method: "POST",
     body: { email, role },

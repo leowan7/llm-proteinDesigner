@@ -62,7 +62,17 @@ export function InvitationsTab({ orgId }: InvitationsTabProps) {
   }
 
   async function handleCopyLink(invite: InvitationRow) {
-    const url = `${window.location.origin}/invitations/accept?token=${encodeURIComponent(invite.id)}`;
+    // The accept URL uses the bearer ``token`` from the invitation row, not
+    // the row UUID — the backend looks up by ``WHERE token = $1`` (Plan 12-06
+    // bug-fix). Only owners see the token; if it's null (older response or
+    // permission gap) the action surfaces an explanatory error.
+    if (!invite.token) {
+      setActionError(
+        "Copy-link is unavailable for this invitation. Resend the invite to generate a fresh link.",
+      );
+      return;
+    }
+    const url = `${window.location.origin}/invitations/accept?token=${encodeURIComponent(invite.token)}`;
     try {
       await navigator.clipboard.writeText(url);
       setCopiedId(invite.id);
