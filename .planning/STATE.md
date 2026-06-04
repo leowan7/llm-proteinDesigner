@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In Progress
-stopped_at: Phase 12 Plan 03 complete
-last_updated: "2026-06-04T11:05:28.000Z"
+stopped_at: Phase 12 Plan 04 complete
+last_updated: "2026-06-04T11:19:33.000Z"
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 61
-  completed_plans: 58
-  percent: 95
+  completed_plans: 59
+  percent: 97
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 12
-Plan: 12-04 (Wave 2 parallel — Stripe metadata stamping one-shot script). 12-01 + 12-02 + 12-03 complete; remaining plans 12-04 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
+Plan: 12-05 (Wave 2 parallel — frontend org-switcher + members/invitations UI + X-Org-Id header injection). 12-01 + 12-02 + 12-03 + 12-04 complete; remaining plans 12-05 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
 
 ## Performance Metrics
 
@@ -65,6 +65,7 @@ Plan: 12-04 (Wave 2 parallel — Stripe metadata stamping one-shot script). 12-0
 | Phase 12-teams-and-organizations P01 | 5min | 2 tasks | 6 files |
 | Phase 12-teams-and-organizations P02 | 13min | 2 tasks | 16 files |
 | Phase 12-teams-and-organizations P03 | 19min | 2 tasks | 20 files |
+| Phase 12-teams-and-organizations P04 | 6min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -131,6 +132,10 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: Full-design pilot eligibility flipped from user_id-scoped to organization_id-scoped — any org-completed pilot qualifies any org member, matches org-shared-jobs design
 - [Phase 12-teams-and-organizations]: Download endpoint reads user_id from the job row for the S3 prefix (immutable storage path) but gates access by org_id — separates audit trail from access control
 - [Phase 12-teams-and-organizations]: Single-tenant existing tests still pass under cutover via app.dependency_overrides[get_active_org] = (org_id, role) tuple — feature flag only governs main.py mount, but the routers themselves now unconditionally depend on get_active_org
+- [Phase 12-teams-and-organizations]: Stamp script idempotency check is keyed only on metadata.organization_id, not the full 4-key payload — kendrew_org_name and migrated_from_user_v1 can legitimately drift between runs (renames, re-runs on different dates); organization_id is the ground truth
+- [Phase 12-teams-and-organizations]: stamp_stripe_org_metadata.py never creates Stripe customers — only stamps metadata on existing ones; net-new team orgs lazily create their first customer via billing/stripe_client.get_or_create_customer on first billing interaction
+- [Phase 12-teams-and-organizations]: Stamp/verify scripts use single-line SQL strings (not Python implicit-concatenation) so acceptance-criteria substring greps match the literal SELECT phrase
+- [Phase 12-teams-and-organizations]: --test-mode is the live/test guard — uses a separately-named STRIPE_TEST_SECRET_KEY env var instead of STRIPE_SECRET_KEY so an operator cannot accidentally hit live Stripe by misreading the help text
 
 ### Pending Todos
 
@@ -144,6 +149,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T11:05:28.000Z
-Stopped at: Completed 12-03-PLAN.md (Wave 2 backend cutover to org-scope)
-Resume file: .planning/phases/12-teams-and-organizations/12-04-PLAN.md
+Last session: 2026-06-04T11:19:33.000Z
+Stopped at: Completed 12-04-PLAN.md (Wave 2 Stripe metadata stamping one-shot script + verifier + 11 mocked-Stripe tests)
+Resume file: .planning/phases/12-teams-and-organizations/12-05-PLAN.md
