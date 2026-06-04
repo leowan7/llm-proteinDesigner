@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: In Progress
-stopped_at: Phase 12 complete (deployment gated by docs/runbook-phase-12-rollout.md)
-last_updated: "2026-06-04T12:05:00.000Z"
+status: Phase 12 verified — ready to plan Phase 13
+stopped_at: Phase 12 verified (passed 33/33 must_haves; production cutover gated by docs/runbook-phase-12-rollout.md)
+last_updated: "2026-06-04T12:30:00.000Z"
 progress:
   total_phases: 13
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 61
   completed_plans: 61
   percent: 100
@@ -20,12 +20,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 12 — teams-and-organizations
+**Current focus:** Phase 13 — public API (next milestone work)
 
 ## Current Position
 
-Phase: 12 — COMPLETE (implementation; deployment gated by `docs/runbook-phase-12-rollout.md`)
+Phase: 12 — COMPLETE and VERIFIED (implementation; deployment gated by `docs/runbook-phase-12-rollout.md`)
 Plan: 12-06 (final plan of Phase 12) closed 2026-06-04. All 6 Phase 12 plans complete; ORG-01..ORG-08 marked Validated in REQUIREMENTS.md; Phase 12 entry in ROADMAP.md updated to 6/6 complete.
+Verification: passed 33/33 must_haves after 3 gap-fix follow-up commits (`ee1ff77` deletion_cron + admin/router, `1b7daa0` /health flag, `cf082e7` user/export GDPR path). See `12-VERIFICATION.md` (commit `f7b70bd`).
 
 Next position: Phase 13 (Public API) — first plan TBD.
 

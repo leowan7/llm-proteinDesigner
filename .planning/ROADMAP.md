@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness
  (completed 2026-04-23)
 - [x] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL (completed 2026-06-04)
-- [ ] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer)
+- [x] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer) (implementation complete 2026-06-04; production cutover gated by docs/runbook-phase-12-rollout.md)
 - [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
 
 ## Phase Details
