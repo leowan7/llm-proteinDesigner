@@ -7,6 +7,8 @@
  * 2. Session list state management (lifted from AppSidebar)
  * 3. SidebarProvider + AppSidebar + AppHeader composition
  * 4. Exposes refreshSessions callback to child routes via useOutletContext
+ * 5. Plan 12-05: mounts <OrgProvider> so the X-Org-Id header resolves
+ *    against the user's active org for every request from a logged-in page.
  *
  * Usage in App.tsx:
  * ```tsx
@@ -31,6 +33,7 @@ import { AppSidebar } from "./AppSidebar";
 import { AppHeader } from "./AppHeader";
 import { AppFooter } from "./AppFooter";
 import { ReAcceptanceModal } from "@/components/legal/ReAcceptanceModal";
+import { OrgProvider } from "@/components/org/OrganizationContext";
 import { listSessions } from "@/lib/sessions";
 import { api } from "@/lib/api";
 import { getSettings } from "@/lib/user";
@@ -144,30 +147,32 @@ export function AuthenticatedLayout() {
 
   return (
     <TooltipProvider>
-      <SidebarProvider>
-        <div className="flex h-screen w-full overflow-hidden">
-          <AppSidebar
-            sessions={sessions}
-            sessionsLoading={sessionsLoading}
-            activeSessionId={activeSessionId}
-            onRefresh={refreshSessions}
-          />
-          <main
-            id="main-content"
-            className="flex-1 flex flex-col min-h-screen overflow-hidden"
-          >
-            <AppHeader sessionTitle={sessionTitle} />
-            <div className="flex-1 overflow-auto">
-              <Outlet context={{ refreshSessions } satisfies LayoutContext} />
-            </div>
-            <AppFooter />
-          </main>
-        </div>
-      </SidebarProvider>
-      <ReAcceptanceModal
-        open={reAcceptanceOpen}
-        onAccepted={() => setReAcceptanceOpen(false)}
-      />
+      <OrgProvider>
+        <SidebarProvider>
+          <div className="flex h-screen w-full overflow-hidden">
+            <AppSidebar
+              sessions={sessions}
+              sessionsLoading={sessionsLoading}
+              activeSessionId={activeSessionId}
+              onRefresh={refreshSessions}
+            />
+            <main
+              id="main-content"
+              className="flex-1 flex flex-col min-h-screen overflow-hidden"
+            >
+              <AppHeader sessionTitle={sessionTitle} />
+              <div className="flex-1 overflow-auto">
+                <Outlet context={{ refreshSessions } satisfies LayoutContext} />
+              </div>
+              <AppFooter />
+            </main>
+          </div>
+        </SidebarProvider>
+        <ReAcceptanceModal
+          open={reAcceptanceOpen}
+          onAccepted={() => setReAcceptanceOpen(false)}
+        />
+      </OrgProvider>
     </TooltipProvider>
   );
 }
