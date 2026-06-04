@@ -47,7 +47,9 @@ class TestJobNotifications:
         call_params = mock_send.call_args[0][0]
 
         assert call_params["to"] == ["scientist@example.com"]
-        assert "rfdiffusion" in call_params["subject"]
+        # send_completion_email now title-cases known tool names per project
+        # convention (rfdiffusion -> RFdiffusion); assert the display form.
+        assert "RFdiffusion" in call_params["subject"]
         assert "10" in call_params["subject"]
         assert "job-123" in call_params["html"]
 

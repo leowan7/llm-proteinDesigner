@@ -172,9 +172,13 @@ async def runpod_webhook(request: Request):
     pool = await get_db_pool()
 
     # Resolve the internal job by job UUID (pod webhook sends job_id directly).
+    # Pull `tool` from DB so the completion email can name it correctly --
+    # the container's webhook payload doesn't include job_spec, so reading
+    # tool from payload.output.job_spec.tool always returned "Unknown"
+    # (discovered 2026-06-03 right after SC 6 close-out).
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, user_id, started_at, runpod_job_id FROM public.jobs WHERE id = $1",
+            "SELECT id, user_id, started_at, runpod_job_id, tool FROM public.jobs WHERE id = $1",
             job_id,
         )
 
@@ -183,7 +187,7 @@ async def runpod_webhook(request: Request):
         if pod_id:
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT id, user_id, started_at, runpod_job_id FROM public.jobs WHERE runpod_job_id = $1",
+                    "SELECT id, user_id, started_at, runpod_job_id, tool FROM public.jobs WHERE runpod_job_id = $1",
                     pod_id,
                 )
         if not row:
@@ -313,9 +317,10 @@ async def runpod_webhook(request: Request):
             await send_completion_email(
                 to_email=user_row["email"],
                 job_id=job_id,
-                tool=payload.get("output", {}).get("job_spec", {}).get("tool", "Unknown"),
+                tool=row["tool"] or "Unknown",
                 num_designs=output.get("candidate_count", 0),
                 runtime_min=gpu_seconds // 60,
+                runtime_seconds=gpu_seconds,
             )
         elif internal_status == "failed":
             await send_failure_email(

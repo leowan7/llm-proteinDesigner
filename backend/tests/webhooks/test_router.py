@@ -135,6 +135,7 @@ async def test_webhook_completed_job():
         "user_id": "user-uuid",
         "started_at": STARTED_AT,
         "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
     })
 
     # Conn 2: SELECT status (double-processing guard) — not terminal
@@ -217,6 +218,7 @@ async def test_webhook_failed_job():
         "user_id": "user-uuid",
         "started_at": STARTED_AT,
         "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
     })
 
     conn2 = AsyncMock()
@@ -384,6 +386,7 @@ async def test_webhook_valid_signature():
         "user_id": "user-uuid",
         "started_at": STARTED_AT,
         "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
     })
     conn2 = AsyncMock()
     conn2.fetchrow = AsyncMock(return_value={"status": "running"})
@@ -442,6 +445,7 @@ async def test_webhook_skips_terminal_job():
         "user_id": "user-uuid",
         "started_at": STARTED_AT,
         "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
     })
 
     # Job is already complete

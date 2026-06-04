@@ -63,12 +63,42 @@ async def _send_email_safely(params: "resend.Emails.SendParams", purpose: str) -
         )
 
 
+# Internal tool keys -> user-facing display names per project convention
+# (see backend/agent/system_prompt.py "DESIGN TOOLS" section).
+_TOOL_DISPLAY_NAMES = {
+    "rfdiffusion": "RFdiffusion",
+    "bindcraft": "BindCraft",
+    "rfantibody": "RFantibody",
+    "boltzgen": "BoltzGen",
+    "pxdesign": "PXDesign",
+}
+
+
+def _format_runtime(runtime_seconds: int, runtime_min: int) -> str:
+    """Render runtime in the shortest accurate human unit.
+
+    < 60 s  -> "23 seconds"
+    < 60 min -> "5 minutes" / "1 minute"
+    >= 60 min -> "1 hour 23 minutes" / "2 hours"
+    """
+    if runtime_seconds < 60:
+        return f"{runtime_seconds} second{'' if runtime_seconds == 1 else 's'}"
+    if runtime_min < 60:
+        return f"{runtime_min} minute{'' if runtime_min == 1 else 's'}"
+    hours, mins = divmod(runtime_min, 60)
+    hour_str = f"{hours} hour{'' if hours == 1 else 's'}"
+    if mins == 0:
+        return hour_str
+    return f"{hour_str} {mins} minute{'' if mins == 1 else 's'}"
+
+
 async def send_completion_email(
     to_email: str,
     job_id: str,
     tool: str,
     num_designs: int,
     runtime_min: int,
+    runtime_seconds: int | None = None,
 ) -> None:
     """Send a job completion notification email via Resend.
 
@@ -78,15 +108,29 @@ async def send_completion_email(
         tool: Tool name (e.g. "rfdiffusion") shown in subject and body.
         num_designs: Number of designs generated, shown in subject.
         runtime_min: Approximate runtime in minutes, shown in body.
+        runtime_seconds: Optional sub-minute precision for short runs --
+            when present, "<1 min" runs render as "N seconds" instead of
+            "0 minutes" (added 2026-06-03 after the SC 6 close-out email
+            showed "in 2 minutes" but failed to display tool name).
     """
     job_url = f"{settings.frontend_base_url}/jobs/{job_id}"
+    tool_display = _TOOL_DISPLAY_NAMES.get(tool.lower(), tool)
+    designs_word = "design" if num_designs == 1 else "designs"
+    runtime_str = _format_runtime(
+        runtime_seconds if runtime_seconds is not None else runtime_min * 60,
+        runtime_min,
+    )
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
-        "subject": f"Your {tool} job is complete — {num_designs} designs generated",
+        "subject": (
+            f"Your {tool_display} job is complete — "
+            f"{num_designs} {designs_word} generated"
+        ),
         "html": (
-            f"<p>Your {tool} job completed in {runtime_min} minutes. "
-            f"{num_designs} designs are ready for download.</p>"
+            f"<p>Your {tool_display} job completed in {runtime_str}. "
+            f"{num_designs} {designs_word} {'is' if num_designs == 1 else 'are'} "
+            f"ready for download.</p>"
             f'<p><a href="{job_url}">View results</a></p>'
         ),
     }
