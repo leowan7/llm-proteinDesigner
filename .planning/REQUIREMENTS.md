@@ -49,14 +49,14 @@
 
 ### Organizations (Phase 12)
 
-- [ ] **ORG-01**: User can create an organization and invite team members by email (DB foundation 12-01; router + invites + notifications 12-02; frontend invite UI in 12-05)
-- [ ] **ORG-02**: Organization roles owner / scientist / viewer with documented permission matrix (DB ENUM + RLS helpers 12-01; get_active_org + require_role backend enforcement 12-02; jobs/billing route gating in 12-03)
-- [ ] **ORG-03**: All jobs within an organization are visible to all org members (RLS policies laid in 12-01; jobs router cutover in 12-03)
-- [ ] **ORG-04**: Organization-level billing — one Stripe customer per org (column moved in 12-01; stripe_client cutover in 12-03; metadata stamping in 12-04)
-- [ ] **ORG-05**: Owner can remove members and transfer ownership (last-owner trigger laid in 12-01; transfer + remove endpoints 12-02; frontend members UI 12-05)
-- [ ] **ORG-06**: User can belong to multiple organizations and switch between them (GET /organizations/mine + X-Org-Id resolver 12-02; frontend X-Org-Id wiring in 12-05)
-- [ ] **ORG-07**: Existing single-tenant users migrated without data loss (personal-org backfill in 12-01)
-- [ ] **ORG-08**: Last owner cannot leave an organization (DB-enforced trigger 12-01; route translation 12-02)
+- [x] **ORG-01**: User can create an organization and invite team members by email (DB foundation 12-01; router + invites + notifications 12-02; frontend invite UI in 12-05; E2E coverage 12-06)
+- [x] **ORG-02**: Organization roles owner / scientist / viewer with documented permission matrix (DB ENUM + RLS helpers 12-01; get_active_org + require_role backend enforcement 12-02; jobs/billing route gating in 12-03; E2E owner/non-owner billing gate in 12-06)
+- [x] **ORG-03**: All jobs within an organization are visible to all org members (RLS policies laid in 12-01; jobs router cutover in 12-03; Launched-by column 12-05; E2E cross-user job visibility in 12-06)
+- [x] **ORG-04**: Organization-level billing — one Stripe customer per org (column moved in 12-01; stripe_client cutover in 12-03; metadata stamping in 12-04; drop-column migration + verify gate in 12-06)
+- [x] **ORG-05**: Owner can remove members and transfer ownership (last-owner trigger laid in 12-01; transfer + remove endpoints 12-02; frontend members UI 12-05; E2E transfer flow in 12-06)
+- [x] **ORG-06**: User can belong to multiple organizations and switch between them (GET /organizations/mine + X-Org-Id resolver 12-02; frontend X-Org-Id wiring in 12-05; E2E switcher round-trip in 12-06)
+- [x] **ORG-07**: Existing single-tenant users migrated without data loss (personal-org backfill in 12-01; verified via Plan 12-04 stamp script + drop migration gating in 12-06)
+- [x] **ORG-08**: Last owner cannot leave an organization (DB-enforced trigger 12-01; route translation 12-02; E2E last-owner block in 12-06)
 
 ## v2 Requirements
 
@@ -136,14 +136,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | BILL-02 | Phase 3 | Complete |
 | BILL-03 | Phase 3 | Complete |
 | BILL-04 | Phase 3 | Complete |
-| ORG-01 | Phase 12 | In Progress (DB foundation 12-01; backend routes + invitations 12-02 behind flag) |
-| ORG-02 | Phase 12 | In Progress (DB foundation 12-01; require_role enforcement 12-02 behind flag) |
-| ORG-03 | Phase 12 | In Progress (RLS foundation done 12-01; cutover 12-03) |
-| ORG-04 | Phase 12 | In Progress (Stripe column moved 12-01) |
-| ORG-05 | Phase 12 | In Progress (last-owner trigger 12-01; transfer + remove endpoints 12-02) |
-| ORG-06 | Phase 12 | In Progress (GET /organizations/mine + X-Org-Id resolver 12-02; frontend 12-05) |
-| ORG-07 | Phase 12 | In Progress (backfill done 12-01) |
-| ORG-08 | Phase 12 | In Progress (trigger 12-01; route translation 12-02) |
+| ORG-01 | Phase 12 | Validated (12-01 DB + 12-02 router + invitations + 12-05 UI + 12-06 E2E) |
+| ORG-02 | Phase 12 | Validated (12-01 ENUM+helpers + 12-02 require_role + 12-03 route gating + 12-06 E2E billing gate) |
+| ORG-03 | Phase 12 | Validated (12-01 RLS + 12-03 jobs cutover + 12-05 Launched-by column + 12-06 cross-user E2E) |
+| ORG-04 | Phase 12 | Validated (12-01 column move + 12-03 stripe_client cutover + 12-04 metadata stamp + 12-06 drop-column migration) |
+| ORG-05 | Phase 12 | Validated (12-01 last-owner trigger + 12-02 transfer/remove + 12-05 UI + 12-06 transfer E2E) |
+| ORG-06 | Phase 12 | Validated (12-02 /mine + X-Org-Id resolver + 12-05 frontend wiring + 12-06 switcher E2E) |
+| ORG-07 | Phase 12 | Validated (12-01 backfill + 12-04 Stripe metadata stamp + 12-06 drop-column gating) |
+| ORG-08 | Phase 12 | Validated (12-01 trigger + 12-02 route translation + 12-06 last-owner E2E) |
 | TEST-01 | Phase 9 | Planned |
 | TEST-02 | Phase 9 | Planned |
 | TEST-03 | Phase 9 | Planned |
@@ -153,10 +153,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-07 | Phase 9 | Planned |
 
 **Coverage:**
-- v1 requirements: 24 total (+7 testing, +8 organizations)
+- v1 requirements: 32 total (24 + 8 organizations) plus 7 testing
 - Mapped to phases: 39
 - Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-03-18*
-*Last updated: 2026-06-04 — ORG-01/ORG-02/ORG-05/ORG-06/ORG-08 advanced to "In Progress (backend routes 12-02 behind flag)" per Plan 12-02 close-out*
+*Last updated: 2026-06-04 — ORG-01..ORG-08 marked Validated after Plan 12-06 close-out (E2E spec + drop-column migration + rollout runbook). Phase 12 implementation complete; deployment gated by docs/runbook-phase-12-rollout.md.*
