@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { api } from "@/lib/api";
 import { clearSentryUser } from "@/lib/sentry";
+import { clearActiveOrgOnLogout } from "@/components/org/OrganizationContext";
 
 interface UserInfo {
   user_id: string;
@@ -48,6 +49,9 @@ export function UserMenu() {
       // Clear cookies failed — still redirect
     }
     clearSentryUser();
+    // Plan 12-05: drop the cached active org id so a different user signing
+    // in on the same browser starts with a fresh resolution.
+    clearActiveOrgOnLogout();
     navigate("/login");
   }
 
