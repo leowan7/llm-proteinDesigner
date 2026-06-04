@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: In Progress
-stopped_at: Phase 12 Plan 04 complete
-last_updated: "2026-06-04T11:19:33.000Z"
+stopped_at: Phase 12 Plan 05 complete
+last_updated: "2026-06-04T11:45:00.000Z"
 progress:
   total_phases: 13
   completed_phases: 9
   total_plans: 61
-  completed_plans: 59
-  percent: 97
+  completed_plans: 60
+  percent: 98
 ---
 
 # Project State
@@ -25,7 +25,7 @@ See: .planning/PROJECT.md (updated 2026-03-18)
 ## Current Position
 
 Phase: 12
-Plan: 12-05 (Wave 2 parallel — frontend org-switcher + members/invitations UI + X-Org-Id header injection). 12-01 + 12-02 + 12-03 + 12-04 complete; remaining plans 12-05 → 12-06 in `.planning/phases/12-teams-and-organizations/`.
+Plan: 12-06 (Wave 3 — Playwright E2E spec exercising create-org → invite → accept → run-job → owner views billing; drop deprecated users.stripe_customer_id column; REQUIREMENTS.md ORG-01..ORG-08 traceability update; Phase 12 rollout runbook). 12-01 + 12-02 + 12-03 + 12-04 + 12-05 complete; final plan 12-06 in `.planning/phases/12-teams-and-organizations/`.
 
 ## Performance Metrics
 
@@ -66,6 +66,7 @@ Plan: 12-05 (Wave 2 parallel — frontend org-switcher + members/invitations UI 
 | Phase 12-teams-and-organizations P02 | 13min | 2 tasks | 16 files |
 | Phase 12-teams-and-organizations P03 | 19min | 2 tasks | 20 files |
 | Phase 12-teams-and-organizations P04 | 6min | 2 tasks | 4 files |
+| Phase 12-teams-and-organizations P05 | 24min | 2 tasks | 21 files |
 
 ## Accumulated Context
 
@@ -136,6 +137,10 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: stamp_stripe_org_metadata.py never creates Stripe customers — only stamps metadata on existing ones; net-new team orgs lazily create their first customer via billing/stripe_client.get_or_create_customer on first billing interaction
 - [Phase 12-teams-and-organizations]: Stamp/verify scripts use single-line SQL strings (not Python implicit-concatenation) so acceptance-criteria substring greps match the literal SELECT phrase
 - [Phase 12-teams-and-organizations]: --test-mode is the live/test guard — uses a separately-named STRIPE_TEST_SECRET_KEY env var instead of STRIPE_SECRET_KEY so an operator cannot accidentally hit live Stripe by misreading the help text
+- [Phase 12-teams-and-organizations]: frontend useOrgContext() returns a safe empty fallback ({orgs:[], activeOrg:null, role:null}) when no <OrgProvider> is mounted — single-tenant + Vitest-scaffold compatible (no breaking changes to Plan 09 + Plan 10 specs that render pages without the full layout chain)
+- [Phase 12-teams-and-organizations]: X-Org-Id header opt-out is an explicit list (4 prefix matches + POST /organizations exact match) in api.ts, not an allowlist — minimises blast radius when new routes ship without touching api.ts
+- [Phase 12-teams-and-organizations]: OrganizationSwitcher is hidden whenever orgs.length <= 1 (covers both solo users + single-tenant deployments where the feature flag is off and /organizations/mine returns 404 → orgs=[])
+- [Phase 12-teams-and-organizations]: setActiveOrg writes localStorage BEFORE reload so post-reload OrgProvider.refresh() picks up the new value via resolveActiveOrgId(); AcceptInvitation page additionally pre-seeds localStorage and navigate("/jobs") as a fallback for the public route case where setActiveOrg's no-op fallback would otherwise leave the user staring at "Joined!"
 
 ### Pending Todos
 
@@ -149,6 +154,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T11:19:33.000Z
-Stopped at: Completed 12-04-PLAN.md (Wave 2 Stripe metadata stamping one-shot script + verifier + 11 mocked-Stripe tests)
-Resume file: .planning/phases/12-teams-and-organizations/12-05-PLAN.md
+Last session: 2026-06-04T11:45:00.000Z
+Stopped at: Completed 12-05-PLAN.md (Wave 2 frontend org context + switcher + invitation accept page + members/invitations/settings tabs + owner-gated billing + launched-by column + 4 Vitest specs)
+Resume file: .planning/phases/12-teams-and-organizations/12-06-PLAN.md
