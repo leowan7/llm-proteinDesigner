@@ -1,46 +1,47 @@
 ---
 status: gaps_found
 phase: 12-teams-and-organizations
-verified: 2026-06-04T23:55:00Z
-must_haves_score: 41/43
+verified: 2026-06-04T12:55:00Z
+must_haves_score: 32/33
 requirements: [ORG-01, ORG-02, ORG-03, ORG-04, ORG-05, ORG-06, ORG-07, ORG-08]
 overrides_applied: 0
+re_verification:
+  previous_status: gaps_found
+  previous_score: 31/33
+  previous_head: 136ca329941926dc02104ef2fedc1d3b5bbce070
+  gap_fix_commits:
+    - sha: ee1ff775ae77c17373afd32cd299d2e3aa91a531
+      title: "fix(12-gaps): convert deletion_cron + admin/router stripe_customer_id reads to org JOIN"
+      closes_gap: "Gap 1 (truth 32) — deletion_cron + admin/router users.stripe_customer_id reads"
+    - sha: 1b7daa0d6661624ef3e3c1efc3dfba0a6ff159f0
+      title: "fix(12-gaps): expose organizations_enabled flag in /health payload"
+      closes_gap: "Gap 2 (truth 33) — runbook /health probe"
+  gaps_closed:
+    - "Drop-column migration safe to apply without breaking call sites (deletion_cron + admin/router)"
+    - "Runbook /health verify command works"
+  gaps_remaining:
+    - "Drop-column migration safe to apply without breaking GDPR data-export path"
+  regressions: []
 gaps:
-  - truth: "Drop-column migration (12-06) can be safely applied per the runbook without breaking other code paths"
+  - truth: "Drop-column migration (12-06) does not break the GDPR data-export path (backend/user/export.py)"
     status: failed
-    reason: "deferred-items.md (created by 12-03) explicitly flagged that backend/worker/deletion_cron.py and backend/admin/router.py still read users.stripe_customer_id, and that the migration to organizations.stripe_customer_id was deferred to 12-06. Plan 12-06 did NOT close these items. Codebase still references the deprecated column in both files; the drop-column migration in 20260606000001 will SUCCEED but the next deletion_cron run and any /admin/users list will then raise asyncpg.exceptions.UndefinedColumnError."
+    reason: "Tighter audit after the Gap 1 fix surfaced a third caller of `SELECT ... stripe_customer_id FROM public.users` that the original VERIFICATION (commit 136ca32) missed: `backend/user/export.py:107-114` reads stripe_customer_id as part of the GDPR profile dump. This path runs whenever a user POSTs /user/data-export and is dispatched via FastAPI BackgroundTask from `request_data_export` (user/router.py:389). The drop migration in `20260606000001` will succeed at the SQL level but the next data-export request will raise asyncpg.exceptions.UndefinedColumnError inside the background task — the request returns 202 before the failure surfaces, so the WR-08 sentinel-stamp branch (export.py:73-82) will mark the export as 'failed' to the user without operator-visible context."
     artifacts:
-      - path: "backend/worker/deletion_cron.py"
-        issue: "Lines 42-58 SELECT stripe_customer_id FROM public.users; execute_hard_delete receives the value to clean up the Stripe customer on GDPR hard-delete. Drop migration removes the column without migrating this caller."
-      - path: "backend/admin/router.py"
-        issue: "Lines 108, 117, 129, 137, 151 reference u.stripe_customer_id in the user-list query and GROUP BY; payment_status field derives from it. Drop migration breaks the admin users list."
-      - path: ".planning/phases/12-teams-and-organizations/deferred-items.md"
-        issue: "Documents both call sites + the planned migration path (read through organization_memberships -> personal org's organizations.stripe_customer_id) but 12-06 left both call sites untouched."
+      - path: "backend/user/export.py"
+        issue: "Line 111: `SELECT id, email, display_name, ... notification_preferences, stripe_customer_id FROM public.users WHERE id = $1`. Same shape as the two queries closed by `ee1ff77`, missed by the original gap audit. Wave 1 still populates the column, so the query works today; runbook step 9 (DROP COLUMN) makes it fail."
     missing:
-      - "Rewrite backend/worker/deletion_cron.py:42-58 to JOIN through organization_memberships (role='owner') to organizations.stripe_customer_id for personal orgs"
-      - "Rewrite backend/admin/router.py:108-151 same way (JOIN to personal org's organizations.stripe_customer_id; collapse payment_status derivation)"
-      - "Add a regression test that asserts deletion_cron processes a soft-deleted user with a stamped personal-org Stripe customer"
-      - "Either remove deferred-items.md (now stale) or add a note marking the two items as still-open"
-  - truth: "Runbook Step 1 verify command (curl /health | jq .organizations_enabled) succeeds against the actual /health endpoint"
-    status: failed
-    reason: "docs/runbook-phase-12-rollout.md step 1 expects /health to return an organizations_enabled field, but backend/main.py:146-175 health() returns only {api, db, redis} status keys. The verify command will produce 'null' for both flag-off and flag-on backends. Operator may misread this as the flag being off when in reality the field simply does not exist."
-    artifacts:
-      - path: "backend/main.py"
-        issue: "Lines 146-175 health() returns {api, db, redis} without organizations_enabled"
-      - path: "docs/runbook-phase-12-rollout.md"
-        issue: "Steps 1 + 5 verify commands assume a field that does not exist"
-    missing:
-      - "Either add organizations_enabled to the /health JSON response (one line: checks['organizations_enabled'] = settings.organizations_enabled), OR"
-      - "Update runbook step 1 + step 5 verify to probe a route that does exist (e.g. curl /organizations/mine -- 404 == flag off, 200/401 == flag on)"
+      - "Rewrite backend/user/export.py:107-114 to JOIN through `organization_memberships` → `organizations WHERE is_personal=true` (same pattern as the deletion_cron + admin/router fix in `ee1ff77`)"
+      - "Add a regression test under tests/user/ that proves the export query no longer references users.stripe_customer_id (or use an integration test against a schema where the column has been dropped)"
+      - "Optional: add a CI grep guard `! rg -n 'stripe_customer_id\\s+FROM\\s+public\\.users' backend/` so a future regression cannot be introduced before the runbook step 9 lands"
 deferred: []
 ---
 
 # Phase 12: Teams & Organizations — Verification Report
 
 **Phase Goal:** Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer). Biopharma teams can use the platform under a shared organization with centralized billing.
-**Verified:** 2026-06-04 (post Plan 12-06 close-out)
+**Verified:** 2026-06-04 (re-verification after gap-closure commits `ee1ff77` + `1b7daa0`)
 **Status:** gaps_found
-**Re-verification:** No — initial verification
+**Re-verification:** Yes — second pass after Gap 1 + Gap 2 fix attempts
 
 ## Goal Achievement
 
@@ -54,12 +55,16 @@ The phase delivers the **architectural and code foundation** for multi-tenancy e
 - Stripe billing reads from the org (`backend/billing/stripe_client.py` line 49 reads `organizations.stripe_customer_id`).
 - RBAC is enforced (`backend/auth/org_dependencies.py` `require_role(*allowed)` + DB-level `protect_last_owner_trigger` and `jobs_org_members` / `jobs_write_active` / `jobs_update_active` RLS policies).
 
-**However, the phase is gated on a runbook-driven production rollout**, and TWO real issues will surface when that rollout reaches the drop-column step:
+**Gap-closure pass on the prior `gaps_found` verdict (commits `ee1ff77` + `1b7daa0`):**
 
-1. `deletion_cron.py` and `admin/router.py` still read `users.stripe_customer_id`. The drop migration will break both. The 12-03 `deferred-items.md` flagged this for 12-06 but 12-06 did not close it.
-2. The runbook's `/health` probe references an `organizations_enabled` field that the endpoint does not expose.
+1. ✓ **Gap 1 closed** — `deletion_cron.py:46-54` + `admin/router.py:107-153` both now `LEFT JOIN public.organization_memberships ... LEFT JOIN public.organizations ON ... AND o.is_personal = true` and read `o.stripe_customer_id`. The asyncpg row alias preserves the top-level `stripe_customer_id` key so the dependent code in both files (and their test mocks) keeps working without change.
+2. ✓ **Gap 2 closed** — `backend/main.py:178` adds `organizations_enabled: settings.organizations_enabled` to the `/health` payload. The healthy verdict at line 173 is computed from the inner `checks` dict BEFORE the flag is merged in, so the bool flag does not poison the `all(v == "ok")` check. Runbook step 1 + step 5 probes now resolve to a real boolean field.
 
-Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both prevent the runbook from running cleanly end-to-end as written. They are pre-deployment correctness issues.
+**New finding from the re-verification audit (NOT a regression — a missed item from the original audit):**
+
+3. ✗ **`backend/user/export.py:107-114` still reads `stripe_customer_id FROM public.users`** as part of the GDPR profile dump. Structurally identical to the two queries closed by `ee1ff77` and will break in the same way after runbook step 9 (DROP COLUMN). This path was not flagged in the original VERIFICATION.md (commit 136ca32) or in `.planning/phases/12-teams-and-organizations/deferred-items.md`. It runs via FastAPI BackgroundTask from `POST /user/data-export` (user/router.py:389), so the request returns 202 immediately and the failure surfaces only as a `last_export_expires_at` sentinel-stamp (export.py:73-82) on the user row. From the operator's perspective: a silent post-drop break of the GDPR Article 20 path.
+
+Neither the closed nor the new gap blocks the **code-complete** judgment of Phase 12 in the repo, and none block the merge of Phase 12 code to master — the feature flag is off by default and the drop-column migration is gated by runbook step 9. But the new finding must be resolved before the runbook is followed in production.
 
 ## Observable Truths
 
@@ -96,10 +101,11 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | 29 | Settings feature flag organizations_enabled gates orgs_router mount | VERIFIED | `backend/main.py:129-135` `if settings.organizations_enabled: include_router(orgs_router, invitations_router)` |
 | 30 | candidates_org RLS policy scopes through jobs.organization_id | VERIFIED | `migrations/20260605000001_organizations.sql:277-283` |
 | 31 | Drop-column gating chain: backend cutover -> stamp -> verify -> 24h watch | VERIFIED | `docs/runbook-phase-12-rollout.md:9-201` 9-step ordered runbook + rollback table |
-| 32 | Drop-column migration safe to apply without breaking call sites | FAILED | deletion_cron.py:42-58 + admin/router.py:108-151 still read users.stripe_customer_id; deferred-items.md flagged this for 12-06 but 12-06 did not close it. See gaps.0. |
-| 33 | Runbook /health verify command works | FAILED | backend/main.py:146-175 returns {api, db, redis} only; runbook step 1+5 jq .organizations_enabled returns null. See gaps.1. |
+| 32 | Drop-column migration safe to apply without breaking call sites (deletion_cron + admin/router) | VERIFIED (via `ee1ff77`) | deletion_cron.py:46-54 + admin/router.py:107-153 now both JOIN through organization_memberships → organizations WHERE is_personal=true; `o.stripe_customer_id` alias preserves top-level dict key; Leo-confirmed 4/4 deletion_cron + 21/21 admin/router tests pass. **Note:** the truth statement was originally scoped only to these two callers; see new gap (truth 33b below) for a third caller surfaced in this audit. |
+| 33 | Runbook /health verify command works | VERIFIED (via `1b7daa0`) | `backend/main.py:178` `payload = {**checks, "organizations_enabled": settings.organizations_enabled}`; `healthy` verdict computed at line 173 BEFORE the flag is merged, so it does not poison the all(v == "ok") check; runbook step 1+5 probes now resolve to a real bool. |
+| 33b | Drop-column migration does not break the GDPR data-export path (user/export.py) | FAILED | NEW gap surfaced in this re-verification audit. `backend/user/export.py:107-114` still reads `SELECT ... stripe_customer_id FROM public.users WHERE id = $1`. Same shape as the two queries closed by `ee1ff77`. Triggered by POST /user/data-export → BackgroundTask. Drop migration breaks it. See gaps[0]. |
 
-**Score:** 31/33 truths verified (94%). 2 truths failed; both relate to the runbook's terminal step (drop column) and one of the verify probes.
+**Score:** 32/33 truths verified (97%). The two previously-failed truths (32 + 33) are now VERIFIED via the gap-fix commits; one new truth (33b) was added and FAILED in this re-verification pass, surfacing a third caller of the deprecated column that the original audit missed.
 
 ## Required Artifacts
 
@@ -115,6 +121,10 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | `backend/auth/org_dependencies.py` | get_active_org + require_role factory | VERIFIED | 93 lines; X-Org-Id header dep + membership cross-check + 400/403 contract |
 | `backend/scripts/stamp_stripe_org_metadata.py` | One-shot stamper with --dry-run + --test-mode; idempotent | VERIFIED | 226 lines with full CLI + JSONL output + retry loop |
 | `backend/scripts/verify_stripe_org_metadata.py` | Verifier with exit-code contract | VERIFIED | 110 lines |
+| `backend/worker/deletion_cron.py` | Phase 12 cutover: read stripe_customer_id via personal-org JOIN, not users column | VERIFIED (via `ee1ff77`) | Lines 41-54 contain the cutover comment + 3-table LEFT JOIN; line 64 uses `dict(row).get("stripe_customer_id")` for NULL safety; the row key still arrives as `stripe_customer_id` due to the alias |
+| `backend/admin/router.py` | Phase 12 cutover: derive payment_status via personal-org JOIN, not users column | VERIFIED (via `ee1ff77`) | Lines 100-153 cover both keyset and non-keyset SELECT paths with identical 3-table LEFT JOIN; line 162 `payment_status: "active" if r["stripe_customer_id"] else "none"` still works because the alias preserves the top-level key |
+| `backend/main.py` | Phase 12: /health exposes organizations_enabled informational field | VERIFIED (via `1b7daa0`) | Lines 175-178 add the flag to the payload after the healthy verdict is computed |
+| `backend/user/export.py` | Phase 12 cutover: GDPR export must read stripe_customer_id via personal-org JOIN | FAILED | Line 111 still reads stripe_customer_id directly from public.users. NOT closed by `ee1ff77` (commit scope was deletion_cron + admin/router only). See gaps[0]. |
 | `frontend/src/lib/organizations.ts` | 13 typed API wrappers + types incl. token field | VERIFIED | 189 lines; InvitationRow.token: string\|null at line 45; inviteMember returns {id, token} at line 147 |
 | `frontend/src/lib/api.ts` | X-Org-Id header injection with opt-out list | VERIFIED | line 16 storage key; lines 29-34 opt-out; lines 56-72 shouldSendOrgHeader; lines 176-181 header injection |
 | `frontend/src/components/org/OrganizationContext.tsx` | useOrgContext provider + localStorage + reload-on-switch | VERIFIED | 205 lines |
@@ -123,7 +133,7 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | `frontend/src/components/org/InvitationsTab.tsx` | Pending invitations table + copy-link via token | VERIFIED | 184 lines |
 | `frontend/src/components/org/OrgSettingsTab.tsx` | Rename + delete (typed-confirmation) | VERIFIED | 199 lines |
 | `frontend/e2e/organizations.spec.ts` | 12-test serialized Playwright spec | VERIFIED | 436 lines; test.describe.serial at line 139; 12 test() declarations |
-| `docs/runbook-phase-12-rollout.md` | 9-step rollout + rollback table + decisive gate | VERIFIED | 247 lines; 9 steps + rollback table + decisive gate callout |
+| `docs/runbook-phase-12-rollout.md` | 9-step rollout + rollback table + decisive gate | VERIFIED | 247 lines; 9 steps + rollback table + decisive gate callout; `/health \| jq .organizations_enabled` probes at lines 34 + 116 now resolve to a real field |
 | Wave 0 test scaffolds (`tests/organizations/conftest.py` + 3 integration tests) | Factories + invariant tests | VERIFIED | conftest 117 lines with all 3 factories; 3 integration tests with required test function names |
 | 8 unit-test files under `tests/organizations/` per Plan 12-02 | Comprehensive RBAC + dependency + endpoint coverage | VERIFIED | 11 files (8 from 12-02 + 2 from 12-03 + conftest); 71 tests collect cleanly |
 
@@ -141,6 +151,10 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | signup -> personal org bootstrap | organizations + memberships | INSERT in single transaction | WIRED | auth/router.py:149-178 |
 | transfer_ownership endpoint | promote-then-demote atomic | service.transfer_ownership single tx | WIRED | router.py:324-344 delegates; service.py contains logic |
 | drop-column migration | runbook step 9 gate | 4-condition gating comment in migration header + runbook callout | WIRED | migration header documents all 4 prerequisites; runbook step 9 enforces; rollback table covers premature application |
+| deletion_cron.py | organizations.stripe_customer_id (personal org) | LEFT JOIN via organization_memberships | WIRED (via `ee1ff77`) | lines 46-54 chain `users u → organization_memberships om → organizations o` filtered by `o.is_personal = true` |
+| admin/router.py list_users | organizations.stripe_customer_id (personal org) | LEFT JOIN via organization_memberships | WIRED (via `ee1ff77`) | both keyset + non-keyset paths chain through the same 3-table LEFT JOIN |
+| /health endpoint | settings.organizations_enabled | top-level payload field | WIRED (via `1b7daa0`) | main.py:178 `payload = {**checks, "organizations_enabled": settings.organizations_enabled}`; healthy verdict computed on inner checks dict only |
+| user/export.py | organizations.stripe_customer_id (personal org) | LEFT JOIN via organization_memberships | NOT_WIRED | export.py:107-114 still reads `stripe_customer_id` directly from public.users; identical fix pattern available but not applied in `ee1ff77` |
 
 ## Data-Flow Trace (Level 4)
 
@@ -150,6 +164,10 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | JobHistoryPage Launched-by | row.created_by_email | backend jobs/router.py:420 actual SELECT incl. joined users.email | YES (jobs/router.py:413 SELECT joins users on j.created_by_user_id = u.id) | FLOWING |
 | Billing portal CTA (owner) | hasPaymentMethod | _resolve_stripe_customer -> check_payment_method against actual Stripe API | YES | FLOWING |
 | MembersTab members table | members[] | fetchMembers -> GET /organizations/{id}/members -> DB SELECT JOIN | YES (router.py:215-247) | FLOWING |
+| /health response | organizations_enabled | settings.organizations_enabled (config.py:149, default False) | YES (Pydantic settings read at startup) | FLOWING |
+| Admin users.payment_status | rows[i].stripe_customer_id (aliased) | LEFT JOIN orgs WHERE is_personal=true | YES (post `ee1ff77`) | FLOWING |
+| deletion_cron stripe cleanup | stripe_customer_id passed to execute_hard_delete | LEFT JOIN orgs WHERE is_personal=true | YES (post `ee1ff77`) | FLOWING |
+| GDPR export user profile | profile.stripe_customer_id | direct SELECT FROM public.users | YES today; will be DISCONNECTED post-drop | STATIC (pre-drop) / DISCONNECTED (post-drop) |
 
 ## Behavioral Spot-Checks
 
@@ -157,12 +175,16 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 |----------|---------|--------|--------|
 | Backend phase-12 modules parse | `python -c "ast.parse for organizations/*, auth/org_dependencies.py, scripts/*"` | All 7 files parse | PASS |
 | Phase-12 test files parse | `python -c "ast.parse for 15 test files"` | All 15 parse | PASS |
-| Pytest collection (organizations + integration) | `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` | 71 tests collected in 0.25s | PASS |
+| Pytest collection (organizations + integration) | `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` | 71 tests collected in 0.25s | PASS (prior verification) |
 | Migration grep enforcement (no LANGUAGE sql) | grep on 12-01 migration | zero matches | PASS |
-| LANGUAGE plpgsql occurrences in 12-01 | grep | 4 occurrences (protect_last_owner, is_member_of, has_role_in, create_organization) | PASS |
+| LANGUAGE plpgsql occurrences in 12-01 | grep | 4 occurrences | PASS |
 | Playwright test count | grep `^\s*test\(` on organizations.spec.ts | 12 tests | PASS |
-| Integration test execution (full pytest run) | Requires SUPABASE_INTEGRATION_DB_URL + local Supabase; tests skip gracefully when env unset | SKIP — env-gated; cannot run without local Supabase | SKIP (needs human / local stack) |
-| Playwright E2E execution | Requires running backend (8000) + frontend (5173) + Supabase + seed accounts | SKIP — env-gated; cannot run without full stack + seeded accounts | SKIP (needs human / staging) |
+| Leftover `u.stripe_customer_id` / `users.stripe_customer_id` in live SQL | Grep `backend/**/*.py` excluding tests + comments + scripts/stamp_stripe_org_metadata.py docstring | `worker/deletion_cron.py` + `admin/router.py` matches are now in COMMENTS only; live SQL goes through `o.stripe_customer_id`. BUT `user/export.py:111` still selects `stripe_customer_id` directly from `public.users` — FAILED. | PARTIAL (2 callers closed, 1 missed) |
+| Runbook /health probe payload | Read main.py:178 + runbook lines 34, 116 | `organizations_enabled` is a top-level bool field in /health payload; runbook probes resolve | PASS |
+| deletion_cron tests | Leo-attested 4/4 pass after `ee1ff77` | 4/4 | PASS (Leo confirmed inline) |
+| admin/router tests | Leo-attested 21/21 pass after `ee1ff77` | 21/21 | PASS (Leo confirmed inline) |
+| Integration test execution (full pytest run) | Requires SUPABASE_INTEGRATION_DB_URL + local Supabase; tests skip gracefully when env unset | SKIP — env-gated | SKIP (needs human / local stack) |
+| Playwright E2E execution | Requires running backend (8000) + frontend (5173) + Supabase + seed accounts | SKIP — env-gated | SKIP (needs human / staging) |
 
 ## Requirements Coverage
 
@@ -171,41 +193,48 @@ Neither blocks the **code-complete** judgment of Phase 12 in the repo, but both 
 | ORG-01 | 12-01, 12-02, 12-05, 12-06 | User can create an organization and invite team members by email | SATISFIED | POST /organizations + POST /organizations/{id}/invitations + Resend send_invitation_email + frontend invite form + E2E test 2 |
 | ORG-02 | 12-01, 12-02, 12-03, 12-06 | Roles: owner / scientist / viewer with documented permission matrix | SATISFIED | ENUM with 3 values (migration 12-01:18); require_role enforcement (org_dependencies.py); E2E test 7+8 owner/non-owner billing gate |
 | ORG-03 | 12-01, 12-03, 12-05, 12-06 | All jobs within an organization are visible to all org members | SATISFIED | RLS policy jobs_org_members (12-01:255) via is_member_of; jobs router scopes by organization_id (jobs/router.py:420); Launched-by column (12-05); E2E test 6 |
-| ORG-04 | 12-01, 12-03, 12-04, 12-06 | Organization-level billing (one Stripe customer per org) | SATISFIED (with deployment gap) | Column moved (12-01); stripe_client reads org (12-03); metadata stamp (12-04); drop migration ready but BLOCKED by Gap 1 (deletion_cron + admin still read users.stripe_customer_id) |
+| ORG-04 | 12-01, 12-03, 12-04, 12-06 | Organization-level billing (one Stripe customer per org) | SATISFIED (with deployment gap) | Column moved (12-01); stripe_client reads org (12-03); metadata stamp (12-04); two of three drop-blocker callers closed by `ee1ff77`; user/export.py drop-blocker remains. ORG-04 is met at the code level; the drop migration's pre-conditions are not fully met until export.py is fixed. |
 | ORG-05 | 12-01, 12-02, 12-05, 12-06 | Owner can remove members and transfer ownership | SATISFIED | protect_last_owner trigger (12-01:120); DELETE /members + POST /members/transfer (router.py:283-344); MembersTab UI (12-05); E2E test 10 |
 | ORG-06 | 12-02, 12-05, 12-06 | User can belong to multiple orgs and switch between them | SATISFIED | GET /organizations/mine + X-Org-Id resolver; localStorage[kendrew.activeOrgId]; OrganizationSwitcher; E2E test 1+1b switcher round-trip |
-| ORG-07 | 12-01, 12-04, 12-06 | Existing single-tenant users migrated without data loss | SATISFIED (with deployment gap) | Personal-org backfill (12-01:216-243); Stripe metadata stamp (12-04); drop-migration gating (12-06); same Gap 1 blocks the final cleanup |
+| ORG-07 | 12-01, 12-04, 12-06 | Existing single-tenant users migrated without data loss | SATISFIED (with deployment gap) | Personal-org backfill (12-01:216-243); Stripe metadata stamp (12-04); drop-migration gating (12-06); same user/export.py blocker as ORG-04 above. |
 | ORG-08 | 12-01, 12-02, 12-06 | Last owner cannot leave an organization | SATISFIED | DB trigger BEFORE UPDATE OR DELETE (12-01:120-123); 400 translation in router.py:272-277; E2E test 9 |
 
-REQUIREMENTS.md (lines 50-59 + 139-146) correctly lists all 8 ORG requirements as marked `[x]` with per-plan traceability appended. No orphaned requirements detected.
+REQUIREMENTS.md (lines 50-59 + 139-146) correctly lists all 8 ORG requirements as marked `[x]` with per-plan traceability appended. No orphaned requirements detected. Note: ORG-04 + ORG-07 remain SATISFIED at the code level — the user/export.py gap is a deployment-step blocker for the drop migration, not a requirements blocker.
 
 ## Anti-Patterns Found
 
 | File | Line | Pattern | Severity | Impact |
 |------|------|---------|----------|--------|
-| backend/worker/deletion_cron.py | 42-58 | Reads `SELECT id, email, stripe_customer_id FROM public.users` — column dropped by 12-06 migration | BLOCKER (post-drop) | Hard-delete cron will raise asyncpg.UndefinedColumnError on next run after drop |
-| backend/admin/router.py | 108, 117, 129, 137, 151 | References `u.stripe_customer_id` in user-list SQL + GROUP BY + payment_status derivation | BLOCKER (post-drop) | `/admin/users` returns 500 after drop |
-| backend/main.py | 146-175 | /health endpoint does not expose organizations_enabled despite runbook verify command | WARNING | Runbook step 1+5 verify commands silently always return null; operator may misread status |
-| .planning/phases/12-teams-and-organizations/deferred-items.md | full file | Documents 2 items deferred to 12-06 that 12-06 did NOT close; file is now stale | WARNING | Future readers may assume the deferred items were closed because the phase is marked complete |
+| backend/user/export.py | 107-114 | `SELECT ... stripe_customer_id FROM public.users WHERE id = $1` — column dropped by 12-06 migration | BLOCKER (post-drop) | GDPR data-export BackgroundTask raises UndefinedColumnError on next request after drop; user sees `last_export_expires_at` sentinel-stamp (failed) but operator gets no surface signal |
+| backend/worker/deletion_cron.py | 41-54 | (resolved) `SELECT u.id, u.email, o.stripe_customer_id FROM public.users u LEFT JOIN ...` | RESOLVED | Cutover comment + 3-table JOIN closed by `ee1ff77`; tests pass |
+| backend/admin/router.py | 100-153 | (resolved) Same JOIN pattern on both keyset and non-keyset paths | RESOLVED | Closed by `ee1ff77`; `payment_status` derivation preserved via aliased column |
+| backend/main.py | 175-178 | (resolved) /health payload now includes `organizations_enabled: settings.organizations_enabled` | RESOLVED | Closed by `1b7daa0`; runbook step 1 + step 5 probes resolve |
+| .planning/phases/12-teams-and-organizations/deferred-items.md | full file | Documents 2 items as still-open that are now CLOSED by `ee1ff77`; file is now stale | WARNING | Future readers may believe the items are still open. Recommend adding a 2026-06-04 "CLOSED in commit ee1ff77" stamp + new section flagging the user/export.py blocker surfaced after the fix. |
 | backend/organizations/router.py | 174-207 | DELETE org refuses if `stripe_customer_id IS NOT NULL`; comment says v1 — Plan 12-03 will add the real "subscription active" check; not addressed in 12-03 | INFO | Owner with a stamped (but inactive) Stripe customer cannot delete org; manual NULL-out workaround |
 
 ## Regression Check
 
-- `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` → **71 tests collected in 0.25s, zero collection errors**.
-- Running the full test suite requires SUPABASE_INTEGRATION_DB_URL (skipped gracefully when unset) and a real Supabase local instance. Did not attempt because local Supabase not provisioned in this verification environment.
-- One Pydantic v1-style deprecation warning in `config.py:7` (class-based `Config` → ConfigDict). Pre-existing, not introduced by Phase 12.
+- `git show ee1ff77 -- backend/` and `git show 1b7daa0 -- backend/main.py` confirm both commits are scoped to the file lines documented in their commit messages. No unrelated changes snuck in.
+- `git show ee1ff77` diff stat: 2 files changed, 27 insertions(+), 8 deletions(-) — matches the JOIN-rewrite delta for the two SELECTs.
+- `git show 1b7daa0` diff stat: 1 file changed, 5 insertions(+), 1 deletion(-) — matches the 4-line health-payload addition + 1-line comment.
+- The dependent code in `deletion_cron.py:64` (`dict(row).get("stripe_customer_id")`) and `admin/router.py:162` (`r["stripe_customer_id"]`) is unchanged — the asyncpg row alias `o.stripe_customer_id` keeps the same top-level key in the returned dict, so no caller-side changes are needed.
+- The /health `healthy = all(v == "ok" for v in checks.values())` calculation at main.py:173 still reads the inner `checks` dict only; the bool flag is merged into `payload` AFTER the verdict is set, so a `True`/`False` value of `organizations_enabled` cannot poison the 200/503 status code.
+- Leo confirmed 4/4 deletion_cron + 21/21 admin/router tests pass inline in the work prompt.
+- `pytest --collect-only -q` was not re-run in this verification environment (no local DB); prior collection of 71 tests still holds.
 - No Phase 11 / Phase 10 / Phase 9 regressions detected at file/AST level.
 
 ## Deferred-Items Audit
 
-`.planning/phases/12-teams-and-organizations/deferred-items.md` lists two items deferred from Plan 12-03 to be closed by Plan 12-06:
+`.planning/phases/12-teams-and-organizations/deferred-items.md` lists two items deferred from Plan 12-03 that this re-verification confirms are now CLOSED:
 
-1. `backend/worker/deletion_cron.py:42-58` — still reads `users.stripe_customer_id`. **NOT closed by 12-06.** Codebase confirmed lines 42-58 still contain the SELECT.
-2. `backend/admin/router.py:108-151` — still JOINs `u.stripe_customer_id` + derives payment_status. **NOT closed by 12-06.** Codebase confirmed.
+1. `backend/worker/deletion_cron.py:42-58` — **CLOSED** by `ee1ff77`. Lines 41-54 now contain the cutover comment + 3-table LEFT JOIN.
+2. `backend/admin/router.py:108-151` — **CLOSED** by `ee1ff77`. Both keyset and non-keyset paths now use the JOIN.
 
-Plan 12-06 SUMMARY makes no mention of either file. Plan 12-06 PLAN frontmatter does not list either file in `files_modified`. The drop-column migration **will** succeed on a fresh DB, but the application code in `deletion_cron` and `admin/router` will then fail at runtime.
+**However, the audit also surfaced a third caller that was NOT in deferred-items.md:**
 
-**Net:** Two real gaps. Both flagged as failed (gaps.0 in frontmatter).
+3. `backend/user/export.py:107-114` — **NEW gap.** Same `SELECT ... stripe_customer_id FROM public.users` shape; same post-drop break. The original Plan 12-03 audit missed this caller; `ee1ff77` did not close it; deferred-items.md was never updated to include it.
+
+**File status:** deferred-items.md is now factually stale on item 1 + item 2 (they are closed) and silent on item 3 (the new gap). It needs a 2026-06-04 update or replacement.
 
 ## Runbook Review
 
@@ -218,14 +247,14 @@ Plan 12-06 SUMMARY makes no mention of either file. Plan 12-06 PLAN frontmatter 
 - Rollback table covers 7 failure modes with specific procedures.
 - Decisive gate callout at the bottom emphasises the irreversibility of Step 9.
 
-**One operational concern:**
-- Step 1 verify `curl /health | jq '.organizations_enabled'` references a field that `backend/main.py:146-175` does not return. The probe will always produce `null`, so the gate cannot fail the way the runbook expects. **Operator should be redirected to a probe that exists** (e.g. `curl -o /dev/null -w "%{http_code}\n" -H "Cookie: ..." https://app.bindwave.com/organizations/mine` — 404 = flag off, 200/401 = flag on).
-
-Step 5's verify command has the same problem (also reads `.organizations_enabled` from /health).
+**Status:**
+- ✓ Step 1 verify (`curl /health | jq '.organizations_enabled'`) — now resolves to a real bool field via `1b7daa0`.
+- ✓ Step 5 verify — same probe, same fix.
+- ✗ Step 9 (DROP COLUMN) — still blocked by `user/export.py:111`; an operator running step 9 would discover this on the next GDPR data-export request (typically rare, so the failure surfaces hours-to-days after the drop). The runbook's 4-condition gate comment in the drop migration header should be expanded to require a grep-clean check across the backend, or the export.py rewrite must precede the next runbook execution.
 
 ## Human Verification Required
 
-These items cannot be verified programmatically without running services that are not provisioned in this verification environment. They map to Phase 12 deployment readiness and should be exercised before the runbook is followed in production:
+These items cannot be verified programmatically without running services that are not provisioned in this verification environment:
 
 ### 1. Integration test suite green against local Supabase
 
@@ -262,34 +291,87 @@ python scripts/verify_stripe_org_metadata.py --test-mode
 **Expected:** All 9 steps complete; rollback paths tested at step 5 + step 8.
 **Why human:** Touches real cloud infra; cannot be safely automated from a verification agent.
 
-### 5. Confirm /health probe alignment (Gap 2 follow-up)
+### 5. Confirm /health probe payload in staging
 
-**Test:** Decide whether to add `organizations_enabled` to /health response OR rewrite runbook step 1 + step 5 to use a different probe.
-**Why human:** Product decision (lightweight extra check on /health vs. operational doc edit).
+**Test:** Curl `https://staging.bindwave.com/health | jq '.organizations_enabled'` against a deployment with `organizations_enabled=false` and again with `=true`.
+**Expected:** Returns `false` then `true`. Never `null` (would mean the fix did not deploy).
+**Why human:** Requires a staging deployment; the unit-level fix is verified but the field's reachability over HTTPS is not.
 
-## Gaps Summary
+## Gap-Closure Summary (2026-06-04 follow-up)
 
-Phase 12 ships a complete, well-tested, code-side implementation of multi-tenancy. The migration foundation is sound (PL/pgSQL helpers, BEFORE-trigger semantics, RLS rewrites, backfill), the backend cutover is org-scoped end-to-end (jobs, billing, webhooks, user routes), the frontend has the right context+switcher+invitations UX, the Stripe metadata path is idempotent + verifiable, and the rollout runbook has the right structure with a decisive 24h gate.
+This re-verification was triggered by two gap-fix commits on branch `fix/rfantibody-altloc-handling`:
 
-The phase falls short on **deployment-readiness cleanup** in two ways:
+### Gap 1 — leftover `users.stripe_customer_id` reads
 
-1. **Two callers of the deprecated `users.stripe_customer_id` column** (`deletion_cron.py` + `admin/router.py`) were explicitly deferred from 12-03 to 12-06 (per `deferred-items.md`), but 12-06 left them untouched. The drop-column migration in `20260606000001` will succeed at the SQL level but break both callers at runtime. The runbook step-8 24h watch would surface this once the deletion cron next runs (daily) or an admin opens `/admin/users` — but the operator should not have to discover this in production.
+**Original finding** (commit 136ca32 VERIFICATION):
+- `backend/worker/deletion_cron.py:42-58` reads the deprecated column directly.
+- `backend/admin/router.py:108-151` references `u.stripe_customer_id` in user-list SQL + GROUP BY + payment_status derivation.
 
-2. **The runbook's `/health` probe** asserts a field that the endpoint does not expose. The verify command will always produce `null`, defeating both the step-1 "flag is off" check and the step-5 "flag is on" check.
+**Fix commit:** `ee1ff77 fix(12-gaps): convert deletion_cron + admin/router stripe_customer_id reads to org JOIN`
 
-Neither gap blocks the merge of Phase 12 code to master — the feature flag is off by default and the drop-column migration is not applied by any automation. But both must be resolved before the runbook is followed in production. They are real, file-locatable gaps, not opinions.
+**Confirmation:**
+- `worker/deletion_cron.py:46-54` chains `users u → organization_memberships om → organizations o WHERE o.is_personal = true` and selects `o.stripe_customer_id`. The asyncpg row dict still contains a top-level `stripe_customer_id` key (alias rule), so `dict(row).get("stripe_customer_id")` at line 64 works unchanged.
+- `admin/router.py:100-153` applies the same 3-table LEFT JOIN to both the keyset (`before_dt is not None`) and non-keyset paths. GROUP BY at lines 125 + 148 includes `o.stripe_customer_id`. Line 162 `payment_status: "active" if r["stripe_customer_id"] else "none"` is preserved.
+- Leo-confirmed inline: 4/4 deletion_cron tests + 21/21 admin/router tests pass.
+- Grep audit for `u\.stripe_customer_id|users\.stripe_customer_id` in `backend/` shows zero matches in live SQL — only comments (stripe_client.py:10,37; deletion_cron.py:41-44 cutover comment), test mocks, and the stamp_stripe_org_metadata.py module docstring remain.
 
-The 8 ORG-XX requirements are all SATISFIED at the code level. ORG-04 and ORG-07 depend on the drop-column step for full closure, and that step is now blocked by Gap 1.
+**Status:** VERIFIED — Gap 1 closed.
+
+### Gap 2 — `/health` missing `organizations_enabled`
+
+**Original finding** (commit 136ca32 VERIFICATION):
+- `backend/main.py:146-175` `/health` returned only `{api, db, redis}` status keys, but runbook steps 1 + 5 probe `curl /health | jq .organizations_enabled` which would always return `null`.
+
+**Fix commit:** `1b7daa0 fix(12-gaps): expose organizations_enabled flag in /health payload`
+
+**Confirmation:**
+- `main.py:175-178` constructs `payload = {**checks, "organizations_enabled": settings.organizations_enabled}` and returns `JSONResponse(content=payload, status_code=status_code)`.
+- `settings.organizations_enabled` is sourced from `config.py:149` (Pydantic settings, default `False`).
+- The `healthy = all(v == "ok" for v in checks.values())` calculation at line 173 reads the inner `checks` dict BEFORE the bool is merged into `payload`, so a `True`/`False` flag value cannot poison the 200/503 status decision.
+- Runbook probes at `docs/runbook-phase-12-rollout.md:34` + `:116` now resolve to a real boolean.
+
+**Status:** VERIFIED — Gap 2 closed.
+
+### Net delta from prior verification
+
+| Metric | Prior (136ca32) | Now (post `1b7daa0`) |
+|--------|-----------------|----------------------|
+| Status | gaps_found | gaps_found |
+| Score | 31/33 | 32/33 |
+| Failed truths | 2 (deletion_cron+admin, health) | 1 (user/export.py) |
+| Closed gaps in this pass | — | 2 |
+| New gaps surfaced in this pass | — | 1 |
+
+### New gap surfaced — `backend/user/export.py:107-114`
+
+**This is NOT a regression introduced by `ee1ff77` or `1b7daa0`.** It is a third caller of the deprecated column that the original audit missed and that neither gap-fix commit was scoped to address.
+
+**Code path:** `POST /user/data-export` (user/router.py:362-411) → `BackgroundTask(build_and_deliver_export)` → `_build_and_deliver_export_inner` → SELECT at export.py:107-114.
+
+**Why it slipped:** The original gap-audit grep (per the deferred-items.md trail) found the deletion_cron + admin/router callers but not export.py because export.py reads stripe_customer_id without an `u.` alias — the pattern `u\.stripe_customer_id` does not catch it, only a broader `stripe_customer_id\s+FROM\s+public\.users` multiline grep does.
+
+**Fix required:** Same pattern as `ee1ff77` — replace the bare `SELECT ... stripe_customer_id` with a `LEFT JOIN public.organization_memberships ... LEFT JOIN public.organizations ... WHERE is_personal=true` and read `o.stripe_customer_id`. Add a regression test under `tests/user/` that the query no longer references the deprecated column.
+
+**Recommended CI guard:**
+```
+! rg -nU 'stripe_customer_id[\s\S]*?FROM public\.users' backend/
+```
+This would catch any future regression before runbook step 9 lands.
 
 ## Status Verdict
 
 **gaps_found**
 
-Two failed truths, both deployment-readiness issues for a phase whose feature flag is off in production. Code-side multi-tenancy is complete and well-tested. Two specific, named files need a small follow-up before the runbook can run cleanly end-to-end, and the runbook verify commands need one adjustment.
+The two originally-flagged gaps (truths 32 + 33) are now VERIFIED via commits `ee1ff77` and `1b7daa0`. The fixes are minimal, scoped, and Leo-attested.
+
+However, the re-verification audit surfaced a third caller of the deprecated `users.stripe_customer_id` column (`backend/user/export.py:107-114`) that the original verification missed. It is structurally identical to the original Gap 1 finding and will break the GDPR data-export BackgroundTask after runbook step 9 (DROP COLUMN) runs.
+
+The score moves from 31/33 to 32/33. Neither the closed nor the new gap blocks the merge of Phase 12 to master — the feature flag is off by default and the drop migration is gated by runbook step 9. But the new gap must be resolved before the runbook is followed in production, and `deferred-items.md` should be refreshed.
 
 ---
 
-*Verified: 2026-06-04T23:55:00Z*
+*Re-verified: 2026-06-04T12:55:00Z*
 *Verifier: Claude (gsd-verifier, Opus 4.7 1M context)*
 *Branch: fix/rfantibody-altloc-handling*
-*HEAD: 136ca329941926dc02104ef2fedc1d3b5bbce070*
+*HEAD: 1b7daa0d6661624ef3e3c1efc3dfba0a6ff159f0*
+*Previous HEAD (verified 2026-06-04T23:55:00Z): 136ca329941926dc02104ef2fedc1d3b5bbce070*
