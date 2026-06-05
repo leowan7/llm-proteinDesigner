@@ -266,7 +266,7 @@ Plans:
   3. API keys managed in user settings — create, revoke, view usage
   4. Rate limiting: 60 requests/minute per API key
   5. OpenAPI/Swagger documentation auto-generated and hosted at /api/docs
-  6. Python SDK published to PyPI: `pip install kendrew` with typed client
+  6. Python SDK published to PyPI: `pip install bindwave` with typed client
 **Plans**: TBD
 
 ## Progress

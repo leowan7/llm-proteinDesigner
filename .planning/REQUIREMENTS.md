@@ -47,6 +47,21 @@
 - [x] **BILL-03**: User must have a valid payment method on file before launching any job
 - [x] **BILL-04**: Job state is written to the database before any GPU provider API call (prevents double-billing on retry)
 
+### API (Phase 13)
+
+- [ ] **API-01**: API key creation returns plaintext exactly once; storage is HMAC-SHA256+pepper of the plaintext (D-03 hash-at-rest intent, see RESEARCH §2.10).
+- [ ] **API-02**: API keys carry one org_id at creation time; calls authenticate as that org with the creator's role-at-creation; no X-Org-Id header (D-01, D-02).
+- [ ] **API-03**: API keys never expire; user-initiated revoke flips `revoked_at`; revoked keys reject auth immediately (D-04).
+- [ ] **API-04**: `POST /api/v1/jobs` REQUIRES `Idempotency-Key` header; missing → 400; same key + same body within 24h replays the stored response byte-for-byte; same key + different body → 422 (D-05 + RESEARCH §2.9).
+- [ ] **API-05**: `GET /api/v1/jobs` paginates by opaque cursor encoding `(created_at, id)` tiebreaker; default limit 25, max 100; supports filters `status`, `tool`, `created_after`, `created_before` (D-06 + RESEARCH §2.3).
+- [ ] **API-06**: `GET /api/v1/jobs/{id}` returns inline metadata + ranked candidate list + 24h presigned URLs in one response (D-07).
+- [ ] **API-07**: All `/api/v1/*` responses on error use `application/problem+json` per RFC 7807; web-flow routes keep their existing error shape (D-16 + RESEARCH §2.7).
+- [ ] **API-08**: All `/api/v1/*` responses emit `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (unix epoch seconds) headers; 429 responses additionally emit `Retry-After` (seconds) (RESEARCH §2.4).
+- [ ] **API-09**: Only `/api/v1/*` routes appear in the OpenAPI spec; every other router (12 total) sets `include_in_schema=False`; an OpenAPI snapshot test guards the surface (D-15 + RESEARCH §2.8, §2.12).
+- [ ] **API-10**: Per-API-key rate limit: 60 requests/minute, keyed on `api_keys.id`; uses a separate slowapi `Limiter` instance with `headers_enabled=True` (Phase 13 SC 4 + RESEARCH §2.4).
+- [ ] **API-11**: OpenAPI docs at `/api/docs` are publicly accessible; the published spec IS the public-API contract (D-13, D-14).
+- [ ] **API-12**: Python SDK `bindwave` ships from `bindwave-python` repo with sync `Client` + async `AsyncClient`; published to PyPI on tag push; a backend pytest contract test asserts the spec covers every endpoint the SDK calls (D-09, D-10, D-12 + RESEARCH §2.5, §2.6).
+
 ### Organizations (Phase 12)
 
 - [x] **ORG-01**: User can create an organization and invite team members by email (DB foundation 12-01; router + invites + notifications 12-02; frontend invite UI in 12-05; E2E coverage 12-06)
@@ -80,7 +95,7 @@
 
 ### Platform
 
-- **PLAT-V2-01**: REST API access for power users to submit jobs programmatically
+- **PLAT-V2-01**: REST API access for power users to submit jobs programmatically — Validated by Phase 13 (API-04..API-12)
 - **PLAT-V2-02**: Shared workspaces / team accounts
 
 ### Testing & CI/CD
@@ -151,10 +166,23 @@ Which phases cover which requirements. Updated during roadmap creation.
 | TEST-05 | Phase 9 | Planned |
 | TEST-06 | Phase 9 | Planned |
 | TEST-07 | Phase 9 | Planned |
+| PLAT-V2-01 | Phase 13 | Validated |
+| API-01 | Phase 13 | Planned |
+| API-02 | Phase 13 | Planned |
+| API-03 | Phase 13 | Planned |
+| API-04 | Phase 13 | Planned |
+| API-05 | Phase 13 | Planned |
+| API-06 | Phase 13 | Planned |
+| API-07 | Phase 13 | Planned |
+| API-08 | Phase 13 | Planned |
+| API-09 | Phase 13 | Planned |
+| API-10 | Phase 13 | Planned |
+| API-11 | Phase 13 | Planned |
+| API-12 | Phase 13 | Planned |
 
 **Coverage:**
-- v1 requirements: 32 total (24 + 8 organizations) plus 7 testing
-- Mapped to phases: 39
+- v1 requirements: 44 total (24 + 8 organizations + 12 API) plus 7 testing
+- Mapped to phases: 51
 - Unmapped: 0 ✓
 
 ---

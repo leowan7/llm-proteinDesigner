@@ -94,6 +94,25 @@ class Settings(BaseSettings):
     webhook_hmac_secret: str = ""
     webhook_hmac_secret_prev: str = ""
 
+    # Phase 13: API-key hashing secrets (HMAC-SHA256 pepper). Same dual-secret
+    # rotation pattern as webhook_hmac_secret above. Backend tries api_key_pepper
+    # first, falls back to api_key_pepper_prev during rotation grace window.
+    # Rotation runbook in docs/deploy.md — extend the Phase 11 D-10 section.
+    # See RESEARCH §2.10 for why HMAC-SHA256+pepper is used instead of bcrypt.
+    api_key_pepper: str = ""
+    api_key_pepper_prev: str = ""
+
+    # Phase 13: per-API-key rate limit budget (slowapi format). Applied by the
+    # api_v1_limiter only — the existing global limiter keeps its rate_limit_default
+    # budget. See RESEARCH §2.4 for the two-limiter pattern.
+    api_v1_rate_limit: str = "60/minute"
+
+    # Phase 13: idempotency-key TTL in hours. Rows older than this threshold are
+    # swept by an arq-scheduled reaper cron. 25h gives a 1h buffer over the
+    # documented 24h replay window so a key written at T=23h59m is not swept
+    # while a retry is still in flight. See RESEARCH §2.9.
+    idempotency_ttl_hours: int = 25
+
     # DEPRECATED — retained for one release cycle as a backwards-compat alias.
     # Reads are resolved to webhook_hmac_secret below via model_post_init.
     # Remove after next phase once Railway Variables are fully migrated to WEBHOOK_HMAC_SECRET.
