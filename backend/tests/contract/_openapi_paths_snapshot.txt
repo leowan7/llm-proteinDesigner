@@ -1,0 +1,4 @@
+# Phase 13 OpenAPI surface snapshot — regenerate via Plan 13-07 after 13-03/13-04 land routes
+# Lines starting with # and blank lines are ignored by the snapshot test.
+# Current state: empty — no /api/v1/* paths exist yet (Plan 13-03 mounts the router).
+# Plan 13-07 will overwrite this file with the final post-D-15 surface (5-6 /api/v1/* paths).
