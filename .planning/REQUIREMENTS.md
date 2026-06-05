@@ -57,9 +57,9 @@
 - [ ] **API-06**: `GET /api/v1/jobs/{id}` returns inline metadata + ranked candidate list + 24h presigned URLs in one response (D-07).
 - [ ] **API-07**: All `/api/v1/*` responses on error use `application/problem+json` per RFC 7807; web-flow routes keep their existing error shape (D-16 + RESEARCH §2.7).
 - [ ] **API-08**: All `/api/v1/*` responses emit `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (unix epoch seconds) headers; 429 responses additionally emit `Retry-After` (seconds) (RESEARCH §2.4).
-- [ ] **API-09**: Only `/api/v1/*` routes appear in the OpenAPI spec; every other router (12 total) sets `include_in_schema=False`; an OpenAPI snapshot test guards the surface (D-15 + RESEARCH §2.8, §2.12).
+- [x] **API-09**: Only `/api/v1/*` routes appear in the OpenAPI spec; every other router (12 total) sets `include_in_schema=False`; an OpenAPI snapshot test guards the surface (D-15 + RESEARCH §2.8, §2.12).
 - [ ] **API-10**: Per-API-key rate limit: 60 requests/minute, keyed on `api_keys.id`; uses a separate slowapi `Limiter` instance with `headers_enabled=True` (Phase 13 SC 4 + RESEARCH §2.4).
-- [ ] **API-11**: OpenAPI docs at `/api/docs` are publicly accessible; the published spec IS the public-API contract (D-13, D-14).
+- [x] **API-11**: OpenAPI docs at `/api/docs` are publicly accessible; the published spec IS the public-API contract (D-13, D-14).
 - [ ] **API-12**: Python SDK `bindwave` ships from `bindwave-python` repo with sync `Client` + async `AsyncClient`; published to PyPI on tag push; a backend pytest contract test asserts the spec covers every endpoint the SDK calls (D-09, D-10, D-12 + RESEARCH §2.5, §2.6).
 
 ### Organizations (Phase 12)

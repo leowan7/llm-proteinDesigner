@@ -309,7 +309,7 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 12. Teams & Organizations | Multi-user, org billing, RBAC | 5/6 | In Progress | Phase 11 |
-| 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | Phase 11 |
+| 13. Public API | REST API, API keys, Python SDK | 1/7 | In Progress|  |
 
 **Completed:**
 

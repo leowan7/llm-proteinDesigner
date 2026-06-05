@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: Phase 12 verified — ready to plan Phase 13
-stopped_at: Phase 12 verified (passed 33/33 must_haves; production cutover gated by docs/runbook-phase-12-rollout.md)
-last_updated: "2026-06-04T12:30:00.000Z"
+stopped_at: Completed 12-06-PLAN.md (final plan of Phase 12 — Playwright E2E spec + drop-column migration + Phase 12 rollout runbook + REQUIREMENTS.md ORG-01..ORG-08 validation + ROADMAP.md Phase 12 6/6 complete + invitation-token contract bug-fix)
+last_updated: "2026-06-05T01:13:37.923Z"
 progress:
   total_phases: 13
-  completed_phases: 11
-  total_plans: 61
-  completed_plans: 61
-  percent: 100
+  completed_phases: 10
+  total_plans: 68
+  completed_plans: 55
+  percent: 77
 ---
 
 # Project State
@@ -20,12 +20,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 13 — public API (next milestone work)
+**Current focus:** Phase 13 — public-api
 
 ## Current Position
 
-Phase: 12 — COMPLETE and VERIFIED (implementation; deployment gated by `docs/runbook-phase-12-rollout.md`)
-Plan: 12-06 (final plan of Phase 12) closed 2026-06-04. All 6 Phase 12 plans complete; ORG-01..ORG-08 marked Validated in REQUIREMENTS.md; Phase 12 entry in ROADMAP.md updated to 6/6 complete.
+Phase: 13 (public-api) — EXECUTING
+Plan: 2 of 7
 Verification: passed 33/33 must_haves after 3 gap-fix follow-up commits (`ee1ff77` deletion_cron + admin/router, `1b7daa0` /health flag, `cf082e7` user/export GDPR path). See `12-VERIFICATION.md` (commit `f7b70bd`).
 
 Next position: Phase 13 (Public API) — first plan TBD.
@@ -71,6 +71,7 @@ Next position: Phase 13 (Public API) — first plan TBD.
 | Phase 12-teams-and-organizations P04 | 6min | 2 tasks | 4 files |
 | Phase 12-teams-and-organizations P05 | 24min | 2 tasks | 21 files |
 | Phase 12-teams-and-organizations P06 | 11min | 2 tasks | 10 files |
+| Phase 13 P01 | 7min | 3 tasks | 31 files |
 
 ## Accumulated Context
 
@@ -161,7 +162,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-06-04T12:05:00.000Z
+Last session: 2026-06-05T01:13:37.910Z
 Stopped at: Completed 12-06-PLAN.md (final plan of Phase 12 — Playwright E2E spec + drop-column migration + Phase 12 rollout runbook + REQUIREMENTS.md ORG-01..ORG-08 validation + ROADMAP.md Phase 12 6/6 complete + invitation-token contract bug-fix)
-Resume file: Phase 13 first plan (Public API) — to be planned next session
+Resume file: None
 Deployment status: Phase 12 implementation complete in repo; production cutover gated by docs/runbook-phase-12-rollout.md (9 ordered steps + 24h watch + decisive rollback gate)
