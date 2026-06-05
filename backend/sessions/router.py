@@ -29,7 +29,7 @@ from sessions.queries import (
     update_session_title,
 )
 
-router = APIRouter(prefix="/sessions", tags=["sessions"])
+router = APIRouter(prefix="/sessions", tags=["sessions"], include_in_schema=False)
 
 
 class UpdateTitleRequest(BaseModel):

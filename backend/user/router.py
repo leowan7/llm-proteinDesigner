@@ -28,7 +28,7 @@ from middleware.rate_limit import limiter, get_rate_limit_key  # T-10.04-06: slo
 from storage.client import generate_presigned_get_url
 from user.export import EXPORT_URL_TTL_SECONDS, build_and_deliver_export
 
-router = APIRouter(prefix="/user", tags=["user"])
+router = APIRouter(prefix="/user", tags=["user"], include_in_schema=False)
 
 # Default notification preferences returned when the column is NULL.
 _DEFAULT_NOTIFICATION_PREFERENCES: dict[str, bool] = {

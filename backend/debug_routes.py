@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from config import settings
 
-router = APIRouter(prefix="/debug", tags=["debug"])
+router = APIRouter(prefix="/debug", tags=["debug"], include_in_schema=False)
 
 
 @router.get("/sentry-test")

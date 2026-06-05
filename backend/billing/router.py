@@ -21,7 +21,7 @@ from billing.stripe_client import (
 from config import settings
 from db.connection import get_db_pool
 
-router = APIRouter(prefix="/billing", tags=["billing"])
+router = APIRouter(prefix="/billing", tags=["billing"], include_in_schema=False)
 
 
 class ReturnUrlRequest(BaseModel):

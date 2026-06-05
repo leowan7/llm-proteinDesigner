@@ -38,8 +38,8 @@ from organizations import models, notifications, service
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/organizations", tags=["organizations"])
-invitations_router = APIRouter(prefix="/invitations", tags=["invitations"])
+router = APIRouter(prefix="/organizations", tags=["organizations"], include_in_schema=False)
+invitations_router = APIRouter(prefix="/invitations", tags=["invitations"], include_in_schema=False)
 
 
 # ---------------------------------------------------------------------------

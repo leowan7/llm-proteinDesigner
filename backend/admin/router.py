@@ -29,7 +29,7 @@ from jobs.service import cancel_job_by_id
 
 _log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(prefix="/admin", tags=["admin"], include_in_schema=False)
 
 # Allowed status values for the jobs filter — same set as the jobs table CHECK constraint.
 ALLOWED_JOB_STATUSES = {"running", "queued", "complete", "failed", "cancelled"}

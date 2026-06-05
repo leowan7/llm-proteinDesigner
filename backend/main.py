@@ -72,8 +72,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Kendrew.AI",
+    title="Bindwave Public API",
     version="0.1.0",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
 
@@ -143,7 +145,7 @@ if settings.debug or settings.testing:
 _health_logger = _stdlogging.getLogger("kendrew.health")
 
 
-@app.get("/health")
+@app.get("/health", include_in_schema=False)
 async def health():
     """Deep health check — verifies API, database, and Redis connectivity.
 

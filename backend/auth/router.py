@@ -18,7 +18,7 @@ from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(prefix="/auth", tags=["auth"], include_in_schema=False)
 
 
 def _get_supabase():

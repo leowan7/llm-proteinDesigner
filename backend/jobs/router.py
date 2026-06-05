@@ -30,7 +30,7 @@ from jobs.dispatch import launch_job
 from jobs.service import cancel_job_by_id, TOOL_IMAGES
 from storage.client import generate_presigned_get_url, generate_presigned_put_url, get_s3_client
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+router = APIRouter(prefix="/jobs", tags=["jobs"], include_in_schema=False)
 
 MAX_SSE_PER_USER = settings.max_sse_connections_per_user
 

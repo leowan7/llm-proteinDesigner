@@ -37,7 +37,7 @@ from worker.tasks import publish_status, update_job_status
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+router = APIRouter(prefix="/webhooks", tags=["webhooks"], include_in_schema=False)
 
 # Map RunPod terminal statuses to internal JobStatus values.
 _RUNPOD_STATUS_MAP: dict[str, str] = {

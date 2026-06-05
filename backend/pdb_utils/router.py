@@ -22,7 +22,7 @@ from pdb_utils.fetch import fetch_pdb_file, resolve_pdb_for_uniprot, search_unip
 from pdb_utils.normalize import normalize_structure
 from pdb_utils.metadata import extract_structure_metadata
 
-router = APIRouter(prefix="/pdb", tags=["pdb"])
+router = APIRouter(prefix="/pdb", tags=["pdb"], include_in_schema=False)
 
 # Accepted upload extensions
 _VALID_EXTENSIONS = (".pdb", ".cif", ".mmcif", ".ent")
