@@ -14,7 +14,7 @@ from bindwave.types.api_key import ApiKey
 API_KEYS_PATH = "/api/v1/api-keys/"
 API_KEY_REVOKE_PATH = "/api/v1/api-keys/{key_id}/revoke"
 
-__all__ = ["ApiKeysResource"]
+__all__ = ["ApiKeysResource", "AsyncApiKeysResource"]
 
 
 class ApiKeysResource:
@@ -32,6 +32,26 @@ class ApiKeysResource:
     def revoke(self, key_id: str) -> dict:
         """Revoke a key by id. Returns the ``{id, revoked_at}`` confirmation dict."""
         response = self._client._request(
+            "POST", API_KEY_REVOKE_PATH.format(key_id=key_id)
+        )
+        return response.json()
+
+
+class AsyncApiKeysResource:
+    """Async variant of :class:`ApiKeysResource` — list and revoke org API keys."""
+
+    def __init__(self, client) -> None:
+        self._client = client
+
+    async def list(self) -> list[ApiKey]:
+        """List the caller's active org keys (revoked excluded server-side)."""
+        response = await self._client._request("GET", API_KEYS_PATH)
+        data = response.json()
+        return [ApiKey.model_validate(k) for k in data.get("data", [])]
+
+    async def revoke(self, key_id: str) -> dict:
+        """Revoke a key by id. Returns the ``{id, revoked_at}`` confirmation dict."""
+        response = await self._client._request(
             "POST", API_KEY_REVOKE_PATH.format(key_id=key_id)
         )
         return response.json()

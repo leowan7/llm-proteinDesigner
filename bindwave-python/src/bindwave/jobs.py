@@ -16,7 +16,7 @@ JOBS_PATH = "/api/v1/jobs/"
 JOB_PATH = "/api/v1/jobs/{job_id}"
 JOB_CANCEL_PATH = "/api/v1/jobs/{job_id}/cancel"
 
-__all__ = ["JobsResource", "JobListPage"]
+__all__ = ["JobsResource", "AsyncJobsResource", "JobListPage"]
 
 
 class JobsResource:
@@ -81,4 +81,75 @@ class JobsResource:
     def cancel(self, job_id: str) -> Job:
         """Cancel a running or queued job."""
         response = self._client._request("POST", JOB_CANCEL_PATH.format(job_id=job_id))
+        return Job.model_validate(response.json())
+
+
+class AsyncJobsResource:
+    """Async variant of :class:`JobsResource` — submit, fetch, list, cancel.
+
+    Byte-for-byte mirror of the sync class modulo async/await; issues requests
+    through ``await self._client._request(...)``.
+    """
+
+    def __init__(self, client) -> None:
+        self._client = client
+
+    async def submit(
+        self,
+        *,
+        tool: str,
+        parameters: dict,
+        name: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> Job:
+        """Submit a job. The Idempotency-Key header is auto-generated (uuid4 hex)
+        when ``idempotency_key`` is not supplied."""
+        body: dict = {"tool": tool, "parameters": parameters}
+        if name is not None:
+            body["name"] = name
+        response = await self._client._request(
+            "POST", JOBS_PATH, json_body=body, idempotency_key=idempotency_key
+        )
+        return Job.model_validate(response.json())
+
+    async def get(self, job_id: str) -> Job:
+        """Fetch a single job (inline candidates + presigned URLs when complete)."""
+        response = await self._client._request("GET", JOB_PATH.format(job_id=job_id))
+        return Job.model_validate(response.json())
+
+    async def list(
+        self,
+        *,
+        limit: int = 25,
+        cursor: str | None = None,
+        status: str | None = None,
+        tool: str | None = None,
+        created_after: str | None = None,
+        created_before: str | None = None,
+    ) -> JobListPage:
+        """List jobs (cursor-paginated, org-scoped server-side)."""
+        params = {
+            k: v
+            for k, v in {
+                "limit": limit,
+                "cursor": cursor,
+                "status": status,
+                "tool": tool,
+                "created_after": created_after,
+                "created_before": created_before,
+            }.items()
+            if v is not None
+        }
+        response = await self._client._request("GET", JOBS_PATH, params=params)
+        data = response.json()
+        return JobListPage(
+            data=[Job.model_validate(j) for j in data.get("data", [])],
+            next_cursor=data.get("next_cursor"),
+        )
+
+    async def cancel(self, job_id: str) -> Job:
+        """Cancel a running or queued job."""
+        response = await self._client._request(
+            "POST", JOB_CANCEL_PATH.format(job_id=job_id)
+        )
         return Job.model_validate(response.json())
