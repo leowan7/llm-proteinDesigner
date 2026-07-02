@@ -87,6 +87,45 @@ staging follows the same steps against its own Railway service.
 |------|--------|----------|-------|
 | 2026-04-24 | WEBHOOK_HMAC_SECRET | initial provisioning (Phase 11) | baseline |
 
+## API key pepper rotation (Phase 13)
+
+### Rotating api_key_pepper
+
+Same pattern as `webhook_hmac_secret` (Phase 11 D-10). Rotation is operator-driven;
+expect a 24-hour grace window where `API_KEY_PEPPER_PREV` continues to verify
+old hashes. API keys are stored as HMAC-SHA256(pepper, raw_key), so rotating the
+pepper invalidates every stored hash unless the previous pepper is retained during
+the grace window.
+
+Runbook:
+
+1. Generate new pepper: `openssl rand -base64 32`
+2. Update Railway env:
+   - Set `API_KEY_PEPPER_PREV` = current value of `API_KEY_PEPPER`
+   - Set `API_KEY_PEPPER` = new value from step 1
+   - Save. Railway restarts the backend service automatically.
+3. Trigger a rolling restart on the backend service (Railway does this on save).
+4. Monitor Sentry for "API key verified with PREV pepper — rotation window active"
+   WARNING logs. Expected to peak during the first 24h then drop to zero as keys
+   get exercised against the new pepper.
+5. After 25 hours with zero PREV-pepper matches, clear `API_KEY_PEPPER_PREV`
+   (Railway env edit + rolling restart).
+
+Grace window: 24 hours. Same as the documented `webhook_hmac_secret` window.
+Tested via `pytest backend/tests/api_v1/test_api_keys.py::test_pepper_rotation`.
+
+Caveat: API keys created BEFORE the rotation MUST be exercised within the grace
+window OR they will fail verification after step 5. If a customer holds a key in
+cold storage (e.g. a LIMS integration that only fires monthly), warn them in
+advance OR keep `API_KEY_PEPPER_PREV` set indefinitely (with the cost of
+supporting compromised-pepper exposure for longer).
+
+### Last Pepper Rotations
+
+| Date | Secret | Operator | Notes |
+|------|--------|----------|-------|
+| 2026-06-04 | API_KEY_PEPPER | initial provisioning (Phase 13) | baseline |
+
 ## Rollback Drill (SC 9 - 5-minute rollback)
 
 Target: restore `/health` green within 5 minutes of detecting a regression.

@@ -1,0 +1,56 @@
+# Release workflow — publishes bindwave-python to PyPI on a signed v* tag push.
+#
+# Three gates protect the release (per T-13-9 supply-chain threat model):
+#   Gate 1 — Signed tag: the tag MUST be created with `git tag -s` (GPG-signed).
+#            The verify-tag-signature job runs `git tag --verify` and fails unless
+#            it finds "Good signature". A force-pushed unsigned tag from a
+#            compromised dev machine never reaches the publish job.
+#   Gate 2 — Environment approval: the publish job targets the GitHub environment
+#            `pypi-release`, which is configured with a Required Reviewer
+#            (second-maintainer approval gate). The publish job pauses for manual
+#            approval before it runs.
+#   Gate 3 — OIDC trusted-publisher: publishing uses GitHub's OIDC token
+#            (id-token: write) against a PyPI Pending/Trusted Publisher config —
+#            no long-lived PYPI_API_TOKEN. Every maintainer account must have 2FA.
+#
+# Mirrors ci.yml structure (actions/checkout, setup-python, hatch) but triggers
+# on tag push instead of PR/branch push.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  verify-tag-signature:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify tag is signed
+        run: |
+          git tag --verify ${{ github.ref_name }} 2>&1 | tee verify.log
+          grep -q 'Good signature' verify.log
+
+  publish:
+    needs: verify-tag-signature
+    environment:
+      name: pypi-release  # GitHub environment with required-reviewer protection (second-maintainer approval gate)
+      url: https://pypi.org/p/bindwave
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC for trusted-publisher (preferred over long-lived PYPI_API_TOKEN)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install hatch
+      - name: Build distributions
+        run: hatch build
+      - name: Publish to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No password supplied — uses GitHub OIDC token + trusted-publisher config on PyPI side.
+        # https://docs.pypi.org/trusted-publishers/
