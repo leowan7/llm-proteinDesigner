@@ -22,6 +22,7 @@ from webhooks.router import router as webhooks_router
 from jobs.router import router as jobs_router
 from sessions.router import router as sessions_router
 from user.router import router as user_router
+from user.api_keys import router as user_api_keys_router
 from admin.router import router as admin_router
 
 # Initialize Sentry error tracking (disabled when sentry_dsn is empty).
@@ -136,6 +137,9 @@ app.include_router(webhooks_router)
 app.include_router(jobs_router)
 app.include_router(sessions_router)
 app.include_router(user_router)
+# Plan 13-04: web-flow API-key CRUD. Registered standalone (its prefix is the
+# full /user/api-keys) and carries include_in_schema=False directly (D-15).
+app.include_router(user_api_keys_router)
 app.include_router(admin_router)
 
 # Phase 13: the public /api/v1/* surface (jobs router; api-keys added in 13-04).

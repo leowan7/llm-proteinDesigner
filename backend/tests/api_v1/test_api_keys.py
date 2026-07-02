@@ -5,32 +5,255 @@ Plan 13-02 ships auth.api_keys + auth.api_key_dependencies.
 Plan 13-04 ships the web endpoint POST /user/api-keys.
 """
 
+import datetime
 import re
+import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
 from auth import api_keys as api_keys_module
 from auth.api_keys import generate_api_key, verify_api_key
+from auth.api_key_dependencies import get_current_api_key
+from auth.dependencies import get_current_user
+from auth.org_dependencies import get_active_org
 from config import settings
+from main import app
 
 
-def test_create_returns_plaintext():
-    """API-01: API key creation returns the plaintext exactly once at creation time.
+# ---------------------------------------------------------------------------
+# Mock-based endpoint helpers (mirror tests/api_v1/test_pagination.py). The
+# api_keys table is not present in any reachable DB (supabase db push not run),
+# so every endpoint test patches get_db_pool + overrides the auth dep.
+# ---------------------------------------------------------------------------
 
-    The plaintext is returned in the POST response body. The DB stores only the
-    HMAC-SHA256 hex digest. Subsequent GET /user/api-keys responses omit plaintext.
+_NOW = datetime.datetime(2026, 6, 5, 12, 0, 0, tzinfo=datetime.timezone.utc)
+
+
+def _make_ctx(conn):
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return ctx
+
+
+def _pool_with_conn(conn):
+    pool = AsyncMock()
+    pool.acquire = MagicMock(return_value=_make_ctx(conn))
+    return pool
+
+
+def _override_active_org(org_id="org-A", role="owner"):
+    async def _dep():
+        return (org_id, role)
+
+    return _dep
+
+
+def _override_user(user_id="user-1"):
+    async def _dep():
+        return user_id
+
+    return _dep
+
+
+def _override_api_key(org_id="org-A", role="owner", api_key_id="key-1"):
+    from fastapi import Request
+
+    async def _dep(request: Request):
+        request.state.api_key_id = api_key_id
+        return (org_id, role)
+
+    return _dep
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_create_returns_plaintext():
+    """API-01: POST /user/api-keys returns plaintext once; GET omits it.
+
+    Two mocked calls: (1) POST INSERT ... RETURNING id, created_at → response
+    carries `plaintext` + `prefix`; (2) GET SELECT → response omits `plaintext`.
     """
-    pytest.skip("Pending: Plan 13-04 ships web create endpoint POST /user/api-keys")
+    key_id = str(uuid.uuid4())
+
+    # POST: INSERT ... RETURNING id, created_at
+    post_conn = AsyncMock()
+    post_conn.fetchrow = AsyncMock(return_value={"id": key_id, "created_at": _NOW})
+
+    app.dependency_overrides[get_current_user] = _override_user()
+    app.dependency_overrides[get_active_org] = _override_active_org()
+    try:
+        with patch("user.api_keys.get_db_pool", return_value=_pool_with_conn(post_conn)):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    "/user/api-keys/",
+                    json={"name": "my ci key"},
+                    headers={"X-Org-Id": "org-A"},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Plaintext shown EXACTLY ONCE, alongside prefix.
+        assert "plaintext" in body
+        assert body["plaintext"].startswith("bw_live_")
+        assert body["prefix"] == body["plaintext"][:12]
+        assert body["id"] == key_id
+        assert body["name"] == "my ci key"
+
+        # GET on the same row NEVER returns plaintext.
+        get_conn = AsyncMock()
+        get_conn.fetch = AsyncMock(
+            return_value=[
+                {
+                    "id": key_id,
+                    "name": "my ci key",
+                    "prefix": body["prefix"],
+                    "created_at": _NOW,
+                    "last_used_at": None,
+                    "role_at_creation": "owner",
+                }
+            ]
+        )
+        with patch("user.api_keys.get_db_pool", return_value=_pool_with_conn(get_conn)):
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                g = await client.get("/user/api-keys/", headers={"X-Org-Id": "org-A"})
+        assert g.status_code == 200, g.text
+        rows = g.json()
+        assert isinstance(rows, list) and len(rows) == 1
+        assert "plaintext" not in rows[0]
+        assert rows[0]["prefix"] == body["prefix"]
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_active_org, None)
 
 
-def test_revoked_key_rejects():
-    """API-03: A revoked API key is rejected with 401 immediately after revocation.
+@pytest.mark.anyio
+async def test_create_blank_name_returns_422():
+    """API-01: a blank name is rejected by Pydantic (422) BEFORE the DB CHECK."""
+    app.dependency_overrides[get_current_user] = _override_user()
+    app.dependency_overrides[get_active_org] = _override_active_org()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                "/user/api-keys/",
+                json={"name": ""},
+                headers={"X-Org-Id": "org-A"},
+            )
+        assert r.status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_active_org, None)
 
-    Revoke sets revoked_at on the row. The get_current_api_key dep checks
-    revoked_at IS NULL in the prefix lookup query. See test_auth.py::
-    test_revoked_key_rejects for the dep-level assertion (fetchrow -> None).
+
+@pytest.mark.anyio
+async def test_revoked_key_rejects():
+    """API-03: revoking a key flips revoked_at; a second revoke is a no-op → 404.
+
+    Mocks the UPDATE result string: "UPDATE 1" (revoked) then "UPDATE 0" (already
+    revoked / not found), exercising the `revoked_at IS NULL` idempotency guard.
     """
-    pytest.skip("Pending: Plan 13-04 ships the revoke endpoint POST /user/api-keys/{id}/revoke")
+    key_id = str(uuid.uuid4())
+
+    conn_ok = AsyncMock()
+    conn_ok.execute = AsyncMock(return_value="UPDATE 1")
+
+    app.dependency_overrides[get_active_org] = _override_active_org()
+    try:
+        transport = ASGITransport(app=app)
+        with patch("user.api_keys.get_db_pool", return_value=_pool_with_conn(conn_ok)):
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r1 = await client.post(
+                    f"/user/api-keys/{key_id}/revoke",
+                    headers={"X-Org-Id": "org-A"},
+                )
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["id"] == key_id
+
+        conn_noop = AsyncMock()
+        conn_noop.execute = AsyncMock(return_value="UPDATE 0")
+        with patch("user.api_keys.get_db_pool", return_value=_pool_with_conn(conn_noop)):
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r2 = await client.post(
+                    f"/user/api-keys/{key_id}/revoke",
+                    headers={"X-Org-Id": "org-A"},
+                )
+        assert r2.status_code == 404
+    finally:
+        app.dependency_overrides.pop(get_active_org, None)
+
+
+@pytest.mark.anyio
+async def test_api_v1_list_org_scoped():
+    """API-03: GET /api/v1/api-keys returns only the caller's org rows.
+
+    The org filter lives in the SQL (`WHERE organization_id = $1`). We assert the
+    org_id bound into the query is the caller's, and only that org's rows return.
+    """
+    org_a_rows = [
+        {
+            "id": str(uuid.uuid4()),
+            "name": "key-a",
+            "prefix": "bw_live_aaaa",
+            "created_at": _NOW,
+            "last_used_at": None,
+        }
+    ]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=org_a_rows)
+
+    app.dependency_overrides[get_current_api_key] = _override_api_key(org_id="org-A")
+    try:
+        with patch("api.v1.api_keys.get_db_pool", return_value=_pool_with_conn(conn)):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.get(
+                    "/api/v1/api-keys/",
+                    headers={"Authorization": "Bearer bw_test_x"},
+                )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [k["name"] for k in body["data"]] == ["key-a"]
+        # org_id bound into the SELECT is the caller's org.
+        assert conn.fetch.await_args.args[1] == "org-A"
+        sql = conn.fetch.await_args.args[0]
+        assert "WHERE organization_id = $1" in sql
+        assert "revoked_at IS NULL" in sql
+    finally:
+        app.dependency_overrides.pop(get_current_api_key, None)
+
+
+@pytest.mark.anyio
+async def test_revoke_404_cross_org():
+    """API-03: revoking a key that belongs to a different org returns 404 problem+json.
+
+    The UPDATE is org-scoped (`AND organization_id = $2`), so a cross-org key
+    matches 0 rows → "UPDATE 0" → 404 (not 403; avoids existence disclosure).
+    """
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 0")
+
+    app.dependency_overrides[get_current_api_key] = _override_api_key(org_id="org-A")
+    try:
+        with patch("api.v1.api_keys.get_db_pool", return_value=_pool_with_conn(conn)):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    f"/api/v1/api-keys/{uuid.uuid4()}/revoke",
+                    headers={"Authorization": "Bearer bw_test_x"},
+                )
+        assert r.status_code == 404
+        assert r.headers["content-type"].startswith("application/problem+json")
+        # org_id bound into the UPDATE is the caller's org (org-scoped guard).
+        assert conn.execute.await_args.args[2] == "org-A"
+    finally:
+        app.dependency_overrides.pop(get_current_api_key, None)
 
 
 def test_generate_api_key_format():
