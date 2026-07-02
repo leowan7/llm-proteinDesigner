@@ -9,6 +9,8 @@ prefixed router.
 
 from __future__ import annotations
 
+from bindwave._pagination import iter_all as _iter_all
+from bindwave._pagination import iter_all_async as _iter_all_async
 from bindwave.types.job import Job, JobListPage
 
 # Full published paths (must match app.openapi()['paths'] verbatim — D-16 / 13-07).
@@ -41,12 +43,16 @@ class JobsResource:
         response = self._client._request(
             "POST", JOBS_PATH, json_body=body, idempotency_key=idempotency_key
         )
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
 
     def get(self, job_id: str) -> Job:
         """Fetch a single job (inline candidates + presigned URLs when complete)."""
         response = self._client._request("GET", JOB_PATH.format(job_id=job_id))
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
 
     def list(
         self,
@@ -73,15 +79,27 @@ class JobsResource:
         }
         response = self._client._request("GET", JOBS_PATH, params=params)
         data = response.json()
-        return JobListPage(
-            data=[Job.model_validate(j) for j in data.get("data", [])],
-            next_cursor=data.get("next_cursor"),
-        )
+        jobs = []
+        for j in data.get("data", []):
+            job = Job.model_validate(j)
+            job._client = self._client
+            jobs.append(job)
+        return JobListPage(data=jobs, next_cursor=data.get("next_cursor"))
 
     def cancel(self, job_id: str) -> Job:
         """Cancel a running or queued job."""
         response = self._client._request("POST", JOB_CANCEL_PATH.format(job_id=job_id))
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
+
+    def iter_all(self, **filters):
+        """Lazily yield every :class:`Job` across all pages (walks the cursor).
+
+        ``filters`` (e.g. ``status="complete"``) are forwarded to ``list`` on
+        every page. Returns a generator — no page is loaded until iterated.
+        """
+        return _iter_all(self, **filters)
 
 
 class AsyncJobsResource:
@@ -110,12 +128,16 @@ class AsyncJobsResource:
         response = await self._client._request(
             "POST", JOBS_PATH, json_body=body, idempotency_key=idempotency_key
         )
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
 
     async def get(self, job_id: str) -> Job:
         """Fetch a single job (inline candidates + presigned URLs when complete)."""
         response = await self._client._request("GET", JOB_PATH.format(job_id=job_id))
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
 
     async def list(
         self,
@@ -142,14 +164,26 @@ class AsyncJobsResource:
         }
         response = await self._client._request("GET", JOBS_PATH, params=params)
         data = response.json()
-        return JobListPage(
-            data=[Job.model_validate(j) for j in data.get("data", [])],
-            next_cursor=data.get("next_cursor"),
-        )
+        jobs = []
+        for j in data.get("data", []):
+            job = Job.model_validate(j)
+            job._client = self._client
+            jobs.append(job)
+        return JobListPage(data=jobs, next_cursor=data.get("next_cursor"))
 
     async def cancel(self, job_id: str) -> Job:
         """Cancel a running or queued job."""
         response = await self._client._request(
             "POST", JOB_CANCEL_PATH.format(job_id=job_id)
         )
-        return Job.model_validate(response.json())
+        job = Job.model_validate(response.json())
+        job._client = self._client
+        return job
+
+    def iter_all_async(self, **filters):
+        """Lazily yield every :class:`Job` across all pages (async generator).
+
+        ``filters`` are forwarded to ``list`` on every page. Returns an async
+        generator — ``async for job in client.jobs.iter_all_async(): ...``.
+        """
+        return _iter_all_async(self, **filters)
