@@ -10,20 +10,47 @@ pip install bindwave
 
 ## Quickstart
 
-> **0.1.0 contract — implementation lands in Plan 13-04/13-05.** The public
-> surface below is the frozen API shape; calling it in 0.1.0 raises
-> `NotImplementedError`.
+Authenticate with an API key (create one in the web app under Settings → API
+Keys). Pass it directly or set the `BINDWAVE_API_KEY` environment variable.
 
 ```python
-from bindwave import Client
+import time
+from bindwave import Client, JobStatus
 
-client = Client(api_key="bw_live_...")
+client = Client(api_key="bw_live_...")  # or set BINDWAVE_API_KEY
 
-job = client.jobs.submit(tool="rfdiffusion", parameters={...})
-job.wait_until_complete()
+job = client.jobs.submit(tool="rfdiffusion", parameters={"target_chain": "A"})
+print(job.id, job.status)
 
-results = job.download_results()
+while job.status not in (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED):
+    time.sleep(30)
+    job = client.jobs.get(job.id)
+
+print(f"{len(job.candidates)} candidates")
 ```
+
+The client auto-generates an `Idempotency-Key` per submit, retries `429`/`5xx`
+with exponential backoff (honoring `Retry-After`), and never sends an
+`X-Org-Id` header — the organization is resolved server-side from the key.
+
+### Managing keys
+
+```python
+for key in client.api_keys.list():
+    print(key.prefix, key.name)
+
+client.api_keys.revoke("key-id")
+```
+
+Errors raise a typed exception: `BindwaveAuthError` (401),
+`BindwaveRateLimitError` (429), `BindwaveValidationError` (400/422),
+`BindwaveJobError` (other 4xx), `BindwaveAPIError` (5xx).
+
+See [`examples/submit_and_wait.py`](examples/submit_and_wait.py) for a runnable
+script.
+
+> **Note:** `AsyncClient` is a placeholder in 0.1.0 (ships in a later release);
+> calling it raises `NotImplementedError`.
 
 ## License
 
