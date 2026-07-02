@@ -60,6 +60,40 @@ limiter = Limiter(
 )
 
 
+def get_api_key_id(request: Request) -> str:
+    """Key func for api_v1_limiter — reads api_keys.id from request.state.
+
+    ``auth.api_key_dependencies.get_current_api_key`` sets
+    ``request.state.api_key_id`` after a successful verify (Phase 13, Plan 13-02).
+    If missing (e.g. an unauthenticated request that reached a v1 path), fall
+    back to the client IP so anonymous traffic is still rate-limited.
+
+    Returns a key like ``apikey:<uuid>`` or ``ip:<address>``.
+    """
+    api_key_id = getattr(request.state, "api_key_id", None)
+    if api_key_id:
+        return f"apikey:{api_key_id}"
+    return f"ip:{request.client.host}"
+
+
+# Phase 13 (RESEARCH §2.4 / §5.4): dedicated per-API-key limiter for /api/v1/*.
+# headers_enabled=True emits X-RateLimit-* headers. No default_limits and NO
+# second SlowAPIMiddleware — the route decorator @api_v1_limiter.limit(...) is
+# the only application path, which avoids the slowapi double-headers bug (#33).
+api_v1_limiter = Limiter(
+    key_func=get_api_key_id,
+    storage_uri=settings.redis_url,
+    headers_enabled=True,
+    enabled=settings.rate_limit_enabled and not settings.testing,
+)
+
+# slowapi stores the flag privately as ``_headers_enabled`` and exposes no public
+# ``headers_enabled`` attribute in the installed version. Mirror the private flag
+# to a public one so callers (and the plan's acceptance check) can assert
+# ``api_v1_limiter.headers_enabled is True`` regardless of slowapi internals.
+api_v1_limiter.headers_enabled = api_v1_limiter._headers_enabled
+
+
 def setup_rate_limiting(app) -> None:
     """Wire slowapi rate limiting into the FastAPI application.
 

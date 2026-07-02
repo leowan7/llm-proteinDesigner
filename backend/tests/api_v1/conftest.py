@@ -7,11 +7,20 @@ Three additional fixtures specific to v1 authentication:
 - override_api_key: bypasses get_current_api_key via dependency_overrides
 """
 
+import os
 import uuid
-import pytest
-from httpx import ASGITransport, AsyncClient
 
-from main import app
+# Phase 13: seed a dev-only pepper before `from main import app` loads settings,
+# so isolated runs of tests/api_v1/ still have a non-empty pepper (verify_api_key
+# fails closed on an empty pepper). setdefault so the parent conftest / a real
+# env value wins. Mirrors backend/tests/conftest.py.
+os.environ.setdefault("TESTING", "true")
+os.environ.setdefault("API_KEY_PEPPER", "test_pepper_dev_only")
+
+import pytest  # noqa: E402
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from main import app  # noqa: E402
 
 
 @pytest.fixture

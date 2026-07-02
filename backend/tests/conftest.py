@@ -18,6 +18,11 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
 
 # TESTING=true disables CSRF middleware so POST requests don't get 403
 os.environ["TESTING"] = "true"
+# Phase 13: verify_api_key fails closed on an empty pepper. .env.local holds the
+# real secret and must not be edited here, so seed a dev-only pepper for the test
+# process before `from main import app` triggers settings load. setdefault so a
+# real API_KEY_PEPPER in the environment still wins.
+os.environ.setdefault("API_KEY_PEPPER", "test_pepper_dev_only")
 os.environ.setdefault("SUPABASE_URL", "http://127.0.0.1:54321")
 os.environ.setdefault("COOKIE_SECURE", "false")
 os.environ.setdefault("CSRF_SECRET", "test-csrf-secret")

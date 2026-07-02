@@ -103,6 +103,7 @@ if not settings.testing:
         cookie_samesite="lax",
         cookie_secure=settings.cookie_secure,
         cookie_domain=settings.csrf_cookie_domain or None,
+        exempt_urls=[r"^/api/v1/"],
     )
 
 # Rate limiting — after CORS, before routers
