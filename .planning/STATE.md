@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Phase 12 verified — ready to plan Phase 13
-stopped_at: Completed 12-06-PLAN.md (final plan of Phase 12 — Playwright E2E spec + drop-column migration + Phase 12 rollout runbook + REQUIREMENTS.md ORG-01..ORG-08 validation + ROADMAP.md Phase 12 6/6 complete + invitation-token contract bug-fix)
-last_updated: "2026-06-05T01:13:37.923Z"
+status: Phase 13 complete — public API + bindwave SDK shipped; PyPI publish pending human checkpoints
+stopped_at: Completed 13-07-PLAN.md Tasks 1-2 (OpenAPI contract test + frozen SDK inventory + release.yml + E2E test + api_key_pepper rotation runbook + REQUIREMENTS/ROADMAP/STATE + 13-VERIFICATION.md). Tasks 3-4 are human-action checkpoints (PyPI namespace ownership + signed-tag push) — deferred to Leo.
+last_updated: "2026-07-02T16:19:26Z"
 progress:
   total_phases: 13
-  completed_phases: 10
+  completed_phases: 11
   total_plans: 68
-  completed_plans: 55
-  percent: 77
+  completed_plans: 62
+  percent: 91
 ---
 
 # Project State
@@ -20,15 +20,15 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 13 — public-api
+**Current focus:** Phase 13 complete — awaiting PyPI publish handoff
 
 ## Current Position
 
-Phase: 13 (public-api) — EXECUTING
-Plan: 2 of 7
-Verification: passed 33/33 must_haves after 3 gap-fix follow-up commits (`ee1ff77` deletion_cron + admin/router, `1b7daa0` /health flag, `cf082e7` user/export GDPR path). See `12-VERIFICATION.md` (commit `f7b70bd`).
+Phase: 13 (public-api) — COMPLETE (code); PyPI publish pending human checkpoints
+Plan: 7 of 7 (Tasks 1-2 shipped; Tasks 3-4 human-action deferred)
+Verification: Phase 13 closed 2026-06-04 — see `.planning/phases/13-public-api/13-VERIFICATION.md`. Contract suite green (4 tests); full backend suite 0 failed. bindwave 0.1.0 release workflow gated but not yet published (Tasks 3-4 require Leo's PyPI credentials + signing key).
 
-Next position: Phase 13 (Public API) — first plan TBD.
+Next position: Awaiting next milestone. Remaining in-flight phases: 4 (Pipeline Validation, GPU track) + 9 (Testing & CI/CD).
 
 ## Performance Metrics
 
@@ -149,6 +149,10 @@ Recent decisions affecting current work:
 - [Phase 12-teams-and-organizations]: Playwright E2E for full teams flow (12-06) lives at frontend/e2e/organizations.spec.ts (NOT tests/e2e/) to match playwright.config.ts testDir; two BrowserContext instances simulate the two-user flow; per-test test.skip cascade gates execution on feature-flag presence + seed accounts so the spec is informational on flag-off CI and load-bearing on flag-on staging/prod
 - [Phase 12-teams-and-organizations]: Invitation copy-link contract resolved (12-06) — POST /organizations/{id}/invitations now returns the bearer token; GET list endpoint conditionally returns token only when caller_role == owner; frontend InvitationRow.token: string | null; InvitationsTab.handleCopyLink uses invite.token (was invite.id, which silently produced broken accept URLs)
 - [Phase 12-teams-and-organizations]: Drop-column migration (20260606000001) ships in the repo but is NOT applied by the merge — runbook step 9 gates the actual run on verify-script exit 0 + 24h clean prod monitoring; rollback past that point requires a forward migration + backfill from organizations.stripe_customer_id
+- [Phase 13-public-api]: API keys use HMAC-SHA256 + per-env pepper (RESEARCH §2.10 — column name bcrypt_hash retained for D-03 compat); Idempotency-Key required on POST /api/v1/jobs; cursor pagination opaque base64 (no HMAC); only /api/v1/* visible in /api/openapi.json
+- [Phase 13-public-api]: Frozen SDK contract _sdk_contract_v0_1_0.py encodes trailing-slash collection paths (/api/v1/jobs/, /api/v1/api-keys/) to match the emitted OpenAPI spec verbatim — the plan example used slashless paths which the exact `path in spec["paths"]` assertion would reject
+- [Phase 13-public-api]: Contract test imports `from tests.contract._sdk_contract_v0_1_0` (NOT backend.tests.*) because `cd backend && pytest` puts backend/ on sys.path root — matches every existing backend test convention (F9)
+- [Phase 13-public-api]: release.yml uses 3 supply-chain gates — signed-tag verify + GitHub environment (second-maintainer approval) + OIDC trusted-publisher (no long-lived PYPI_API_TOKEN); PyPI publish itself is a human-action checkpoint (Task 3 namespace ownership + Task 4 signed tag push) deferred to Leo
 
 ### Pending Todos
 

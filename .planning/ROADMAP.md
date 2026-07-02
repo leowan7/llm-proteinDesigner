@@ -25,7 +25,7 @@ Decimal phases appear between their surrounding integers in numeric order.
  (completed 2026-04-23)
 - [x] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL (completed 2026-06-04)
 - [x] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer) (implementation complete 2026-06-04; production cutover gated by docs/runbook-phase-12-rollout.md)
-- [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
+- [x] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download (completed 2026-06-04)
 
 ## Phase Details
 
@@ -267,7 +267,18 @@ Plans:
   4. Rate limiting: 60 requests/minute per API key
   5. OpenAPI/Swagger documentation auto-generated and hosted at /api/docs
   6. Python SDK published to PyPI: `pip install bindwave` with typed client
-**Plans**: TBD
+**Plans**: 7 plans
+
+Plans:
+- [x] 13-01-PLAN.md — Foundation: REQUIREMENTS edits, migrations, OpenAPI surface flip, test scaffolds
+- [x] 13-02-PLAN.md — API-key auth dep + bindwave-python repo bootstrap
+- [x] 13-03-PLAN.md — /api/v1/jobs router + idempotency + RFC 7807 + rate-limit pipeline
+- [x] 13-04-PLAN.md — /api/v1/api-keys self-management + bindwave-python sync Client
+- [x] 13-05-PLAN.md — AsyncClient + iter_all + Job.wait_until_complete + Job.download_results
+- [x] 13-06-PLAN.md — SettingsPage API Keys tab + plaintext-once UX
+- [x] 13-07-PLAN.md — Contract test + PyPI release + verification + ROADMAP closeout
+
+**Verified**: 2026-06-04 — see .planning/phases/13-public-api/13-VERIFICATION.md for full record. All 6 success criteria PASS. bindwave 0.1.0 release workflow gated (signed tag + environment approval + OIDC trusted-publisher); PyPI publish pending the two human-action checkpoints (Task 3 namespace ownership, Task 4 signed tag push).
 
 ## Progress
 
@@ -309,7 +320,6 @@ real GPU output and cannot be mocked.
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
 | 12. Teams & Organizations | Multi-user, org billing, RBAC | 5/6 | In Progress | Phase 11 |
-| 13. Public API | REST API, API keys, Python SDK | 1/7 | In Progress|  |
 
 **Completed:**
 
@@ -322,6 +332,7 @@ real GPU output and cannot be mocked.
 | 6. UI Improvements | Sidebar, sessions, settings | 5/5 | Done |
 | 7. Admin Dashboard | User/job/revenue monitoring | 5/5 | Done |
 | 8. Post-Run Analysis Agent | AI result analysis, ranking, reports | 4/4 | 2026-04-10 |
+| 13. Public API | REST API, API keys, Python SDK | 7/7 | 2026-06-04 |
 
 ---
 
