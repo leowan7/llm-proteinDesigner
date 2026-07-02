@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { PrivacyTab } from "@/components/legal/PrivacyTab";
+import { ApiKeysTab } from "@/components/api-keys/ApiKeysTab";
 import { useOrgContext } from "@/components/org/OrganizationContext";
 import { MembersTab } from "@/components/org/MembersTab";
 import { InvitationsTab } from "@/components/org/InvitationsTab";
@@ -520,6 +521,7 @@ const VALID_SETTINGS_TABS = [
   "account",
   "billing",
   "privacy",
+  "api-keys",
   "usage",
   "notifications",
   "organization",
@@ -631,6 +633,7 @@ export function SettingsPage() {
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="privacy">Privacy</TabsTrigger>
+          <TabsTrigger value="api-keys">API Keys</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
           {showOrgTab && (
@@ -657,6 +660,10 @@ export function SettingsPage() {
             when deletion_requested_at is non-null.
           */}
           <PrivacyTab initialSettings={settings} onChanged={loadSettings} />
+        </TabsContent>
+
+        <TabsContent value="api-keys">
+          <ApiKeysTab />
         </TabsContent>
 
         <TabsContent value="usage">
