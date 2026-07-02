@@ -138,3 +138,151 @@ async def test_mark_complete_updates_row():
     assert "response_status" in sql
     assert "response_body" in sql
     assert "completed_at = now()" in sql
+
+
+# ---------------------------------------------------------------------------
+# Router-level integration tests for POST /api/v1/jobs idempotency branches.
+# These drive the full decision tree through HTTP with a mocked transaction conn.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from httpx import ASGITransport, AsyncClient  # noqa: E402
+
+from auth.api_key_dependencies import get_current_api_key  # noqa: E402
+from main import app  # noqa: E402
+
+
+def _txn_conn_ctx(conn):
+    """Wrap a conn as pool.acquire() ctx whose conn.transaction() is also a ctx."""
+    txn = AsyncMock()
+    txn.__aenter__ = AsyncMock(return_value=None)
+    txn.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=txn)
+
+    acq = AsyncMock()
+    acq.__aenter__ = AsyncMock(return_value=conn)
+    acq.__aexit__ = AsyncMock(return_value=False)
+    return acq
+
+
+def _override_api_key(org_id="org-1", role="owner", api_key_id="key-1"):
+    from fastapi import Request
+
+    async def _dep(request: Request):
+        request.state.api_key_id = api_key_id
+        return (org_id, role)
+
+    return _dep
+
+
+async def _post_submit(conn):
+    pool = AsyncMock()
+    pool.acquire = MagicMock(return_value=_txn_conn_ctx(conn))
+    app.dependency_overrides[get_current_api_key] = _override_api_key()
+    try:
+        with patch("api.v1.jobs.get_db_pool", return_value=pool):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                return await client.post(
+                    "/api/v1/jobs/",
+                    json={"tool": "rfdiffusion", "parameters": {"x": 1}},
+                    headers={
+                        "Authorization": "Bearer bw_test_x",
+                        "Idempotency-Key": "idem-1",
+                    },
+                )
+    finally:
+        app.dependency_overrides.pop(get_current_api_key, None)
+
+
+@pytest.mark.anyio
+async def test_missing_idempotency_key_returns_400():
+    """API-04: POST without Idempotency-Key -> 400 problem+json (bad-request)."""
+    conn = AsyncMock()
+    pool = AsyncMock()
+    pool.acquire = MagicMock(return_value=_txn_conn_ctx(conn))
+    app.dependency_overrides[get_current_api_key] = _override_api_key()
+    try:
+        with patch("api.v1.jobs.get_db_pool", return_value=pool):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                r = await client.post(
+                    "/api/v1/jobs/",
+                    json={"tool": "rfdiffusion", "parameters": {"x": 1}},
+                    headers={"Authorization": "Bearer bw_test_x"},
+                )
+    finally:
+        app.dependency_overrides.pop(get_current_api_key, None)
+
+    assert r.status_code == 400
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"].endswith("/bad-request")
+
+
+@pytest.mark.anyio
+async def test_pending_returns_409():
+    """API-04 (lifecycle step 3): a pending row -> 409 idempotency-in-progress."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # try_begin INSERT ON CONFLICT DO NOTHING -> None (conflict)
+            {  # try_begin SELECT existing
+                "status": "pending",
+                "request_body_hash": "whatever",
+                "response_status": None,
+                "response_body": None,
+            },
+        ]
+    )
+    r = await _post_submit(conn)
+    assert r.status_code == 409
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"].endswith("/idempotency-in-progress")
+
+
+@pytest.mark.anyio
+async def test_body_mismatch_returns_422():
+    """API-04 (lifecycle step 4): same key, different body -> 422 key-conflict."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # conflict
+            {
+                "status": "completed",
+                "request_body_hash": "a-different-hash",
+                "response_status": 201,
+                "response_body": {"id": "job-old", "status": "queued"},
+            },
+        ]
+    )
+    r = await _post_submit(conn)
+    assert r.status_code == 422
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["type"].endswith("/idempotency-key-conflict")
+
+
+@pytest.mark.anyio
+async def test_replay_returns_stored_response():
+    """API-04 (lifecycle step 5): completed match -> replay stored body + replay header."""
+    stored = {"id": "job-old", "status": "queued", "tool": "rfdiffusion"}
+    # request_body_hash must equal hash_body({"tool":"rfdiffusion","parameters":{"x":1},"name":None}).
+    from api.v1.idempotency import hash_body as _hb
+
+    match_hash = _hb({"tool": "rfdiffusion", "parameters": {"x": 1}, "name": None})
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # conflict
+            {
+                "status": "completed",
+                "request_body_hash": match_hash,
+                "response_status": 201,
+                "response_body": stored,
+            },
+        ]
+    )
+    r = await _post_submit(conn)
+    assert r.status_code == 201
+    assert r.headers.get("X-Idempotency-Replay") == "1"
+    assert r.json() == stored

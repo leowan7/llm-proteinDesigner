@@ -111,6 +111,19 @@ if settings.rate_limit_enabled:
     from middleware.rate_limit import setup_rate_limiting
     setup_rate_limiting(app)
 
+# Phase 13 (RESEARCH §2.7): RFC 7807 problem+json handlers scoped to /api/v1/*.
+# Registered app-level (FastAPI exception handlers cannot be router-scoped); the
+# handlers branch on request.url.path so web-flow routes keep their existing
+# {"detail": ...} shape. No second SlowAPIMiddleware is added — api_v1_limiter is
+# decorator-only and shares the single SlowAPIMiddleware from setup_rate_limiting.
+from fastapi.exceptions import HTTPException as _HTTPException, RequestValidationError as _RequestValidationError  # noqa: E402
+from api.v1.errors import (  # noqa: E402
+    http_exception_handler as _v1_http_exception_handler,
+    validation_exception_handler as _v1_validation_exception_handler,
+)
+app.add_exception_handler(_HTTPException, _v1_http_exception_handler)
+app.add_exception_handler(_RequestValidationError, _v1_validation_exception_handler)
+
 # Structured logging — added last so it wraps all other middleware (outermost in Starlette).
 app.add_middleware(StructuredLoggingMiddleware)
 
@@ -124,6 +137,10 @@ app.include_router(jobs_router)
 app.include_router(sessions_router)
 app.include_router(user_router)
 app.include_router(admin_router)
+
+# Phase 13: the public /api/v1/* surface (jobs router; api-keys added in 13-04).
+from api.v1 import router as api_v1_router  # noqa: E402
+app.include_router(api_v1_router)
 
 # Phase 12: Teams & Organizations -- gated by feature flag during rollout.
 # Mount only when settings.organizations_enabled is True so existing
