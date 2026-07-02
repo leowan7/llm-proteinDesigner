@@ -1,37 +1,140 @@
-"""Tests for Stripe-style Idempotency-Key header behavior on POST /api/v1/jobs.
+"""Tests for the Stripe-style idempotency state machine (api/v1/idempotency.py).
 
 Requirements: API-04 (idempotency replay, body mismatch 422, in-progress 409).
-Downstream plan: Plan 13-03 ships api/v1/jobs.py + api/v1/idempotency.py.
 Schema reference: RESEARCH §2.9 (3-state lifecycle: pending | completed).
+
+These are unit tests against the store functions with a mocked asyncpg conn — the
+``api_key_idempotency`` table is not present in any reachable DB (13-01 Task 4 /
+`supabase db push` pending), so we drive the 3-state logic by stubbing the conn's
+fetchrow/execute return values. This exercises the exact decision inputs the
+jobs router branches on (None / pending / body-mismatch / completed).
 """
+
+from unittest.mock import AsyncMock
 
 import pytest
 
+from api.v1.idempotency import (
+    canonicalize_body,
+    hash_body,
+    mark_complete,
+    try_begin,
+)
 
-def test_replay():
-    """API-04: Same (api_key_id, idempotency_key, body) within 24h replays stored response.
 
-    The second identical POST returns the exact same response body + status code
-    as the first, with X-Idempotency-Replay: 1 header added.
+def test_canonicalize_body_is_sort_stable():
+    """API-04: canonicalize_body sorts keys + strips whitespace for a stable hash."""
+    assert canonicalize_body({"b": 2, "a": 1}) == '{"a":1,"b":2}'
+    # Reordered-but-same-content bodies canonicalize identically.
+    assert canonicalize_body({"a": 1, "b": 2}) == canonicalize_body({"b": 2, "a": 1})
+
+
+def test_hash_body_is_sha256_hex():
+    """API-04: hash_body returns a 64-char sha256 hex digest."""
+    h = hash_body({"a": 1})
+    assert len(h) == 64
+    assert all(c in "0123456789abcdef" for c in h)
+    # Same canonical content -> same hash regardless of key order.
+    assert hash_body({"a": 1, "b": 2}) == hash_body({"b": 2, "a": 1})
+
+
+@pytest.mark.anyio
+async def test_try_begin_claims_slot_returns_none():
+    """API-04 (lifecycle step 1): a fresh key INSERTs 'pending' and returns None.
+
+    ON CONFLICT DO NOTHING RETURNING status yields a row on insert -> caller
+    proceeds to dispatch.
     """
-    pytest.skip("Pending: Plan 13-03 ships api/v1/jobs.py + api/v1/idempotency.py")
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value={"status": "pending"})  # INSERT succeeded
+
+    result = await try_begin(conn, "key-id", "idem-1", "hash-1")
+
+    assert result is None
+    # Only the INSERT fetchrow ran; no second SELECT.
+    assert conn.fetchrow.await_count == 1
 
 
-def test_body_mismatch_returns_422():
-    """API-04: Same idempotency_key with a different request body returns 422.
+@pytest.mark.anyio
+async def test_try_begin_pending_returns_row():
+    """API-04 (lifecycle step 3): existing pending row -> caller returns 409."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # INSERT ... ON CONFLICT DO NOTHING RETURNING -> None (conflict)
+            {
+                "status": "pending",
+                "request_body_hash": "hash-1",
+                "response_status": None,
+                "response_body": None,
+            },
+        ]
+    )
 
-    Body mismatch is detected by comparing sha256(canonicalize(body)) against the
-    stored request_body_hash. Returns application/problem+json per API-07.
-    Reference: RESEARCH §2.9 lifecycle step 4.
-    """
-    pytest.skip("Pending: Plan 13-03 ships api/v1/jobs.py + api/v1/idempotency.py")
+    existing = await try_begin(conn, "key-id", "idem-1", "hash-1")
+
+    assert existing is not None
+    assert existing["status"] == "pending"
 
 
-def test_pending_returns_409():
-    """API-04: A concurrent request with the same key (status='pending') returns 409.
+@pytest.mark.anyio
+async def test_try_begin_body_mismatch_row():
+    """API-04 (lifecycle step 4): completed row with a different body hash -> 422."""
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # conflict
+            {
+                "status": "completed",
+                "request_body_hash": "hash-OLD",
+                "response_status": 201,
+                "response_body": {"id": "job-1", "status": "queued"},
+            },
+        ]
+    )
 
-    The idempotency row is inserted at 'pending' when the first request begins
-    processing. A concurrent retry hitting the same key sees 'pending' and gets 409
-    with a 'retry after a few seconds' hint. Reference: RESEARCH §2.9 lifecycle step 3.
-    """
-    pytest.skip("Pending: Plan 13-03 ships api/v1/jobs.py + api/v1/idempotency.py")
+    existing = await try_begin(conn, "key-id", "idem-1", "hash-NEW")
+
+    assert existing is not None
+    assert existing["request_body_hash"] != "hash-NEW"
+
+
+@pytest.mark.anyio
+async def test_try_begin_replay_row():
+    """API-04 (lifecycle step 5): completed row + matching body -> replay stored body."""
+    stored = {"id": "job-1", "status": "queued"}
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(
+        side_effect=[
+            None,  # conflict
+            {
+                "status": "completed",
+                "request_body_hash": "hash-1",
+                "response_status": 201,
+                "response_body": stored,
+            },
+        ]
+    )
+
+    existing = await try_begin(conn, "key-id", "idem-1", "hash-1")
+
+    assert existing is not None
+    assert existing["status"] == "completed"
+    assert existing["request_body_hash"] == "hash-1"
+    assert existing["response_body"] == stored
+
+
+@pytest.mark.anyio
+async def test_mark_complete_updates_row():
+    """API-04 (lifecycle step 2): mark_complete UPDATEs status + response fields."""
+    conn = AsyncMock()
+    conn.execute = AsyncMock(return_value="UPDATE 1")
+
+    await mark_complete(conn, "key-id", "idem-1", 201, {"id": "job-1", "status": "queued"})
+
+    assert conn.execute.await_count == 1
+    sql = conn.execute.await_args.args[0]
+    assert "status = 'completed'" in sql
+    assert "response_status" in sql
+    assert "response_body" in sql
+    assert "completed_at = now()" in sql
