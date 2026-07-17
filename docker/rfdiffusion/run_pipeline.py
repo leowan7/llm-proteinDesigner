@@ -701,6 +701,88 @@ def run_command(
     return result.stdout + result.stderr
 
 
+# ===========================================================================
+# Raw output capture
+# ===========================================================================
+
+# Fixed path the Modal wrapper (infrastructure/modal/rfdiffusion_app.py) reads
+# after this subprocess exits, in the same read-a-file-from-/tmp style as
+# SMOKE_RESULTS_PATH and _WEBHOOK_OUTCOME_PATH. The pipeline runs as a
+# subprocess and so cannot mount a Volume itself; the wrapper moves this file
+# onto one. It sits OUTSIDE every work dir we create (all of them
+# tempfile.mkdtemp() dirs of the form /tmp/<prefix><random>/), so the tar can
+# never land inside the tree it is archiving.
+RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
+
+
+def ship_raw_archive(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
+    """Tar the COMPLETE work dir to ``dest`` immediately before it is deleted.
+
+    A container must never decide which fields are worth keeping. This pipeline
+    keeps 3 numbers per design (ipTM, pLDDT, i_pAE) out of ColabFold's full
+    score JSON, discards every RFdiffusion trajectory, every ProteinMPNN FASTA
+    and every AF2 model that is not rank_001, and then rmtree's the lot. A
+    sibling pipeline lost 460 designs exactly this way: it reported ``iptm``
+    (interface-pTM averaged over EVERY chain pair) where it meant
+    ``design_iptm`` (binder -> target), read ~2x high, and the evidence needed
+    to catch it had already died with the container. Ship the tree home and
+    decide LOCALLY, where re-parsing is free.
+
+    Unconditional by design: not gated on candidates, on success, or on
+    anything being uploaded. A run that produced zero candidates or crashed
+    outright is precisely the run whose tree you need.
+
+    Best-effort: capture must NEVER fail the run, so every problem is logged
+    and nothing is raised.
+    """
+    import tarfile
+
+    try:
+        if not work_dir or not os.path.isdir(work_dir):
+            logger.warning(
+                "Raw capture: no work dir to archive (%s); nothing to ship", work_dir,
+            )
+            return
+
+        # The tar MUST NOT be written inside the tree it archives, or it tars
+        # itself. RAW_ARCHIVE_PATH is outside every mkdtemp work dir we make,
+        # but assert it rather than trust it: a future caller passing a
+        # work_dir of "/tmp" would otherwise produce a self-referencing tar.
+        abs_dest = os.path.abspath(dest)
+        abs_work = os.path.abspath(work_dir)
+        if os.path.commonpath([abs_dest, abs_work]) == abs_work:
+            logger.error(
+                "Raw capture: refusing to write %s inside the tree it archives (%s)",
+                abs_dest, abs_work,
+            )
+            return
+
+        # Stream straight to a file. Never io.BytesIO: an in-memory tar costs
+        # ~3-4x the archive size in peak RSS, and an AF2 output tree runs to
+        # hundreds of MB.
+        with tarfile.open(abs_dest, "w:gz") as tf:
+            tf.add(abs_work, arcname=os.path.basename(abs_work.rstrip("/")) or "work")
+        logger.info(
+            "Raw capture: archived %s -> %s (%.1f MB)",
+            abs_work, abs_dest, os.path.getsize(abs_dest) / 1e6,
+        )
+    except Exception as exc:
+        # Capture is best-effort by design. A job that crashed before writing
+        # output is exactly when the diagnostics matter most, so a failure here
+        # must never mask the real error or fail the run.
+        logger.error(
+            "Raw capture failed (non-fatal): %s: %s", type(exc).__name__, exc,
+        )
+        # A crash mid-write (e.g. ENOSPC) can leave a truncated but still-openable .tgz at
+        # the destination; the wrapper parks whatever exists. Remove the partial so a failed
+        # capture parks NOTHING rather than a tar that reports success but cannot be read.
+        try:
+            if os.path.exists(abs_dest):
+                os.remove(abs_dest)
+        except OSError:
+            pass
+
+
 _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
 
 
@@ -1240,6 +1322,10 @@ def stage_af2_validation(
                     "scores": scores,
                     "sequence": binder_sequence,
                     "fasta_path": fasta_path,
+                    # The dir the scores above were parsed from. Carried so the upload step can ship
+                    # the structure those scores actually describe; without it, the only path on hand
+                    # at upload time is the bare RFdiffusion backbone, which they do NOT describe.
+                    "af2_dir": per_design_out,
                 })
                 logger.info(
                     "AF2 scores for %s: ipTM=%.3f pLDDT=%.1f i_pAE=%.1f",
@@ -1367,6 +1453,10 @@ def main():
                 sys.exit(1)
             return
         finally:
+            # In the finally, immediately before the rmtree: this covers the
+            # clean return, the sys.exit(1) above (SystemExit still unwinds
+            # through here) and any exception out of run_smoke_tier.
+            ship_raw_archive(work_dir)
             shutil.rmtree(work_dir, ignore_errors=True)
 
     # ---- Legacy webhook path ----
@@ -1505,21 +1595,59 @@ def main():
 
         # Request fresh presigned upload URLs from the backend
         upload_urls = {}
+        url_exchange_error = None
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
+                url_exchange_error = str(exc)
+
+        failed_uploads: list[str] = []
+        if filenames_to_upload and not upload_urls:
+            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
+            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
+            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
+            # failed_uploads is surfaced to tools-hub via result_payload, where
+            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
+            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
+            # was only the silence.
+            logger.error(
+                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
+                "so the run is not reported as a clean success",
+                url_exchange_error or "empty response", len(filenames_to_upload),
+            )
+            failed_uploads.extend(filenames_to_upload)
 
         for rank_idx, r in enumerate(passing):
             rank = rank_idx + 1
             design_name = r["design_name"]
 
-            backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
-            if not os.path.exists(backbone_pdb):
-                backbone_pdb = os.path.join(
-                    rfdiff_output, f"design_{design_name.split('_')[-1]}.pdb"
+            # Ship the structure the scores describe: the AF2-predicted COMPLEX, not the bare
+            # RFdiffusion backbone. r["scores"] is parsed from rank_001 in r["af2_dir"], so the
+            # rank_001 model there is the object ipTM/pLDDT/i_pAE were actually measured on.
+            # Uploading the backbone hands the user a structure that contradicts its own scores.
+            backbone_pdb = None
+            af2_dir = r.get("af2_dir")
+            if af2_dir and os.path.isdir(af2_dir):
+                for pat in ("*_relaxed_rank_001_*.pdb", "*_unrelaxed_rank_001_*.pdb",
+                            "*rank_001*.pdb"):
+                    hits = sorted(glob(os.path.join(af2_dir, pat)))
+                    if hits:
+                        backbone_pdb = hits[0]
+                        break
+            if not backbone_pdb:
+                # AF2 wrote no rank_001 for this design. Fall back to the backbone so the run still
+                # produces something, but make the mismatch visible rather than silent.
+                logger.warning(
+                    "No AF2 complex for %s; falling back to the RFdiffusion backbone. The uploaded "
+                    "structure will NOT correspond to its ipTM/pLDDT/i_pAE.", design_name,
                 )
+                backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
+                if not os.path.exists(backbone_pdb):
+                    backbone_pdb = os.path.join(
+                        rfdiff_output, f"design_{design_name.split('_')[-1]}.pdb"
+                    )
 
             upload_filename = f"design_{rank_idx + 1:03d}.pdb"
             # pdb_key MUST share basename with upload_filename so the
@@ -1542,6 +1670,7 @@ def main():
                     upload_output(upload_urls[upload_filename], backbone_pdb)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
+                    failed_uploads.append(upload_filename)
 
         # ----- Upload metrics CSV -----
         if candidates:
@@ -1552,6 +1681,7 @@ def main():
                     upload_output(upload_urls["metrics.csv"], csv_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload metrics CSV: %s", exc)
+                    failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
@@ -1595,6 +1725,8 @@ def main():
                 "of the best hits."
             ),
         }
+        if failed_uploads:
+            result_payload["failed_uploads"] = failed_uploads
         post_webhook(webhook_url, job_id, pod_id, result_payload)
 
     except Exception as exc:
@@ -1604,6 +1736,12 @@ def main():
         })
 
     finally:
+        # In the finally, immediately before the rmtree: this covers the happy
+        # path, the four early `return`s inside the try (sanitize / RFdiffusion
+        # / ProteinMPNN / AF2 failures) and the except branch above. The
+        # zero-candidate run requests no upload URLs and ships nothing today,
+        # which is exactly the run whose tree is worth having.
+        ship_raw_archive(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

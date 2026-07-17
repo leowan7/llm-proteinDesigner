@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import time
 
 import modal
 
@@ -25,6 +27,19 @@ _RUN_PIPELINE_REMOTE = "/opt/run_pipeline.py"
 _GPU = "A100-40GB"
 _MAX_SESSION_S = 82800
 _PYTHON = "python3"
+
+# Raw run artifacts get their OWN Volume, never a weights cache: a weights volume
+# exists to make cold starts cheap and has no eviction path, so parking GB-scale
+# run output in it bloats the very thing it is for and leaves no way to reap raw
+# without touching weights.
+_RAW_VOLUME = f"ranomics-{_TOOL}-raw"
+_RAW_MOUNT = "/raw"
+# Fixed handoff path written by docker/boltzgen/run_pipeline.py::archive_work_dir.
+# The pipeline runs as a subprocess and cannot mount the Volume itself; this
+# wrapper can, so the split is: subprocess tars to /tmp, wrapper moves to /raw.
+_RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
+
+raw_volume = modal.Volume.from_name(_RAW_VOLUME, create_if_missing=True)
 
 
 def _build_run_env(payload: dict) -> dict[str, str]:
@@ -77,7 +92,71 @@ image = (
 app = modal.App(f"ranomics-{_TOOL}-prod")
 
 
-@app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)
+def _raw_archive_name(payload: dict) -> str:
+    """Deterministic Volume filename for this session's raw archive.
+
+    The job id is derivable by the caller with no round trip, so nothing new has
+    to travel through the DB to locate the tar. The session suffix is load-bearing:
+    run_tool is documented as "one session (pilot or CHUNK of a full-design
+    campaign)" and every chunk of a campaign shares one job id, so a bare
+    <job_id>.tgz would have each chunk silently overwrite its predecessor's raw —
+    the same class of quiet loss this capture exists to prevent. session_index is
+    already in the payload, so <job_id>_s<N>.tgz stays fully derivable.
+    """
+    job_id = str(payload.get("job_id", "") or "").strip()
+    safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in job_id)
+    if not safe:
+        # No job id to key on; fall back to a unique name rather than clobber.
+        safe = f"unknown_{int(time.time())}"
+    try:
+        session = int(payload.get("session_index", 0) or 0)
+    except (TypeError, ValueError):
+        session = 0
+    return f"{safe}.tgz" if session == 0 else f"{safe}_s{session}.tgz"
+
+
+def _ship_raw_archive(payload: dict) -> dict:
+    """Move the pipeline's raw work-dir archive onto the raw Volume.
+
+    Returns top-level keys to merge into run_tool's return dict. These are IGNORED
+    by tools-hub's _interpret_pipeline_return, so this needs zero client changes.
+
+    The archive goes on a Volume rather than inline in the return dict on purpose:
+    gpu/modal_client.py rejects a non-dict return, webhooks/modal.py nulls one, and
+    a big b64 inside the dict flows into the tool_jobs.result JSONB column, whose
+    UPDATE then throws and strands the job in "running" (shared/jobs.py exists
+    because inline b64 already broke exactly that). Supabase Storage is not an
+    option either: 20 MB object cap and no gzip/tar in its MIME allowlist.
+
+    Never raises: a failed capture must not fail a run that otherwise succeeded.
+    """
+    out: dict = {}
+    try:
+        if not os.path.isfile(_RAW_ARCHIVE_PATH):
+            # Pipeline crashed before its finally, or was SIGKILLed on timeout.
+            print(f"[raw] no archive at {_RAW_ARCHIVE_PATH}; nothing to ship", flush=True)
+            return out
+        os.makedirs(_RAW_MOUNT, exist_ok=True)
+        dest = os.path.join(_RAW_MOUNT, _raw_archive_name(payload))
+        size = os.path.getsize(_RAW_ARCHIVE_PATH)
+        shutil.move(_RAW_ARCHIVE_PATH, dest)
+        try:
+            raw_volume.commit()
+        except Exception as exc:  # noqa: BLE001 — a commit race must not lose the run
+            out["raw_tgz_error"] = f"volume commit failed: {exc}"
+            print(f"[raw] volume commit failed (non-fatal): {exc}", flush=True)
+        out["raw_tgz_volume"] = _RAW_VOLUME
+        out["raw_tgz_volume_path"] = dest
+        out["raw_tgz_bytes"] = size
+        print(f"[raw] parked {size / 1e6:.1f} MB at {dest} (volume {_RAW_VOLUME})", flush=True)
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort by design
+        out["raw_tgz_error"] = f"{type(exc).__name__}: {exc}"
+        print(f"[raw] capture failed (non-fatal): {type(exc).__name__}: {exc}", flush=True)
+    return out
+
+
+@app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S,
+              volumes={_RAW_MOUNT: raw_volume})
 def run_tool(payload: dict) -> dict:
     """Run one BoltzGen session (pilot or chunk of a full-design campaign).
 
@@ -93,6 +172,13 @@ def run_tool(payload: dict) -> dict:
     print(f"[run_tool] JOB_ID={env.get('JOB_ID')} TIER={env.get('JOB_TIER')} "
           f"WEBHOOK={env.get('WEBHOOK_URL')}", flush=True)
 
+    # Warm containers are reused: a leftover raw archive from a prior job would be parked
+    # under THIS job's id. Clear it so we only ever park a tar this run actually wrote.
+    try:
+        os.remove(_RAW_ARCHIVE_PATH)
+    except OSError:
+        pass
+
     result = subprocess.run(
         cmd,
         env=env,
@@ -102,6 +188,11 @@ def run_tool(payload: dict) -> dict:
     )
 
     print(f"[run_tool] subprocess exited: {result.returncode}", flush=True)
+
+    # Ship the COMPLETE raw work-dir tree home, unconditionally — not gated on
+    # exit code, candidates, or uploads. A zero-candidate run ships nothing today
+    # and is precisely the run whose tree is needed.
+    raw_info = _ship_raw_archive(payload)
 
     # Smoke/mini_pilot tier: read inline results from /tmp/smoke_results.json.
     # See docs/SMOKE-TEST-SPEC.md.
@@ -137,4 +228,5 @@ def run_tool(payload: dict) -> dict:
         "provider_job_id": payload.get("job_id", ""),
         "smoke_result": smoke_result,
         "webhook_outcome": webhook_outcome,
+        **raw_info,
     }

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import time
 
 import modal
 
@@ -26,6 +28,14 @@ _RUN_PIPELINE_REMOTE = "/opt/run_pipeline.py"
 _GPU = "A100-80GB"
 _MAX_SESSION_S = 82800
 _PYTHON = "python3"
+
+# Raw run artifacts get their OWN Volume — never a weights cache, which exists to
+# make cold starts cheap and has no eviction path. Must match RAW_ARCHIVE_PATH in
+# docker/pxdesign/run_pipeline.py, which tars its work dir there before teardown.
+_RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
+_RAW_VOLUME = f"ranomics-{_TOOL}-raw"
+_RAW_MOUNT = "/raw"
+raw_volume = modal.Volume.from_name(_RAW_VOLUME, create_if_missing=True)
 
 
 def _build_run_env(payload: dict) -> dict[str, str]:
@@ -78,7 +88,57 @@ image = (
 app = modal.App(f"ranomics-{_TOOL}-prod")
 
 
-@app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S)
+def _park_raw_archive(job_id: str) -> dict[str, str]:
+    """Move the pipeline's raw work-dir archive onto the raw Volume.
+
+    run_pipeline.py::ship_raw tars its ENTIRE work dir to _RAW_ARCHIVE_PATH in a
+    ``finally``, before the rmtree. The curated dict returned below keeps a few
+    scores per design; this archive is the only copy of everything else, and
+    re-making it costs another A100-80GB session.
+
+    A Volume rather than an inline return or Storage, because all three were
+    checked: tools-hub gpu/modal_client.py rejects a non-dict return outright and
+    webhooks/modal.py nulls one; a large b64 inside the dict flows into the
+    tool_jobs.result JSONB column, where it wedges the UPDATE and the job never
+    leaves "running"; and Supabase Storage caps objects at 20 MB with no gzip or
+    tar in its MIME allowlist. Naming the object after the job id means nothing
+    new has to travel through the DB — the returned keys are top-level, where
+    _interpret_pipeline_return ignores them, so no client change is needed.
+
+    Best-effort: this runs after hours of GPU have already been paid for, so a
+    failure here is logged and the keys are simply absent. It never raises.
+    """
+    info: dict[str, str] = {}
+    try:
+        if not os.path.exists(_RAW_ARCHIVE_PATH):
+            print(f"[raw] no archive at {_RAW_ARCHIVE_PATH}; pipeline wrote none",
+                  flush=True)
+            return info
+        # job_id arrives from the caller and is interpolated straight into a
+        # path, so keep it to characters that cannot escape the mount.
+        safe = "".join(c for c in str(job_id) if c.isalnum() or c in "-_")
+        if not safe:
+            safe = f"unknown_{int(time.time())}"
+        size = os.path.getsize(_RAW_ARCHIVE_PATH)
+        os.makedirs(_RAW_MOUNT, exist_ok=True)
+        dest = os.path.join(_RAW_MOUNT, f"{safe}.tgz")
+        shutil.move(_RAW_ARCHIVE_PATH, dest)
+        try:
+            raw_volume.commit()
+        except Exception as exc:  # noqa: BLE001 - a commit race must not lose the run
+            print(f"[raw] volume commit failed: {exc}", flush=True)
+        info["raw_tgz_volume"] = _RAW_VOLUME
+        info["raw_tgz_volume_path"] = dest
+        print(f"[raw] parked {size / 1e6:.1f} MB at {dest} (volume {_RAW_VOLUME})",
+              flush=True)
+    except Exception as exc:  # noqa: BLE001 - capture must never fail the run
+        print(f"[raw] failed to park archive (non-fatal): "
+              f"{type(exc).__name__}: {exc}", flush=True)
+    return info
+
+
+@app.function(image=image, gpu=_GPU, timeout=_MAX_SESSION_S,
+              volumes={_RAW_MOUNT: raw_volume})
 def run_tool(payload: dict) -> dict:
     """Run one PXDesign session.
 
@@ -93,6 +153,13 @@ def run_tool(payload: dict) -> dict:
     print(f"[run_tool] JOB_ID={env.get('JOB_ID')} TIER={env.get('JOB_TIER')} "
           f"WEBHOOK={env.get('WEBHOOK_URL')}", flush=True)
 
+    # Warm containers are reused: a leftover raw archive from a prior job would be parked
+    # under THIS job's id. Clear it so we only ever park a tar this run actually wrote.
+    try:
+        os.remove(_RAW_ARCHIVE_PATH)
+    except OSError:
+        pass
+
     result = subprocess.run(
         cmd,
         env=env,
@@ -102,6 +169,11 @@ def run_tool(payload: dict) -> dict:
     )
 
     print(f"[run_tool] subprocess exited: {result.returncode}", flush=True)
+
+    # Park the raw work-dir archive on the Volume, unconditionally — not gated on
+    # exit code, on candidates, or on tier. A zero-candidate run that reports a
+    # clean success is exactly the one whose tree is worth having.
+    raw_info = _park_raw_archive(str(payload.get("job_id", "")))
 
     # Smoke/mini_pilot tier: read inline results from /tmp/smoke_results.json.
     # See docs/SMOKE-TEST-SPEC.md.
@@ -130,6 +202,9 @@ def run_tool(payload: dict) -> dict:
     except (json.JSONDecodeError, OSError) as exc:
         print(f"[run_tool] failed to read webhook_outcome.json: {exc}", flush=True)
 
+    # raw_tgz_volume / raw_tgz_volume_path ride at the TOP LEVEL, where
+    # _interpret_pipeline_return ignores unknown keys — so this needs no client
+    # change, and nothing large travels through the DB.
     return {
         "exit_code": result.returncode,
         "stdout_tail": "",
@@ -137,4 +212,5 @@ def run_tool(payload: dict) -> dict:
         "provider_job_id": payload.get("job_id", ""),
         "smoke_result": smoke_result,
         "webhook_outcome": webhook_outcome,
+        **raw_info,
     }

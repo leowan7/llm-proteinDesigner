@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 from glob import glob
@@ -55,6 +56,15 @@ BINDCRAFT_DIR = os.environ.get("BINDCRAFT_DIR", "/opt/BindCraft")
 BINDCRAFT_SCRIPT = f"{BINDCRAFT_DIR}/bindcraft.py"
 BINDCRAFT_FILTERS = f"{BINDCRAFT_DIR}/settings_filters/default_filters.json"
 BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/settings_advanced/default_4stage_multimer.json"
+
+# ---------------------------------------------------------------------------
+# Raw output capture — see archive_work_dir()
+# ---------------------------------------------------------------------------
+# Fixed handoff path, mirroring /tmp/preflight_failure.json: this script runs as
+# a subprocess and cannot mount the Modal Volume itself, so it drops the archive
+# here and infrastructure/modal/bindcraft_app.py::_ship_raw_archive moves it onto
+# the volume after we exit. Must be OUTSIDE any work_dir we archive.
+RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
 
 
 # ===========================================================================
@@ -526,6 +536,77 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
 
 
 # ===========================================================================
+# Raw output capture
+# ===========================================================================
+
+def archive_work_dir(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
+    """Tar the COMPLETE work dir to ``dest``. Best-effort: never raises.
+
+    A container must not decide which fields are worth keeping. parse_bindcraft_results
+    above keeps only Accepted/*.pdb plus the handful of ``Average_*`` columns named in
+    _METRIC_MAP out of final_design_stats.csv; the rejected designs, the trajectory
+    tree, the per-trajectory stats, the MPNN intermediates and every unmapped column
+    die with the container, recoverable only by paying for the GPU again. That is how
+    ``design_iptm`` (the real binder->target interface) was lost behind ``iptm``
+    (averaged over every chain pair) on 460 designs across two campaigns. Decide
+    LOCALLY, where re-parsing is free.
+
+    This is deliberately NOT gated on candidates, on exit status, or on
+    filenames_to_upload. parse_bindcraft_results returns [] outright when Accepted/ is
+    missing, which turns a dead run into a silent zero-candidate "success" that
+    requests no upload URLs and ships nothing — exactly the run whose tree you need.
+    Likewise a crash. Hence the call site is the ``finally``, immediately before the
+    rmtree.
+
+    Failure to archive must never break the run: a job that died before writing output
+    is when diagnostics matter most, so problems are logged, not raised.
+    """
+    stage_dir = None
+    try:
+        if not os.path.isdir(work_dir):
+            logger.warning(
+                "Raw capture: work dir %s does not exist; nothing to archive",
+                work_dir,
+            )
+            return
+
+        # The tar must never be written inside the tree it archives, or it tars
+        # itself. dest defaults to /tmp/raw_archive.tgz and work_dir is a
+        # /tmp/bindcraft_job_*/ mkdtemp, so this cannot trip today — but the guard
+        # is cheap and a caller passing a dest under work_dir would otherwise
+        # produce a corrupt archive silently.
+        work_abs = os.path.abspath(work_dir)
+        dest_abs = os.path.abspath(dest)
+        if dest_abs == work_abs or dest_abs.startswith(work_abs + os.sep):
+            logger.error(
+                "Raw capture: refusing to write archive %s inside the tree it "
+                "archives (%s)", dest_abs, work_abs,
+            )
+            return
+
+        # Stage in a FRESH mkdtemp (which cannot be inside an already-existing
+        # work_dir) and move into place, so dest is never a half-written tar.
+        # Stream to a file rather than io.BytesIO: ~1x peak RSS instead of ~3-4x,
+        # which matters on a multi-hundred-MB BindCraft trajectory tree.
+        stage_dir = tempfile.mkdtemp(prefix="rawtar_")
+        staged = os.path.join(stage_dir, "raw_archive.tgz")
+        with tarfile.open(staged, "w:gz") as tf:
+            tf.add(work_abs, arcname=os.path.basename(work_abs.rstrip(os.sep)) or "work")
+        shutil.move(staged, dest_abs)
+        logger.info(
+            "Raw capture: archived %s -> %s (%d bytes)",
+            work_abs, dest_abs, os.path.getsize(dest_abs),
+        )
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort by design
+        logger.warning(
+            "Raw capture failed (non-fatal): %s: %s", type(exc).__name__, exc,
+        )
+    finally:
+        if stage_dir and os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+# ===========================================================================
 # Main pipeline
 # ===========================================================================
 
@@ -655,11 +736,29 @@ def main():
             filenames_to_upload.append("bindcraft_results.csv")
 
         upload_urls = {}
+        url_exchange_error = None
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
+                url_exchange_error = str(exc)
+
+        failed_uploads: list[str] = []
+        if filenames_to_upload and not upload_urls:
+            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
+            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
+            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
+            # failed_uploads is surfaced to tools-hub via result_payload, where
+            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
+            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
+            # was only the silence.
+            logger.error(
+                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
+                "so the run is not reported as a clean success",
+                url_exchange_error or "empty response", len(filenames_to_upload),
+            )
+            failed_uploads.extend(filenames_to_upload)
 
         # Upload PDB files
         webhook_candidates = []
@@ -702,6 +801,7 @@ def main():
                     upload_output(upload_urls[upload_filename], pdb_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
+                    failed_uploads.append(upload_filename)
 
             # Emit per-candidate heartbeat for live UI streaming. BindCraft
             # only writes designs that it has already accepted, so default
@@ -743,6 +843,7 @@ def main():
                     upload_output(upload_urls["metrics.csv"], csv_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload metrics CSV: %s", exc)
+                    failed_uploads.append("metrics.csv")
 
         # Upload raw BindCraft results CSV
         if "bindcraft_results.csv" in upload_urls and os.path.exists(bindcraft_csv):
@@ -750,6 +851,7 @@ def main():
                 upload_output(upload_urls["bindcraft_results.csv"], bindcraft_csv)
             except RuntimeError as exc:
                 logger.warning("Failed to upload BindCraft results CSV: %s", exc)
+                failed_uploads.append("bindcraft_results.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
@@ -774,6 +876,8 @@ def main():
                 "of the best hits."
             ),
         }
+        if failed_uploads:
+            result_payload["failed_uploads"] = failed_uploads
         post_webhook(webhook_url, job_id, pod_id, result_payload)
 
     except Exception as exc:
@@ -786,6 +890,11 @@ def main():
         })
 
     finally:
+        # Archive BEFORE the rmtree destroys the tree. This finally is the only
+        # point every exit path after the mkdtemp converges on: the clean return,
+        # the zero-candidate "success" that uploads nothing, the failed upload-URL
+        # exchange, and the catch-all except arm that posts the FAILED webhook.
+        archive_work_dir(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

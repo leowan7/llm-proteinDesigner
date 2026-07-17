@@ -59,6 +59,11 @@ logger = logging.getLogger("pxdesign_pipeline")
 PXDESIGN_DIR = os.environ.get("PXDESIGN_DIR", "/opt/pxdesign")
 SMOKE_TARGET_PATH = "/opt/smoke_target.pdb"
 SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
+# Where ship_raw() tars the work dir before teardown. The Modal wrapper
+# (infrastructure/modal/pxdesign_app.py::_park_raw_archive) reads this exact
+# path after the subprocess exits and moves it onto the raw Volume, so the two
+# constants must agree. Outside any work dir by construction — see ship_raw.
+RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
 
 # Filtering thresholds for PXDesign output (webhook-tier only)
 IPTM_THRESHOLD = 0.70
@@ -1120,6 +1125,73 @@ def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
             ])
 
 
+def ship_raw(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
+    """Tar the COMPLETE work dir to ``dest`` so the raw tree survives teardown.
+
+    A container must not decide which fields are worth keeping. parse_summary_csv
+    above lifts three scores out of summary.csv and everything else in the tree
+    dies with the container: the per-seed AF2-IG predictions, the resolved spec,
+    the cleaned CIF, the un-chosen samples, and every summary column we did not
+    happen to name. Recovering any of it costs another A100-80GB run. That is how
+    ``design_iptm`` (the real binder->target interface) was lost on 460 designs
+    scored on ``iptm`` (an average over every chain pair, ~2x high on a dimeric
+    target) — with the tree in hand it would have been a local re-parse. Decide
+    LOCALLY, where re-parsing is free.
+
+    Deliberately NOT gated on candidates, on success, or on filenames_to_upload.
+    A run that parses zero candidates uploads nothing and reports a clean
+    "success", and that is precisely the run whose tree is worth having. Both
+    tiers call this from their ``finally``, so it also fires on a crash.
+
+    Best-effort by contract: a job that died before writing output is exactly
+    when diagnostics matter most, so every problem is logged and none is raised.
+    """
+    import tarfile  # noqa: PLC0415 - local so a bad import cannot break the run
+
+    try:
+        if not os.path.isdir(work_dir):
+            logger.warning(
+                "Raw capture: work dir %s does not exist; nothing to archive",
+                work_dir,
+            )
+            return
+
+        # The tar must never live inside the tree it archives, or it tars itself.
+        # /tmp/raw_archive.tgz is outside a /tmp/pxdesign_*/ work dir by
+        # construction; this guard is here so that if either path is ever
+        # changed, the result is a logged skip rather than a corrupt archive.
+        work_abs = os.path.abspath(work_dir)
+        dest_abs = os.path.abspath(dest)
+        if dest_abs == work_abs or dest_abs.startswith(work_abs + os.sep):
+            logger.error(
+                "Raw capture: archive path %s is inside work dir %s; skipping "
+                "rather than tarring the archive into itself",
+                dest_abs, work_abs,
+            )
+            return
+
+        # Stream to a file, never io.BytesIO: peak RSS stays at ~1x the tar
+        # instead of ~3-4x, which matters on a multi-hundred-MB output tree.
+        with tarfile.open(dest_abs, "w:gz") as tar:
+            tar.add(work_abs, arcname=os.path.basename(work_abs) or "work")
+        logger.info(
+            "Raw capture: archived %s -> %s (%d bytes)",
+            work_abs, dest_abs, os.path.getsize(dest_abs),
+        )
+    except Exception as exc:  # noqa: BLE001 - capture is best-effort by design
+        logger.error(
+            "Raw capture failed (non-fatal): %s: %s", type(exc).__name__, exc,
+        )
+        # A crash mid-write (e.g. ENOSPC) can leave a truncated but still-openable .tgz at
+        # the destination; the wrapper parks whatever exists. Remove the partial so a failed
+        # capture parks NOTHING rather than a tar that reports success but cannot be read.
+        try:
+            if os.path.exists(dest_abs):
+                os.remove(dest_abs)
+        except OSError:
+            pass
+
+
 # ===========================================================================
 # Smoke / mini_pilot main
 # ===========================================================================
@@ -1402,6 +1474,10 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
         )
 
     finally:
+        # Archive the tree BEFORE the rmtree that destroys it. Every fail_compute
+        # path above returns through this finally, so a run that died in
+        # cif_conversion / yaml_build / check_input / pxdesign_run is captured too.
+        ship_raw(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
@@ -1624,6 +1700,7 @@ def run_webhook_tier(job_payload: dict) -> None:
             filenames_to_upload.append("metrics.csv")
 
         upload_urls = {}
+        url_exchange_error = None
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(
@@ -1631,6 +1708,23 @@ def run_webhook_tier(job_payload: dict) -> None:
                 )
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
+                url_exchange_error = str(exc)
+
+        failed_uploads: list[str] = []
+        if filenames_to_upload and not upload_urls:
+            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
+            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
+            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
+            # failed_uploads is surfaced to tools-hub via the result payload, where
+            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
+            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
+            # was only the silence.
+            logger.error(
+                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
+                "so the run is not reported as a clean success",
+                url_exchange_error or "empty response", len(filenames_to_upload),
+            )
+            failed_uploads.extend(filenames_to_upload)
 
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
@@ -1640,6 +1734,7 @@ def run_webhook_tier(job_payload: dict) -> None:
                     upload_output(upload_urls[upload_filename], local_file)
                 except RuntimeError as exc:
                     logger.warning("Upload failed: %s", exc)
+                    failed_uploads.append(upload_filename)
 
         if candidates:
             metrics_csv_path = os.path.join(work_dir, "metrics.csv")
@@ -1649,6 +1744,7 @@ def run_webhook_tier(job_payload: dict) -> None:
                     upload_output(upload_urls["metrics.csv"], metrics_csv_path)
                 except RuntimeError as exc:
                     logger.warning("Metrics CSV upload failed: %s", exc)
+                    failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         # Inline base64 of each candidate's PDB so candidate_table.html can
@@ -1686,12 +1782,15 @@ def run_webhook_tier(job_payload: dict) -> None:
                     )
             webhook_candidates.append(entry)
 
-        post_webhook(webhook_url, job_id, pod_id, {
+        result_payload = {
             "candidates": webhook_candidates,
             "candidate_count": len(candidates),
             "total_designs": num_designs,
             "runtime_minutes": round(elapsed_minutes, 1),
-        })
+        }
+        if failed_uploads:
+            result_payload["failed_uploads"] = failed_uploads
+        post_webhook(webhook_url, job_id, pod_id, result_payload)
 
     except Exception as exc:
         logger.exception("Webhook-tier pipeline failed: %s", exc)
@@ -1702,6 +1801,11 @@ def run_webhook_tier(job_payload: dict) -> None:
         except Exception:
             pass
     finally:
+        # Archive the tree BEFORE the rmtree that destroys it. This runs on the
+        # early `return` paths (no summary.csv), on the crash path handled above,
+        # and on success — including the upload-URL-exchange failure, where the
+        # tree is otherwise the only surviving copy of the run.
+        ship_raw(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

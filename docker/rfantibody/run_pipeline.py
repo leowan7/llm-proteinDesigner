@@ -32,6 +32,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -447,6 +448,87 @@ def run_command(
 
 
 _WEBHOOK_OUTCOME_PATH = "/tmp/webhook_outcome.json"
+
+# Where the complete work-dir tar is left for the Modal wrapper to collect. Fixed
+# path (not a temp name) so infrastructure/modal/rfantibody_app.py can find it
+# without the two sides having to exchange anything: this script runs as a
+# subprocess and cannot mount the Volume itself, the wrapper can.
+_RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
+
+
+def archive_raw_outputs(work_dir: str, dest: str = _RAW_ARCHIVE_PATH) -> None:
+    """Tar the ENTIRE work dir to ``dest`` so nothing dies with the rmtree.
+
+    Everything this script currently keeps is a curated subset. parse_scores_tsv()
+    lifts 5 metrics out of the qvscorefile TSV; only PDBs that matched a scored
+    design are uploaded. The Quiver files (backbones/sequences/predictions), the
+    raw .sc scorefile, the unmatched PDBs and every RFdiffusion/RF2 log are
+    deleted by the caller's ``finally`` and are recoverable only by paying for the
+    GPU again.
+
+    A container must never be the thing that decides which fields were worth
+    keeping. That is exactly how ``iptm`` (interface-pTM averaged over EVERY chain
+    pair, so on a multi-chain target it is dominated by the target's own
+    interface) was shipped in place of ``design_iptm`` (binder -> target) on 460
+    boltzgen designs, reading ~2x high, producing two confidently wrong verdicts
+    that could not be rechecked. Ship the tree home; decide locally, where
+    re-parsing is free.
+
+    Deliberately NOT gated on candidates, on success, or on filenames_to_upload: a
+    run that scored zero designs uploads nothing today and is precisely the run
+    whose tree you need. Callers invoke this from their ``finally``, so a crashed
+    run is archived too.
+
+    Archiving must never fail the run — a job that died before writing output is
+    when diagnostics matter most, so problems are logged, never raised.
+
+    Args:
+        work_dir: Directory to archive. A missing dir is logged and skipped.
+        dest: Path to write the .tgz to. MUST be outside ``work_dir``.
+    """
+    try:
+        if not os.path.isdir(work_dir):
+            logger.warning(
+                "Raw capture: no work dir to archive at %s (nothing to ship)",
+                work_dir,
+            )
+            return
+
+        # The tar must not be written inside the tree it archives, or it tars
+        # itself. /tmp/raw_archive.tgz is outside a /tmp/rfantibody_*/ work dir,
+        # but the guard is explicit: the day either path is repointed is the day
+        # this silently recurses.
+        work_abs = os.path.abspath(work_dir)
+        dest_abs = os.path.abspath(dest)
+        if dest_abs == work_abs or dest_abs.startswith(work_abs + os.sep):
+            logger.error(
+                "Raw capture: refusing to write archive %s inside the tree it "
+                "archives (%s)", dest_abs, work_abs,
+            )
+            return
+
+        # Stream straight to the file. NEVER io.BytesIO — buffering a
+        # multi-hundred-MB Quiver tree in memory costs ~3-4x peak RSS versus ~1x
+        # streamed, on a container already holding GPU model weights.
+        with tarfile.open(dest_abs, "w:gz") as tar:
+            tar.add(work_abs, arcname=os.path.basename(work_abs) or "work")
+
+        logger.info(
+            "Raw capture: archived %s -> %s (%d bytes)",
+            work_abs, dest_abs, os.path.getsize(dest_abs),
+        )
+    except Exception as exc:
+        logger.error(
+            "Raw capture failed (non-fatal): %s: %s", type(exc).__name__, exc,
+        )
+        # A crash mid-write (e.g. ENOSPC) can leave a truncated but still-openable .tgz at
+        # the destination; the wrapper parks whatever exists. Remove the partial so a failed
+        # capture parks NOTHING rather than a tar that reports success but cannot be read.
+        try:
+            if os.path.exists(dest_abs):
+                os.remove(dest_abs)
+        except OSError:
+            pass
 
 
 def _record_webhook_outcome(delivered: bool, detail: str) -> None:
@@ -1218,6 +1300,11 @@ def run_smoke_pipeline(tier: str) -> None:
         _write_smoke_failure("unhandled", "exception", f"{exc}")
         sys.exit(1)
     finally:
+        # Ship the complete tree before it is destroyed. In the finally because
+        # every failure path above is a sys.exit() inside the try: SystemExit
+        # unwinds through here, so a smoke run that died at stage 1 is archived
+        # exactly like one that completed.
+        archive_raw_outputs(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
@@ -1533,6 +1620,7 @@ def main():
         )
 
         upload_urls = {}
+        url_exchange_error = None
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(
@@ -1540,8 +1628,22 @@ def main():
                 )
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
+                url_exchange_error = str(exc)
 
         failed_uploads = []
+        if filenames_to_upload and not upload_urls:
+            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
+            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
+            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
+            # failed_uploads is already surfaced to tools-hub via result_payload and already makes
+            # _slim_result_for_persist KEEP the inline b64 structures rather than drop them as
+            # "already in Storage". Telling it the truth is enough - the bug was only the silence.
+            logger.error(
+                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
+                "so the run is not reported as a clean success",
+                url_exchange_error or "empty response", len(filenames_to_upload),
+            )
+            failed_uploads.extend(filenames_to_upload)
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate["local_file"]
@@ -1561,6 +1663,7 @@ def main():
                     upload_output(upload_urls["metrics.csv"], metrics_csv_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload metrics CSV: %s", exc)
+                    failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
@@ -1630,6 +1733,11 @@ def main():
         except Exception:
             logger.error("Failed to send error webhook")
     finally:
+        # Ship the complete tree before it is destroyed. In the finally because
+        # the stage failures above `return` out of the try after posting an error
+        # webhook, and a run that produced no scored designs uploads nothing at
+        # all — those are the runs whose tree is worth the most.
+        archive_raw_outputs(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

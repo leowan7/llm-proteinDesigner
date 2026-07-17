@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 
 import modal
@@ -26,6 +27,17 @@ _RUN_PIPELINE_REMOTE = "/opt/run_pipeline.py"
 _GPU = "A100-40GB"
 _MAX_SESSION_S = 82800
 _PYTHON = "python3"
+
+# Raw run-artifact capture. run_pipeline.py tars its whole work dir to
+# _RAW_ARCHIVE_PATH before deleting it; the subprocess cannot mount a Volume,
+# so this wrapper moves the tar onto one. Parked under the job id, which the
+# caller already knows, so nothing new has to travel through the database:
+# tools-hub's modal_client rejects a non-dict return, and a big base64 blob in
+# the returned dict lands in the tool_jobs.result JSONB column and has already
+# broken that UPDATE once (the job then never leaves "running").
+_RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
+_RAW_MOUNT = "/raw"
+_RAW_VOLUME = f"ranomics-{_TOOL}-raw"
 
 
 def _build_run_env(payload: dict) -> dict[str, str]:
@@ -86,12 +98,62 @@ xla_cache_volume = modal.Volume.from_name(
     create_if_missing=True,
 )
 
+# Raw archives get their OWN Volume, never the XLA cache. A cache Volume exists
+# to make cold starts cheap and has no eviction path; parking GB-scale run
+# output in it bloats the very thing it is for, and there would then be no way
+# to reap raw archives without touching the cache.
+raw_volume = modal.Volume.from_name(_RAW_VOLUME, create_if_missing=True)
+
+
+def _park_raw_archive(job_id: str) -> dict:
+    """Move run_pipeline.py's raw archive onto the raw Volume.
+
+    Returns the keys to merge into run_tool's return dict, or ``{}`` if there
+    was nothing to park. Top-level keys are ignored by tools-hub's
+    _interpret_pipeline_return, so this needs zero client changes: the archive
+    is fetched out-of-band by name.
+
+    Best-effort, exactly like the capture side: a run that crashed before
+    writing output is when diagnostics matter most, so problems are logged and
+    never raised.
+    """
+    try:
+        if not os.path.isfile(_RAW_ARCHIVE_PATH):
+            print(f"[run_tool] no raw archive at {_RAW_ARCHIVE_PATH}", flush=True)
+            return {}
+
+        # Sanitize: the job id becomes a filename on a shared Volume.
+        name = "".join(
+            c for c in str(job_id) if c.isalnum() or c in "-_"
+        ) or "unknown"
+        os.makedirs(_RAW_MOUNT, exist_ok=True)
+        dest = os.path.join(_RAW_MOUNT, f"{name}.tgz")
+        size = os.path.getsize(_RAW_ARCHIVE_PATH)
+        shutil.move(_RAW_ARCHIVE_PATH, dest)
+
+        out = {"raw_tgz_volume": _RAW_VOLUME, "raw_tgz_volume_path": dest}
+        try:
+            raw_volume.commit()
+        except Exception as exc:
+            # Report the path regardless: a commit race must not lose the run.
+            print(f"[run_tool] raw volume commit failed: {exc}", flush=True)
+            out["raw_error"] = f"volume commit failed: {exc}"
+        print(
+            f"[run_tool] parked raw archive ({size / 1e6:.1f} MB) at {dest} "
+            f"(volume {_RAW_VOLUME})",
+            flush=True,
+        )
+        return out
+    except Exception as exc:
+        print(f"[run_tool] raw archive park failed (non-fatal): {exc}", flush=True)
+        return {}
+
 
 @app.function(
     image=image,
     gpu=_GPU,
     timeout=_MAX_SESSION_S,
-    volumes={"/root/.cache/jax": xla_cache_volume},
+    volumes={"/root/.cache/jax": xla_cache_volume, _RAW_MOUNT: raw_volume},
     # Inject WEBHOOK_HMAC_SECRET so run_pipeline.py:post_webhook can sign
     # completion notifications. Without this, the backend's
     # validate_webhook_signature returns 401 and the completion never lands
@@ -115,6 +177,13 @@ def run_tool(payload: dict) -> dict:
     print(f"[run_tool] JOB_ID={env.get('JOB_ID')} TIER={env.get('JOB_TIER')} "
           f"WEBHOOK={env.get('WEBHOOK_URL')}", flush=True)
 
+    # Warm containers are reused: a leftover raw archive from a prior job would be parked
+    # under THIS job's id. Clear it so we only ever park a tar this run actually wrote.
+    try:
+        os.remove(_RAW_ARCHIVE_PATH)
+    except OSError:
+        pass
+
     result = subprocess.run(
         cmd,
         env=env,
@@ -124,6 +193,10 @@ def run_tool(payload: dict) -> dict:
     )
 
     print(f"[run_tool] subprocess exited: {result.returncode}", flush=True)
+
+    # Park the raw archive before anything else that could throw. Unconditional
+    # on exit code: a failed run's tree is the one worth keeping.
+    raw_keys = _park_raw_archive(payload.get("job_id", ""))
 
     # Persist any new XLA cache entries produced by this run so the next
     # cold container can reuse them.
@@ -167,4 +240,6 @@ def run_tool(payload: dict) -> dict:
         "provider_job_id": payload.get("job_id", ""),
         "smoke_result": smoke_result,
         "webhook_outcome": webhook_outcome,
+        # raw_tgz_volume / raw_tgz_volume_path — a pointer, not the payload.
+        **raw_keys,
     }

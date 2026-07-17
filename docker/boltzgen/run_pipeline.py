@@ -35,6 +35,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -80,6 +81,16 @@ SMOKE_TARGET_CHAIN = "A"
 # ensure_cif. Equivalents (for cross-reference with prior versions of this
 # file): author 54 -> 37, 56 -> 39, 115 -> 98, 123 -> 106.
 SMOKE_HOTSPOTS = [54, 56, 115, 123]
+
+# ---------------------------------------------------------------------------
+# Raw output capture — see archive_work_dir()
+# ---------------------------------------------------------------------------
+# Fixed handoff path, mirroring /tmp/smoke_results.json and
+# /tmp/webhook_outcome.json: this script runs as a subprocess and cannot mount
+# the Modal Volume itself, so it drops the archive here and
+# infrastructure/modal/boltzgen_app.py::_ship_raw_archive moves it onto the
+# volume after we exit. Must be OUTSIDE any work_dir we archive.
+RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
 
 
 # ---------------------------------------------------------------------------
@@ -1325,6 +1336,76 @@ def write_output_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
 
 
 # ===========================================================================
+# Raw output capture
+# ===========================================================================
+
+def archive_work_dir(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
+    """Tar the COMPLETE work dir to ``dest``. Best-effort: never raises.
+
+    A container must not decide which fields are worth keeping. parse_metrics_csv
+    below reads 3 numbers (ipTM, pLDDT, refolding RMSD) out of the ~190 columns of
+    aggregate_metrics_analyze.csv, and the upload path ships only the designs that
+    both scored AND matched a structure file on disk. The intermediate trajectories,
+    the per-design npz, the resolved config, the pre-refold poses and every unread
+    column die with the container, recoverable only by paying for the GPU again.
+    That is how ``design_iptm`` (the real binder->target interface) was lost behind
+    ``iptm`` (averaged over every chain pair) on 460 designs across two campaigns.
+    Decide LOCALLY, where re-parsing is free.
+
+    This is deliberately NOT gated on candidates, on exit status, or on
+    filenames_to_upload. A run that parses to zero candidates uploads nothing today
+    and is exactly the run whose tree you need; likewise a crash. Hence the call
+    site is the ``finally``, immediately before the rmtree.
+
+    Failure to archive must never break the run: a job that died before writing
+    output is when diagnostics matter most, so problems are logged, not raised.
+    """
+    stage_dir = None
+    try:
+        if not os.path.isdir(work_dir):
+            logger.warning(
+                "Raw capture: work dir %s does not exist; nothing to archive",
+                work_dir,
+            )
+            return
+
+        # The tar must never be written inside the tree it archives, or it tars
+        # itself. dest defaults to /tmp/raw_archive.tgz and work_dir is a
+        # /tmp/boltzgen_*/ mkdtemp, so this cannot trip today — but the guard is
+        # cheap and a caller passing a dest under work_dir would otherwise
+        # produce a corrupt archive silently.
+        work_abs = os.path.abspath(work_dir)
+        dest_abs = os.path.abspath(dest)
+        if dest_abs == work_abs or dest_abs.startswith(work_abs + os.sep):
+            logger.error(
+                "Raw capture: refusing to write archive %s inside the tree it "
+                "archives (%s)", dest_abs, work_abs,
+            )
+            return
+
+        # Stage in a FRESH mkdtemp (which cannot be inside an already-existing
+        # work_dir) and move into place, so dest is never a half-written tar.
+        # Stream to a file rather than io.BytesIO: ~1x peak RSS instead of ~3-4x,
+        # which matters on a multi-hundred-MB BoltzGen output tree.
+        stage_dir = tempfile.mkdtemp(prefix="rawtar_")
+        staged = os.path.join(stage_dir, "raw_archive.tgz")
+        with tarfile.open(staged, "w:gz") as tf:
+            tf.add(work_abs, arcname=os.path.basename(work_abs.rstrip(os.sep)) or "work")
+        shutil.move(staged, dest_abs)
+        logger.info(
+            "Raw capture: archived %s -> %s (%d bytes)",
+            work_abs, dest_abs, os.path.getsize(dest_abs),
+        )
+    except Exception as exc:  # noqa: BLE001 — capture is best-effort by design
+        logger.warning(
+            "Raw capture failed (non-fatal): %s: %s", type(exc).__name__, exc,
+        )
+    finally:
+        if stage_dir and os.path.isdir(stage_dir):
+            shutil.rmtree(stage_dir, ignore_errors=True)
+
+
+# ===========================================================================
 # Main pipeline
 # ===========================================================================
 
@@ -1385,6 +1466,10 @@ def main():
             _write_smoke_failure("unhandled", "run_smoke_tier", str(exc))
             sys.exit(1)
         finally:
+            # Archive BEFORE the rmtree destroys the tree. Covers the clean
+            # return, every FAILED-dict return inside run_smoke_tier, and the
+            # sys.exit(1) paths (SystemExit still unwinds through here).
+            archive_work_dir(work_dir)
             shutil.rmtree(work_dir, ignore_errors=True)
 
     # ---- Legacy webhook path ----
@@ -1665,6 +1750,7 @@ def main():
         )
 
         upload_urls = {}
+        url_exchange_error = None
         if upload_endpoint and job_token and filenames_to_upload:
             try:
                 upload_urls = request_upload_urls(
@@ -1672,8 +1758,23 @@ def main():
                 )
             except RuntimeError as exc:
                 logger.error("Failed to get upload URLs: %s", exc)
+                url_exchange_error = str(exc)
 
         failed_uploads = []
+        if filenames_to_upload and not upload_urls:
+            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
+            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
+            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
+            # failed_uploads already exists, is already surfaced to tools-hub via result_payload, and
+            # already makes _slim_result_for_persist KEEP the inline b64 structures rather than drop
+            # them as "already in Storage". Telling it the truth is enough to make the existing
+            # machinery behave correctly - the bug was only ever the silence.
+            logger.error(
+                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
+                "so the run is not reported as a clean success",
+                url_exchange_error or "empty response", len(filenames_to_upload),
+            )
+            failed_uploads.extend(filenames_to_upload)
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate["local_file"]
@@ -1695,6 +1796,9 @@ def main():
                     upload_output(upload_urls["metrics.csv"], output_csv_path)
                 except RuntimeError as exc:
                     logger.warning("Failed to upload metrics CSV: %s", exc)
+                    # This exact upload dying silently (HTTP 400, Supabase MIME allowlist) is what
+                    # cost axin-apc its refolding-RMSD metrics. Surface it rather than swallow it.
+                    failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
@@ -1775,6 +1879,11 @@ def main():
             "error": f"Unhandled error: {exc}",
         })
     finally:
+        # Archive BEFORE the rmtree destroys the tree. This finally is the only
+        # point every exit path converges on: the CIF-conversion / empty-spec /
+        # BoltzGen-failure / no-metrics-CSV / empty-CSV early returns, the
+        # zero-candidate "success" that uploads nothing, and both except arms.
+        archive_work_dir(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
