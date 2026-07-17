@@ -427,12 +427,32 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     candidates = []
     for rank_idx, r in enumerate(af2_results):
         design_name = r["design_name"]
-        # Find the backbone PDB corresponding to this design (vanilla
-        # ProteinMPNN uses backbone name as stem in the fasta filename).
-        backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
-        if not os.path.exists(backbone_pdb) and backbone_pdbs:
-            # Fallback: just take the i-th backbone.
-            backbone_pdb = backbone_pdbs[min(rank_idx, len(backbone_pdbs) - 1)]
+        # Ship the structure the scores describe. In mini_pilot, r["scores"] come from AF2
+        # rank_001 in r["af2_dir"], so upload that COMPLEX, not the bare RFdiffusion backbone
+        # (the backbone would contradict its own ipTM/pLDDT/i_pAE). In smoke the scores are
+        # stubbed and no af2_dir exists, so the backbone is the right structure to ship. This
+        # mirrors the fix in main()'s upload loop; the smoke path was the last place the
+        # structure/score mismatch survived.
+        backbone_pdb = None
+        af2_dir = r.get("af2_dir")
+        if af2_dir and os.path.isdir(af2_dir):
+            for pat in ("*_relaxed_rank_001_*.pdb", "*_unrelaxed_rank_001_*.pdb",
+                        "*rank_001*.pdb"):
+                hits = sorted(glob(os.path.join(af2_dir, pat)))
+                if hits:
+                    backbone_pdb = hits[0]
+                    break
+            if not backbone_pdb:
+                logger.warning(
+                    "No AF2 complex for %s; falling back to the RFdiffusion backbone. The uploaded "
+                    "structure will NOT correspond to its ipTM/pLDDT/i_pAE.", design_name,
+                )
+        if not backbone_pdb:
+            # smoke tier (stubbed scores), or AF2-complex-missing fallback: use the backbone.
+            backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
+            if not os.path.exists(backbone_pdb) and backbone_pdbs:
+                # Fallback: just take the i-th backbone.
+                backbone_pdb = backbone_pdbs[min(rank_idx, len(backbone_pdbs) - 1)]
         if not os.path.exists(backbone_pdb):
             return {
                 "status": "FAILED",
