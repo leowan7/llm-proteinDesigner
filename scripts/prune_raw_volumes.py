@@ -114,3 +114,7 @@ def main() -> int:
         print("Re-run with --apply to actually delete. This cannot be undone: re-creating one of "
               "these archives means paying for the GPU run again.")
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
