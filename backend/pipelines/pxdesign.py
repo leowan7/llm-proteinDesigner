@@ -7,8 +7,9 @@ PXDesign uses a YAML task specification with:
     which take {"min": .., "max": ..}. Do not hand PXDesign a dict.
   - preset: "preview" (no MSA), "extended" (requires MSA), or "custom".
     Upstream's CLI is a click.Choice over exactly those three — "basic" is
-    NOT a valid value. SMOKE-TEST-SPEC.md calls the no-MSA mode "Basic",
-    which is where the wrong name in this file came from.
+    NOT a valid value. The wrong name came from this repo's own Phase 4
+    planning docs (.planning/phases/04-pipeline-validation/04-01-PLAN.md
+    and 04-RESEARCH.md), which called the no-MSA mode "basic".
   - N_sample: number of designs to generate
 
 Only "preview" mode is used in Phase 4 smoke/mini_pilot — extended requires

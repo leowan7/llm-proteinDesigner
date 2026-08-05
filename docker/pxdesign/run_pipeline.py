@@ -3,9 +3,9 @@
 Reads job configuration from the JOB_PAYLOAD environment variable.
 Supports three execution tiers (see docs/SMOKE-TEST-SPEC.md):
 
-  * tier == "smoke"       -> N=1 basic mode, no post-filter.
+  * tier == "smoke"       -> N=1 preview mode, no post-filter.
                               Writes results inline to /tmp/smoke_results.json.
-  * tier == "mini_pilot"  -> N=1 basic mode, full scoring (PXDesign-specific
+  * tier == "mini_pilot"  -> N=1 preview mode, full scoring (PXDesign-specific
                               exception; other tools use N=2). See
                               docs/SMOKE-TEST-SPEC.md "Per-tool exceptions".
                               Writes results inline to /tmp/smoke_results.json.
@@ -79,7 +79,9 @@ def smoke_preset() -> dict:
     """N=1, no-MSA (``preview``) mode, no post-filter.
 
     PXDesign CLI names the no-MSA mode ``preview`` (vs ``extended`` which
-    requires MSA). SMOKE-TEST-SPEC.md refers to this as "Basic" mode.
+    requires MSA). The Phase 4 planning docs called it "basic", which is not
+    a value upstream's click.Choice accepts — see .planning/phases/
+    04-pipeline-validation/04-01-PLAN.md.
     """
     return {
         "num_designs": 1,
@@ -838,17 +840,22 @@ def coerce_binder_length(value) -> int:
         guard only buys a clearer message and a shorter path — NOT GPU
         savings. (The whole script is the container entrypoint under a
         GPU-attached Modal function, so nothing here saves a container start.)
-      * ``True``/``False``/``0``/``-5`` are the real catch: ``int()`` accepts
-        them silently as 1/0/0/-5, producing a run that succeeds with a
-        nonsense binder length. Those are the silent-wrong-result cases.
+      * ``True`` is the genuinely silent case: ``int(True)`` is 1, which is a
+        buildable 1-residue chain, so the job SUCCEEDS with a nonsense binder.
+      * ``False``/``0``/``-5`` do not fail at parse time either — they yield an
+        empty design chain that crashes upstream's featurizer well after model
+        load, inside the GPU stage, surfacing only as "produced no summary.csv".
+        Rejecting them here turns a late, opaque failure into an immediate,
+        legible one, and does save that GPU time.
 
-    Accepts an int, a digit string (stored job params round-trip through form
-    posts as ``"80"``), and an integral float (an untyped JSON ``parameters``
-    body can deliver ``80.0``, which upstream's ``int()`` accepted before this
-    guard existed — rejecting it would be a regression). A fractional float is
-    refused rather than silently truncated the way ``int(80.7)`` would.
-    Rejects bool explicitly — ``isinstance(True, int)`` is True in Python,
-    and ``binder_length: true`` is not a length.
+    Accepts an int, a digit string (an LLM- or YAML-authored ``parameters``
+    dict can carry ``"80"``), and an integral float (``parameters`` is an
+    untyped ``dict`` at every layer, so a JSON body can deliver ``80.0``,
+    which upstream's ``int()`` accepted before this guard existed — rejecting
+    it would be a regression). A fractional float is refused rather than
+    silently truncated the way ``int(80.7)`` would. Rejects bool explicitly —
+    ``isinstance(True, int)`` is True in Python, and ``binder_length: true``
+    is not a length.
     """
     if isinstance(value, bool):
         raise ValueError(
