@@ -127,9 +127,15 @@ RUN mkdir -p $PXDESIGN_DIR/tool_weights/af2 && \
     rm /tmp/af2_params.tar && \
     echo "AF2 weights OK: $(ls $PXDESIGN_DIR/tool_weights/af2/ | wc -l) files"
 
-# ProteinMPNN weights (GitHub — global)
+# ProteinMPNN weights (GitHub — global) — PINNED 2026-08-05
+# Was `git clone --depth 1` with no ref. These are model WEIGHTS, so an
+# unpinned clone means the scoring stage could silently change between two
+# builds of the "same" image. Same SHA as the rfdiffusion image uses.
+ARG PROTEINMPNN_SHA=8907e6671bfbfc92303b5f79c4b5e6ce47cdef57
 RUN mkdir -p $PXDESIGN_DIR/tool_weights/mpnn && \
-    git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /tmp/ProteinMPNN && \
+    git clone https://github.com/dauparas/ProteinMPNN.git /tmp/ProteinMPNN && \
+    cd /tmp/ProteinMPNN && git checkout $PROTEINMPNN_SHA && \
+    echo "ProteinMPNN pinned to $(git rev-parse HEAD)" && \
     cp -r /tmp/ProteinMPNN/ca_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
     cp -r /tmp/ProteinMPNN/vanilla_model_weights $PXDESIGN_DIR/tool_weights/mpnn/ && \
     rm -rf /tmp/ProteinMPNN && \
