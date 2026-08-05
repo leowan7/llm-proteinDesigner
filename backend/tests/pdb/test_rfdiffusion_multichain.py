@@ -248,6 +248,38 @@ def test_binder_chain_raises_when_ambiguous(backbone_2):
         rfd.infer_binder_chain(backbone_2, ["A"])
 
 
+def test_binder_length_cross_check_accepts_a_plausible_binder(backbone_2):
+    """Backbone C is 12 residues; a 10-15 request is consistent."""
+    assert rfd.infer_binder_chain(
+        backbone_2, ["A", "B"], binder_length={"min": 10, "max": 15}
+    ) == "C"
+
+
+def test_binder_length_cross_check_allows_one_residue_slack(backbone_2):
+    assert rfd.infer_binder_chain(
+        backbone_2, ["A", "B"], binder_length={"min": 13, "max": 20}
+    ) == "C"
+
+
+def test_binder_length_cross_check_catches_a_chain_swap(backbone_2):
+    """The signal a letter-level target/binder swap actually produces: the
+    chain picked as binder has a target-sized residue count. Here chain B
+    (30 residues, a target protomer) is mislabelled by declaring only A as
+    a target, and the 50-70 binder range rejects it."""
+    with pytest.raises(RuntimeError, match="outside the requested binder length"):
+        rfd.infer_binder_chain(
+            backbone_2, ["A", "C"], binder_length={"min": 50, "max": 70}
+        )
+
+
+def test_binder_length_cross_check_skipped_when_not_supplied(backbone_2):
+    assert rfd.infer_binder_chain(backbone_2, ["A", "B"]) == "C"
+
+
+def test_residue_counts_per_chain(backbone_2):
+    assert rfd._residue_counts_per_chain(backbone_2) == {"A": 30, "B": 30, "C": 12}
+
+
 # ---------------------------------------------------------------------------
 # (d) binder sequence — fails while still producing output
 # ---------------------------------------------------------------------------

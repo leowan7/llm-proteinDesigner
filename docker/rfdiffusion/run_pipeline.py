@@ -351,6 +351,7 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
         designed_fastas = stage_proteinmpnn(
             backbone_pdbs, target_chain, mpnn_output,
             webhook_url=webhook_url, job_id=job_id,
+            binder_length=params.get("binder_length"),
         )
     except RuntimeError as exc:
         return {
@@ -1150,7 +1151,28 @@ def _chains_in_pdb(pdb_path: str) -> list:
     return seen
 
 
-def infer_binder_chain(backbone_pdb: str, target_chains: list) -> str:
+def _residue_counts_per_chain(pdb_path: str) -> dict:
+    """{chain_id: residue count} from a PDB's ATOM records."""
+    seen: dict = {}
+    per_chain: dict = {}
+    with open(pdb_path) as fh:
+        for line in fh:
+            if not line.startswith("ATOM") or len(line) <= 26:
+                continue
+            cid = line[21]
+            key = (cid, line[22:27])
+            if key in seen:
+                continue
+            seen[key] = True
+            per_chain[cid] = per_chain.get(cid, 0) + 1
+    return per_chain
+
+
+def infer_binder_chain(
+    backbone_pdb: str,
+    target_chains: list,
+    binder_length: dict | None = None,
+) -> str:
     """Identify the diffused binder chain in an RFdiffusion output backbone.
 
     Read from the file rather than assumed. The previous
@@ -1159,24 +1181,53 @@ def infer_binder_chain(backbone_pdb: str, target_chains: list) -> str:
     still produced sequences — designs against a target the model was told
     to redesign.
 
-    Raises if the output does not contain exactly one non-target chain: a
-    wrong guess here is invisible in every downstream score.
+    Two independent signals, because a swap here is invisible in every
+    downstream score:
+
+    1. Exactly one chain in the output must not be a target chain.
+    2. If ``binder_length`` is supplied, that chain's residue count must
+       fall inside the requested range. This is what catches a swap: the
+       target protomers are hundreds of residues, the binder tens, so a
+       letter-level mix-up shows up immediately as an out-of-range length
+       rather than as a plausible design against the wrong molecule.
+
+    Raises on either failure rather than guessing.
     """
+    counts = _residue_counts_per_chain(backbone_pdb)
     present = _chains_in_pdb(backbone_pdb)
     candidates = [c for c in present if c not in set(target_chains)]
     if len(candidates) != 1:
         raise RuntimeError(
             f"Cannot identify the binder chain in {backbone_pdb}: chains "
-            f"present are {present}, target chains are {target_chains}, "
-            f"leaving {candidates} as binder candidate(s). Expected exactly "
-            f"one. Refusing to guess — fixing the wrong chain in ProteinMPNN "
-            f"still yields plausible sequences."
+            f"present are {present} (residues {counts}), target chains are "
+            f"{target_chains}, leaving {candidates} as binder candidate(s). "
+            f"Expected exactly one. Refusing to guess — fixing the wrong "
+            f"chain in ProteinMPNN still yields plausible sequences."
         )
+
+    binder_chain = candidates[0]
+    if binder_length:
+        lo = int(binder_length.get("min", 0))
+        hi = int(binder_length.get("max", 10**6))
+        got = counts.get(binder_chain, 0)
+        # RFdiffusion samples a length in [lo, hi]; allow a 1-residue slack
+        # for off-by-one differences in how the contig range is realized.
+        if not (lo - 1 <= got <= hi + 1):
+            raise RuntimeError(
+                f"Chain {binder_chain!r} was identified as the binder in "
+                f"{backbone_pdb} but has {got} residues, outside the "
+                f"requested binder length range {lo}-{hi}. Per-chain residue "
+                f"counts: {counts}; target chains: {target_chains}. This is "
+                f"what a target/binder chain swap looks like — refusing to "
+                f"continue rather than design against the wrong chain."
+            )
+
     logger.info(
-        "Binder chain inferred as %r (backbone chains=%s, targets=%s)",
-        candidates[0], present, target_chains,
+        "Binder chain inferred as %r (backbone chains=%s, residues=%s, "
+        "targets=%s)",
+        binder_chain, present, counts, target_chains,
     )
-    return candidates[0]
+    return binder_chain
 
 
 def stage_proteinmpnn(
@@ -1185,10 +1236,14 @@ def stage_proteinmpnn(
     output_dir: str,
     webhook_url: str = "",
     job_id: str = "",
+    binder_length: dict | None = None,
 ) -> list[str]:
     """Stage 2: Run ProteinMPNN sequence design on each backbone.
 
     ``target_chain`` accepts one chain ("A") or several ("A,B").
+    ``binder_length`` is the requested ``{"min": .., "max": ..}`` range; when
+    given it cross-checks the inferred binder chain against its residue
+    count, which is what catches a target/binder chain swap.
     """
     logger.info("=== Stage 2: ProteinMPNN sequence design ===")
     os.makedirs(output_dir, exist_ok=True)
@@ -1196,7 +1251,9 @@ def stage_proteinmpnn(
         send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, len(backbone_pdbs))
 
     target_chains = parse_target_chains(target_chain)
-    binder_chain = infer_binder_chain(backbone_pdbs[0], target_chains)
+    binder_chain = infer_binder_chain(
+        backbone_pdbs[0], target_chains, binder_length=binder_length,
+    )
 
     # Step 1: Parse all backbone PDBs into JSONL format
     parsed_jsonl = os.path.join(output_dir, "parsed_pdbs.jsonl")
@@ -1739,6 +1796,7 @@ def main():
             designed_fastas = stage_proteinmpnn(
                 backbone_pdbs, target_chain, mpnn_output,
                 webhook_url=webhook_url, job_id=job_id,
+                binder_length=job_spec.get("parameters", {}).get("binder_length"),
             )
         except RuntimeError as exc:
             logger.error("ProteinMPNN failed: %s", exc)
