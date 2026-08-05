@@ -93,12 +93,46 @@ def _make_pdb(chains):
     return "".join(out), seqs
 
 
+def _make_pdb_resnums(chains):
+    """chains: [(chain_id, [resnum, ...])] -> text.
+
+    Residue numbers need NOT be contiguous. Every fixture above is a perfect
+    1..N run, which is exactly why the dense-span contig bug survived: real
+    crystal structures have disordered loops, and the normalizer opens gaps
+    of its own when it drops a residue with an incomplete backbone.
+    """
+    out = ["HEADER    SYNTH\n"]
+    serial = 1
+    for ci, (cid, resnums) in enumerate(chains):
+        for k, resnum in enumerate(resnums):
+            three, _one = _AA[k % len(_AA)]
+            block, serial = _residue(
+                serial, cid, resnum, three, x=10.0 + 100.0 * ci + 4.0 * k
+            )
+            out.append(block)
+    out.append("END\n")
+    return "".join(out)
+
+
+# Chain A: 18-30 then 35-40 — one interior gap (31-34 unmodelled).
+GAPPED_PDB = _make_pdb_resnums(
+    [("A", list(range(18, 31)) + list(range(35, 41)))]
+)
+# Chain A gap-free, chain B gapped: the 4ZQK shape that failed on GPU.
+GAPPED_TWO_PDB = _make_pdb_resnums([
+    ("A", list(range(1, 31))),
+    ("B", list(range(33, 41)) + list(range(43, 51))),
+])
+
 SINGLE_PDB, SINGLE_SEQ = _make_pdb([("A", 18, 30)])
 DOUBLE_PDB, DOUBLE_SEQ = _make_pdb([("A", 1, 30), ("B", 1, 30)])
 # RFdiffusion output backbones: fixed target chains keep their letters, the
 # diffused binder takes the next free letter.
 BACKBONE_1, _ = _make_pdb([("A", 18, 30), ("B", 1, 12)])
 BACKBONE_2, _ = _make_pdb([("A", 1, 30), ("B", 1, 30), ("C", 1, 12)])
+# Binder sized inside the (50, 100) range a non-dict binder_length resolves
+# to, so the wizard's bare-int shape can be exercised end to end.
+BACKBONE_INT, _ = _make_pdb([("A", 1, 30), ("B", 1, 30), ("C", 1, 60)])
 
 BINDER_SEQ = "WWWWWWWWWWWW"
 
@@ -118,9 +152,30 @@ def double_pdb(tmp_path):
 
 
 @pytest.fixture
+def gapped_pdb(tmp_path):
+    p = tmp_path / "gapped.pdb"
+    p.write_text(GAPPED_PDB)
+    return str(p)
+
+
+@pytest.fixture
+def gapped_two_pdb(tmp_path):
+    p = tmp_path / "gapped_two.pdb"
+    p.write_text(GAPPED_TWO_PDB)
+    return str(p)
+
+
+@pytest.fixture
 def backbone_1(tmp_path):
     p = tmp_path / "bb1.pdb"
     p.write_text(BACKBONE_1)
+    return str(p)
+
+
+@pytest.fixture
+def backbone_int(tmp_path):
+    p = tmp_path / "bbint.pdb"
+    p.write_text(BACKBONE_INT)
     return str(p)
 
 
@@ -360,9 +415,38 @@ def test_interface_pae_two_target_chains_uses_summed_boundary():
     assert wrong != 1.0
 
 
-def test_interface_pae_falls_back_when_chain_lengths_missing():
-    pae = _pae_with_interface(8, 4)
-    assert rfd._compute_interface_pae(pae, {}, 2) == 1.0
+def test_interface_pae_prefers_the_authoritative_target_length():
+    """target_residues comes from the sequences this pipeline actually wrote
+    into the AF2 FASTA. It is the only trustworthy boundary: ColabFold's
+    scores JSON carries plddt/pae/ptm/iptm/max_pae and NO per-chain lengths,
+    so a boundary derived from the JSON alone never fires in production."""
+    pae = _pae_with_interface(10, 7)
+    got = rfd._compute_interface_pae(pae, {}, 2, target_residues=7)
+    assert got == 1.0
+
+
+def test_interface_pae_authoritative_length_beats_chain_lengths():
+    pae = _pae_with_interface(10, 7)
+    # chain_lengths disagrees; target_residues wins because it is measured
+    # from the FASTA rather than guessed.
+    got = rfd._compute_interface_pae(
+        pae, {"chain_lengths": [3, 3, 4]}, 2, target_residues=7,
+    )
+    assert got == 1.0
+
+
+def test_interface_pae_midpoint_fallback_is_a_guess_not_a_boundary():
+    """The old covering test used _pae_with_interface(8, 4) and asserted 1.0,
+    but 8 // 2 == 4 — the fallback coincided with the constructed boundary,
+    so it proved nothing. With a realistic 116-residue target and a 60-residue
+    binder the midpoint is 88, not 116, and the "interface" mean is polluted
+    by intra-target cells. Assert the fallback is WRONG so nobody reads it as
+    working."""
+    pae = _pae_with_interface(176, 116)
+    got = rfd._compute_interface_pae(pae, {}, 1)
+    assert got != 1.0, "midpoint fallback must not be mistaken for correct"
+    # And that supplying the real length repairs it.
+    assert rfd._compute_interface_pae(pae, {}, 1, target_residues=116) == 1.0
 
 
 def test_interface_pae_empty_matrix():
@@ -382,3 +466,156 @@ def test_parse_target_chains_forms():
 def test_parse_target_chains_requires_one():
     with pytest.raises(ValueError, match="at least one chain"):
         rfd.parse_target_chains("")
+
+
+def test_parse_target_chains_accepts_whitespace_separator():
+    """tools-hub has shipped "A B C" since before the comma contract existed
+    (shared/pdb_inspect.validate_target_chain, five tools with
+    multi_chain_supported=True, and the form copy). Rejecting it here made
+    multi-chain unreachable from the web form."""
+    assert rfd.parse_target_chains("A B") == ["A", "B"]
+    assert rfd.parse_target_chains("A, B") == ["A", "B"]
+    assert rfd.parse_target_chains("A  B   C") == ["A", "B", "C"]
+
+
+# ---------------------------------------------------------------------------
+# contigs on chains with numbering gaps
+# ---------------------------------------------------------------------------
+
+def _contig_residues(contig: str) -> set:
+    """Expand a contigmap string into the (chain, resnum) pairs it NAMES.
+
+    This mirrors what RFdiffusion's ContigMap.get_idx0 does before it
+    asserts each pair exists in the input PDB.
+    """
+    named = set()
+    body = contig.strip("[]")
+    for block in body.replace("/0 ", " ").split(" "):
+        for seg in block.split("/"):
+            if not seg or seg[0].isdigit():
+                continue  # the binder's length range, not a target segment
+            chain, _, span = seg[0], None, seg[1:]
+            lo, hi = (int(v) for v in span.split("-"))
+            named.update((chain, r) for r in range(lo, hi + 1))
+    return named
+
+
+def _pdb_residues(path: str) -> set:
+    out = set()
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("ATOM"):
+                out.add((line[21], int(line[22:26])))
+    return out
+
+
+def test_gapped_chain_emits_one_segment_per_contiguous_run(gapped_pdb):
+    got = rfd.build_contig_string(gapped_pdb, ["A"], 50, 70)
+    assert got == "[A18-30/A35-40/0 50-70]"
+
+
+def test_gapped_second_chain_keeps_the_chain_break(gapped_two_pdb):
+    got = rfd.build_contig_string(gapped_two_pdb, ["A", "B"], 55, 65)
+    assert got == "[A1-30/0 B33-40/B43-50/0 55-65]"
+    # Runs WITHIN a chain are joined by "/" with no 0; chain breaks keep the
+    # "/0 " form whose trailing space upstream requires.
+    assert got.count("/0 ") == 2
+
+
+def test_gap_free_chain_still_emits_a_single_segment(single_pdb):
+    """The byte-identity guard: a contiguous chain must not acquire extra
+    segments now that runs are computed rather than assumed."""
+    assert rfd.build_contig_string(single_pdb, ["A"], 50, 100) == "[A18-47/0 50-100]"
+
+
+@pytest.mark.parametrize("fixture,chains", [
+    ("single_pdb", ["A"]),
+    ("double_pdb", ["A", "B"]),
+    ("gapped_pdb", ["A"]),
+    ("gapped_two_pdb", ["A", "B"]),
+])
+def test_contig_never_names_a_residue_absent_from_the_pdb(
+    request, fixture, chains,
+):
+    """The invariant the dense min-max span violated. RFdiffusion expands
+    every contig segment and asserts each residue exists:
+    ``AssertionError: ('B', 85) is not in pdb file!``. A contig that names a
+    residue the file lacks is a guaranteed abort, and this held for
+    single-chain targets with disordered loops too."""
+    path = request.getfixturevalue(fixture)
+    contig = rfd.build_contig_string(path, chains, 50, 70)
+    named = _contig_residues(contig)
+    present = _pdb_residues(path)
+    assert named, "contig named no target residues at all"
+    assert named <= present, f"contig names absent residues: {sorted(named - present)}"
+
+
+# ---------------------------------------------------------------------------
+# binder_length shape tolerance
+# ---------------------------------------------------------------------------
+
+def test_infer_binder_chain_accepts_int_binder_length(backbone_int):
+    """REGRESSION: the agent wizard declares binder_length param_type="int",
+    default=80, so job_spec["parameters"]["binder_length"] is a bare int on
+    the default path. Calling .get() on it raised AttributeError at Stage 2 —
+    after RFdiffusion had already run and been paid for."""
+    assert rfd.infer_binder_chain(backbone_int, ["A", "B"], binder_length=80) == "C"
+
+
+def test_int_binder_length_never_raises_attributeerror(backbone_2):
+    """Even when the length check legitimately fails, the failure must be the
+    domain error, not 'int' object has no attribute 'get'."""
+    with pytest.raises(RuntimeError, match="chain swap"):
+        rfd.infer_binder_chain(backbone_2, ["A", "B"], binder_length=80)
+
+
+def test_build_hydra_args_accepts_int_binder_length(double_pdb):
+    args = rfd.build_hydra_args(
+        {"target_chain": "A,B", "hotspot_residues": [],
+         "parameters": {"binder_length": 80}},
+        double_pdb,
+    )
+    joined = " ".join(args)
+    assert "contigmap.contigs=[A1-30/0 B1-30/0 50-100]" in joined
+
+
+def test_request_and_validation_agree_on_the_binder_range(backbone_2):
+    """Both sides resolve binder_length through one function so they cannot
+    disagree about what was asked for — the divergence that produced the
+    crash."""
+    for shape in (80, None, {"min": 50, "max": 100}, {}):
+        lo, hi = rfd._resolve_binder_range(shape)
+        assert (lo, hi) == (50, 100)
+    assert rfd._resolve_binder_range({"min": 55, "max": 65}) == (55, 65)
+
+
+# ---------------------------------------------------------------------------
+# hotspot existence guard (parity with PXDesign / BoltzGen)
+# ---------------------------------------------------------------------------
+
+def test_hotspot_absent_from_structure_raises(double_pdb):
+    """Upstream RFdiffusion intersects hotspot tokens against the parsed PDB
+    and DROPS non-matching ones with no warning, yielding an all-zero hotspot
+    tensor: an untargeted design that completes, scores normally, and is
+    wrong only at the bench. PXDesign and BoltzGen already refuse this."""
+    with pytest.raises(ValueError, match="not present in the target structure"):
+        rfd.build_hotspot_string(["A999"], ["A", "B"], double_pdb)
+
+
+def test_hotspot_guard_names_every_missing_residue(double_pdb):
+    with pytest.raises(ValueError) as exc:
+        rfd.build_hotspot_string(["A5", "A999", "B888"], ["A", "B"], double_pdb)
+    assert "A999" in str(exc.value)
+    assert "B888" in str(exc.value)
+    assert "A5" not in str(exc.value).split("are not present")[0]
+
+
+def test_hotspot_guard_passes_valid_residues(double_pdb):
+    got = rfd.build_hotspot_string(["A5", "B7"], ["A", "B"], double_pdb)
+    assert got == "[A5,B7]"
+
+
+def test_hotspot_guard_skipped_without_a_structure(double_pdb):
+    """Back-compat: the two-argument form keeps working for callers that
+    have no PDB on hand."""
+    assert rfd.build_hotspot_string(["A999"], ["A", "B"]) == "[A999]"

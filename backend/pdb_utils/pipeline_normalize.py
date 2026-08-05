@@ -28,6 +28,7 @@ structure.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence, Union
 
@@ -209,9 +210,20 @@ def parse_target_chains(target_chain: TargetChainSpec) -> Optional[list]:
     """Normalize a target-chain selector into an ordered list of chain ids.
 
     Accepts the historical scalar form (``"A"``), the multi-chain comma
-    string (``"A,B"``), an explicit sequence (``["A", "B"]``), or ``None``.
-    Returns ``None`` when no chain filter should be applied, otherwise a
-    de-duplicated list in **caller-supplied order**.
+    string (``"A,B"``), the whitespace form (``"A B"``), an explicit
+    sequence (``["A", "B"]``), or ``None``. Returns ``None`` when no chain
+    filter should be applied, otherwise a de-duplicated list in
+    **caller-supplied order**.
+
+    BOTH separators are accepted because the two repos arrived at different
+    conventions independently: this one specifies ``"A,B"``, while tools-hub
+    has shipped whitespace (``"A B C"``) for some time —
+    ``shared/pdb_inspect.validate_target_chain`` splits on it, five tools
+    declare ``multi_chain_supported=True``, and the form copy tells users
+    "List chains separated by spaces". Accepting only commas here made
+    multi-chain unreachable from the web form; accepting only whitespace
+    would break the documented contract. Accepting both breaks neither, and
+    a mixed string ("A, B") works too.
 
     Order matters downstream: RFdiffusion's ``contigmap.contigs`` and the
     AF2 complex FASTA both concatenate target chains, and the pipelines
@@ -227,7 +239,7 @@ def parse_target_chains(target_chain: TargetChainSpec) -> Optional[list]:
     if target_chain is None:
         return None
     if isinstance(target_chain, str):
-        tokens = [tok.strip() for tok in target_chain.split(",")]
+        tokens = re.split(r"[,\s]+", target_chain.strip())
     else:
         tokens = [str(tok).strip() for tok in target_chain]
     ordered: list = []

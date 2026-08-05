@@ -948,6 +948,7 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
 
 def parse_af2_scores(
     result_dir: str, design_name: str, n_target_chains: int = 1,
+    target_residues: int | None = None,
 ) -> dict | None:
     """Extract ipTM, pLDDT, and i_pAE from ColabFold AF2 prediction output.
 
@@ -955,6 +956,11 @@ def parse_af2_scores(
     chains of the complex are target. The AF2 FASTA is written target
     chain(s) first, binder last, so the interface boundary sits after the
     target block. Defaults to 1 — the historical single-chain shape.
+
+    ``target_residues`` is the authoritative residue count of that target
+    block, taken from the sequences we actually wrote into the FASTA. Prefer
+    it: ColabFold's scores JSON does NOT carry per-chain lengths, so a
+    boundary derived from the JSON alone silently degrades to a guess.
     """
     score_files = glob(os.path.join(result_dir, f"{design_name}*scores*.json"))
     if not score_files:
@@ -973,7 +979,9 @@ def parse_af2_scores(
 
         pae_matrix = data.get("pae", [])
         ipae = (
-            _compute_interface_pae(pae_matrix, data, n_target_chains)
+            _compute_interface_pae(
+                pae_matrix, data, n_target_chains, target_residues,
+            )
             if pae_matrix else 99.0
         )
 
@@ -989,16 +997,29 @@ def parse_af2_scores(
 
 def _compute_interface_pae(
     pae_matrix: list, score_data: dict, n_target_chains: int = 1,
+    target_residues: int | None = None,
 ) -> float:
     """Compute mean interface PAE from the PAE matrix.
 
     The complex is laid out target chain(s) first, binder last, so the
-    target/binder boundary is the summed length of the first
-    ``n_target_chains`` chains — NOT ``chain_lengths[0]``. On a two-chain
-    target that difference silently reclassifies the second protomer as
-    binder-side and returns an i_pAE computed across the wrong interface,
-    with no visible symptom. Reduces to ``chain_lengths[0]`` when
-    ``n_target_chains == 1``.
+    target/binder boundary is the total length of the target block. Getting
+    it wrong is silent: on a two-chain target a boundary of
+    ``chain_lengths[0]`` reclassifies the second protomer as binder-side and
+    averages PAE over the wrong interface, with no visible symptom.
+
+    Boundary sources, in order of trust:
+
+    1. ``target_residues`` — the summed length of the target sequences this
+       pipeline wrote into the AF2 FASTA. Authoritative.
+    2. ``score_data["chain_lengths"]`` — accepted if present, but ColabFold
+       does NOT emit this key (its scores JSON carries plddt/pae/ptm/iptm/
+       max_pae only), so in practice this never fires.
+    3. ``total_res // 2`` — a guess, correct only when the binder happens to
+       be the same size as the whole target. It is wrong on the historical
+       single-chain path too: a 116-residue target plus a 60-residue binder
+       gives 88 instead of 116. Logged loudly, because an i_pAE computed
+       across a fabricated boundary still looks like a normal number and
+       still gates ``filter_status`` against ``IPAE_THRESHOLD``.
     """
     total_res = len(pae_matrix)
     if total_res == 0:
@@ -1006,10 +1027,19 @@ def _compute_interface_pae(
 
     n_target_chains = max(1, int(n_target_chains))
     chain_lengths = score_data.get("chain_lengths", None)
-    if chain_lengths and len(chain_lengths) >= n_target_chains + 1:
+    if target_residues and 0 < int(target_residues) < total_res:
+        boundary = int(target_residues)
+    elif chain_lengths and len(chain_lengths) >= n_target_chains + 1:
         boundary = sum(chain_lengths[:n_target_chains])
     else:
         boundary = total_res // 2
+        logger.warning(
+            "i_pAE: no authoritative target length (target_residues=%r, "
+            "chain_lengths=%r) for a %d-residue complex; falling back to a "
+            "midpoint boundary of %d. i_pAE is computed across a GUESSED "
+            "interface and should not be trusted for filtering.",
+            target_residues, chain_lengths, total_res, boundary,
+        )
 
     ipae_values = []
     for row_idx in range(total_res):
@@ -1039,6 +1069,19 @@ def _get_chain_residue_range(pdb_path: str, chain_id: str) -> tuple[int, int]:
     Raises:
         RuntimeError: If the chain is not found or has no residues.
     """
+    residue_nums = _get_chain_residue_numbers(pdb_path, chain_id)
+    return residue_nums[0], residue_nums[-1]
+
+
+def _get_chain_residue_numbers(pdb_path: str, chain_id: str) -> list:
+    """Sorted, de-duplicated standard-residue numbers for one chain.
+
+    Insertion codes are collapsed onto their base number, matching how
+    RFdiffusion keys its own ``parsed_pdb["pdb_idx"]``.
+
+    Raises:
+        RuntimeError: If the chain is not found or has no residues.
+    """
     try:
         from Bio.PDB import PDBParser
         parser = PDBParser(QUIET=True)
@@ -1047,16 +1090,35 @@ def _get_chain_residue_range(pdb_path: str, chain_id: str) -> tuple[int, int]:
         for model in structure:
             for chain in model:
                 if chain.id == chain_id:
-                    residue_nums = [
+                    residue_nums = sorted({
                         r.id[1] for r in chain
                         if r.id[0] == " "  # Standard residues only (skip HETATM)
-                    ]
+                    })
                     if residue_nums:
-                        return min(residue_nums), max(residue_nums)
+                        return residue_nums
 
         raise RuntimeError(f"Chain {chain_id} not found in {pdb_path}")
     except ImportError:
         raise RuntimeError("Biopython is required to parse PDB residue ranges")
+
+
+def _contiguous_runs(residue_nums: list) -> list:
+    """Group ascending residue numbers into contiguous ``(first, last)`` runs.
+
+    ``[18, 19, 20, 45, 46]`` -> ``[(18, 20), (45, 46)]``. A gap-free chain
+    yields exactly one run, which is what keeps the single-chain contig
+    byte-identical to the historical output.
+    """
+    runs = []
+    start = prev = residue_nums[0]
+    for num in residue_nums[1:]:
+        if num == prev + 1:
+            prev = num
+            continue
+        runs.append((start, prev))
+        start = prev = num
+    runs.append((start, prev))
+    return runs
 
 
 def parse_target_chains(target_chain) -> list:
@@ -1088,30 +1150,112 @@ def build_contig_string(
 
         one chain : [A18-132/0 50-100]
         two chains: [A1-223/0 B1-223/0 50-70]
+        gapped    : [A18-132/0 B33-84/B86-146/0 55-65]
 
-    Residue ranges are read from the PDB per chain rather than assumed.
+    Residue ranges are read from the PDB per chain rather than assumed, and
+    a chain is emitted as one segment PER CONTIGUOUS RUN, joined by ``/``
+    within the chain. A dense ``{chain}{min}-{max}`` span is wrong whenever
+    the chain has a numbering gap: RFdiffusion expands the span into every
+    integer in the range and asserts each one exists in the input PDB, so a
+    single unmodelled loop residue aborts the run with
+    ``AssertionError: ('B', 85) is not in pdb file!``. Crystal structures of
+    oligomers almost always have disordered loops, and the normalizer can
+    open a gap itself by dropping a residue with an incomplete backbone.
     """
     segments = []
     for chain in target_chains:
-        first_res, last_res = _get_chain_residue_range(target_pdb_path, chain)
-        logger.info("Chain %s residue range: %d-%d", chain, first_res, last_res)
-        segments.append(f"{chain}{first_res}-{last_res}")
+        residue_nums = _get_chain_residue_numbers(target_pdb_path, chain)
+        runs = _contiguous_runs(residue_nums)
+        logger.info(
+            "Chain %s: %d residues spanning %d-%d in %d contiguous run(s)",
+            chain, len(residue_nums), residue_nums[0], residue_nums[-1],
+            len(runs),
+        )
+        if len(runs) > 1:
+            logger.info(
+                "Chain %s has %d numbering gap(s); emitting %d separate contig "
+                "segments so RFdiffusion is never asked to fix a residue the "
+                "PDB does not contain: %s",
+                chain, len(runs) - 1, len(runs),
+                ", ".join(f"{a}-{b}" for a, b in runs),
+            )
+        segments.append("/".join(f"{chain}{a}-{b}" for a, b in runs))
     segments.append(f"{binder_min}-{binder_max}")
     return "[" + "/0 ".join(segments) + "]"
 
 
-def build_hotspot_string(hotspots, target_chains: list) -> str:
+def build_hotspot_string(
+    hotspots, target_chains: list, target_pdb_path: str | None = None,
+) -> str:
     """Build ``ppi.hotspot_res``, e.g. ``[A30,A33,B264]``.
 
     Accepts already-chain-qualified tokens ("A296", "B264") and bare ints
     (attributed to the first target chain, the historical shape). Hotspots
     may span chains — that is the point for an oligomeric target, where a
     binder grips both protomers.
+
+    When ``target_pdb_path`` is given, every hotspot is checked against the
+    residues actually present after cleanup and an unmatched one is a hard
+    error. Upstream RFdiffusion intersects hotspot tokens against the parsed
+    PDB index and DROPS non-matching ones with no warning and no assert, so
+    a mistyped or dropped residue yields an all-zero hotspot tensor: the run
+    completes, ProteinMPNN designs sequences, AF2 returns normal-looking
+    scores, and the binder is aimed at an arbitrary surface patch. PXDesign
+    and BoltzGen already refuse this input; RFdiffusion did not.
     """
     from pipeline_normalize import parse_hotspots  # noqa: PLC0415
 
     parsed = parse_hotspots(hotspots, target_chains)
+
+    if target_pdb_path and parsed:
+        present = {
+            chain: set(_get_chain_residue_numbers(target_pdb_path, chain))
+            for chain in target_chains
+        }
+        missing = [
+            f"{chain}{res}" for chain, res in parsed
+            if res not in present.get(chain, ())
+        ]
+        if missing:
+            raise ValueError(
+                f"Hotspot residue(s) {missing} are not present in the target "
+                f"structure after cleanup. Requested: {list(hotspots)!r}; "
+                f"target chains: {target_chains}. RFdiffusion silently "
+                f"discards hotspot tokens it cannot match, so continuing "
+                f"would run an untargeted design that still completes and "
+                f"still scores — wrong only at the bench. Refusing to "
+                f"continue."
+            )
+
     return "[" + ",".join(f"{chain}{res}" for chain, res in parsed) + "]"
+
+
+def _resolve_binder_range(binder_length) -> tuple:
+    """Resolve ``parameters["binder_length"]`` to a ``(min, max)`` pair.
+
+    The field arrives in two shapes and both are load-bearing: a
+    ``{"min": .., "max": ..}`` dict from the tools-hub campaign path, and a
+    BARE INT from the agent wizard, which declares it
+    ``param_type="int", default=80`` (backend/agent/wizard.py). Anything
+    reading this field must tolerate both.
+
+    A non-dict resolves to the historical ``(50, 100)`` rather than
+    ``(n, n)``: ``build_hydra_args`` has always built the contig from that
+    default when handed an int, so pinning the range to the int here would
+    reject a legitimately sampled binder as a chain swap. That the wizard's
+    requested length is ignored by the contig builder is a separate,
+    pre-existing bug — see docs/MULTI-CHAIN-TARGETS.md.
+
+    Both the request side (``build_hydra_args``) and the validation side
+    (``infer_binder_chain``) go through this one function so they cannot
+    disagree about what was asked for.
+    """
+    if isinstance(binder_length, dict):
+        return (
+            int(binder_length.get("min", 50)),
+            int(binder_length.get("max", 100)),
+        )
+    return 50, 100
 
 
 def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
@@ -1121,11 +1265,7 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     hotspots = job_spec.get("hotspot_residues", [])
 
     binder_length = params.get("binder_length", {"min": 50, "max": 100})
-    if isinstance(binder_length, dict):
-        binder_min = binder_length.get("min", 50)
-        binder_max = binder_length.get("max", 100)
-    else:
-        binder_min, binder_max = 50, 100
+    binder_min, binder_max = _resolve_binder_range(binder_length)
 
     num_designs = params.get("num_designs", 10)
 
@@ -1146,7 +1286,8 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
 
     if hotspots:
         hydra_args.append(
-            f"ppi.hotspot_res={build_hotspot_string(hotspots, target_chains)}"
+            "ppi.hotspot_res="
+            + build_hotspot_string(hotspots, target_chains, target_pdb_path)
         )
 
     logger.info(
@@ -1261,8 +1402,11 @@ def infer_binder_chain(
 
     binder_chain = candidates[0]
     if binder_length:
-        lo = int(binder_length.get("min", 0))
-        hi = int(binder_length.get("max", 10**6))
+        # Validate against the SAME range build_hydra_args asked RFdiffusion
+        # for. Calling .get() directly here crashed every agent/wizard job,
+        # which passes binder_length as a bare int, after Stage 1 had already
+        # been paid for.
+        lo, hi = _resolve_binder_range(binder_length)
         got = counts.get(binder_chain, 0)
         # RFdiffusion samples a length in [lo, hi]; allow a 1-residue slack
         # for off-by-one differences in how the contig range is realized.
@@ -1538,9 +1682,12 @@ def stage_af2_validation(
             )
         target_sequences.append(seq)
     target_side = ":".join(target_sequences)
+    # Residue count, NOT len(target_side) — the latter counts the ":" chain
+    # separators too and is what the i_pAE boundary is measured against.
+    target_residues = sum(len(s) for s in target_sequences)
     logger.info(
-        "AF2 target side: chains=%s lengths=%s total=%d",
-        target_chains, [len(s) for s in target_sequences], len(target_side),
+        "AF2 target side: chains=%s lengths=%s total_residues=%d",
+        target_chains, [len(s) for s in target_sequences], target_residues,
     )
 
     results = []
@@ -1634,7 +1781,9 @@ def stage_af2_validation(
             logger.info("AF2 output files for %s: %s", design_name, af2_files)
 
             scores = parse_af2_scores(
-                per_design_out, design_name, n_target_chains=len(target_chains),
+                per_design_out, design_name,
+                n_target_chains=len(target_chains),
+                target_residues=target_residues,
             )
             if scores:
                 results.append({

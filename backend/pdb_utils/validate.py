@@ -147,7 +147,9 @@ def scan_chain_gaps(pdb_path: str, chain_id: str) -> list[tuple[int, int]]:
 
     Args:
         pdb_path: Path to a PDB-format file.
-        chain_id: Chain to scan.
+        chain_id: Chain to scan. May name SEVERAL chains, comma- or
+            whitespace-separated ("A,B" / "A B"); every named chain is
+            scanned and the gaps are unioned.
 
     Returns:
         List of (gap_start, gap_end) tuples (inclusive endpoints of the
@@ -157,18 +159,29 @@ def scan_chain_gaps(pdb_path: str, chain_id: str) -> list[tuple[int, int]]:
     """
     parser = PDBParser(QUIET=True)
     structure = parser.get_structure("target", pdb_path)
-    if chain_id not in [c.id for c in structure[0]]:
-        return []
-    chain = structure[0][chain_id]
-    resnums = sorted(
-        residue.get_id()[1]
-        for residue in chain
-        if is_aa(residue, standard=True)
-    )
+    present = {c.id: c for c in structure[0]}
+
+    # A multi-chain selector used to be compared whole against a single
+    # chain id: "A,B" matched nothing, returned [], and was reported as
+    # "contiguous numbering" — a silent pass that dropped this guard from
+    # precisely the oligomeric targets most likely to have disordered loops.
+    chain_ids = (chain_id or "").replace(",", " ").split()
+
     gaps: list[tuple[int, int]] = []
-    for prev, curr in zip(resnums, resnums[1:]):
-        if curr > prev + 1:
-            gaps.append((prev + 1, curr - 1))
+    for cid in chain_ids:
+        chain = present.get(cid)
+        if chain is None:
+            # Absent chains are reported by the chain-presence check; a
+            # missing chain is not a gap.
+            continue
+        resnums = sorted(
+            residue.get_id()[1]
+            for residue in chain
+            if is_aa(residue, standard=True)
+        )
+        for prev, curr in zip(resnums, resnums[1:]):
+            if curr > prev + 1:
+                gaps.append((prev + 1, curr - 1))
     return gaps
 
 

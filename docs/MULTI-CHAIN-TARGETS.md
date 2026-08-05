@@ -23,15 +23,21 @@ this file is for.
 
 ```jsonc
 {
-  "target_chain":     "A,B",              // comma string; "A" behaves exactly as before
+  "target_chain":     "A,B",              // or "A B"; "A" behaves exactly as before
   "hotspot_residues": ["A296", "B264"],   // chain-prefixed; bare ints still accepted
   "parameters": { /* unchanged per tool */ }
 }
 ```
 
-- `target_chain` — one chain (`"A"`) or several (`"A,B"`). Case-sensitive.
+- `target_chain` — one chain (`"A"`) or several. **Both separators are
+  accepted**: `"A,B"` and `"A B"` are equivalent, as is `"A, B"`. The comma
+  form is this repo's contract; whitespace is what tools-hub shipped first
+  (`shared/pdb_inspect.validate_target_chain` splits on it, five tools carry
+  `multi_chain_supported=True`, and the form copy tells users "List chains
+  separated by spaces"). Parsing only one of them left multi-chain accepted
+  by the form and then rejected by every gate behind it. Case-sensitive.
   **Order is significant**: it drives contig segment order and AF2 FASTA
-  concatenation order. De-duplicated, whitespace tolerated (`" A , B "`).
+  concatenation order. De-duplicated.
 - `hotspot_residues` — chain-prefixed tokens (`"A296"`) address a specific
   protomer. **Bare integers (`296`) are still accepted and attributed to the
   FIRST target chain**, which is exactly the historical single-chain
@@ -75,6 +81,21 @@ contigmap.contigs=[A1-223/0 B1-223/0 50-70]
 ppi.hotspot_res=[A296,B264]
 ```
 
+A chain is emitted as **one segment per contiguous run**, joined by `/` with
+no `0` inside the chain. RFdiffusion expands each segment into every integer
+in the range and asserts each one exists in the input PDB, so a dense
+`{chain}{min}-{max}` span aborts the run the moment the chain has a gap:
+
+```
+contigmap.contigs=[A18-132/0 B33-84/B93-146/0 55-65]   # 4ZQK: B is missing 85-92
+```
+
+This is not exotic. Crystal structures of oligomers almost always carry a
+disordered loop, and the normalizer opens gaps of its own whenever it drops a
+residue with an incomplete backbone. The single-chain path had the same
+defect — it went unnoticed only because the one fixture ever used, PD-L1
+chain A, happens to be gap-free.
+
 The binder chain is **inferred from the RFdiffusion output** (the one chain
 that is not a target) and cross-checked against the requested binder length
 range, rather than assumed to be the next letter. The AF2 validation complex
@@ -90,18 +111,26 @@ Each of these previously produced output that looked like a successful run.
 | `normalize_for_pipeline` | filtered to one chain before anything ran | keeps every named chain; a named chain that does not survive is a hard error |
 | PXDesign `ensure_cif` | same one-chain filter, so a correct YAML pointed at a CIF missing chain B | asserts every requested chain is in the written CIF |
 | PXDesign hotspots | unmapped hotspot logged and skipped → `hotspots: []`, an untargeted design | hard `ValueError` |
-| RFdiffusion hotspots | every token force-prefixed with the single target chain, so `"B264"` became `"AB264"` | chain-qualified tokens pass through |
+| RFdiffusion hotspots | every token force-prefixed with the single target chain, so `"B264"` became `"AB264"` | chain-qualified tokens pass through, and a hotspot absent from the cleaned structure is a hard `ValueError` — upstream drops unmatched tokens silently, yielding an all-zero hotspot tensor |
+| RFdiffusion contigs | one dense `{chain}{min}-{max}` span per chain; any numbering gap aborted with `('B', 85) is not in pdb file!` | one segment per contiguous run |
+| RFdiffusion `binder_length` | `infer_binder_chain` called `.get()` on it, but the agent wizard supplies a bare `int` — `AttributeError` at Stage 2, after RFdiffusion had already been paid for | both shapes resolve through one helper shared with the contig builder |
 | RFdiffusion binder chain | `"B" if target_chain == "A" else "A"` returned a *target* chain for a 2-chain target; ProteinMPNN redesigned the target | inferred from output + length cross-check, raises on ambiguity |
 | RFdiffusion AF2 binder | picked positionally; a wrong pick scores a target chain as the binder | identified by sequence identity, raises if unresolvable |
-| RFdiffusion `i_pAE` | boundary `chain_lengths[0]` scored protomer B as binder-side | boundary sums the target chains |
+| RFdiffusion `i_pAE` | boundary `chain_lengths[0]` scored protomer B as binder-side — and since ColabFold's scores JSON carries no `chain_lengths` at all, the real production boundary was a `total_res // 2` guess, wrong on the single-chain path too | boundary is the residue count of the target sequences this pipeline wrote into the AF2 FASTA; the guess remains only as a last resort and now logs a warning when it fires |
 
 ## Known limitations
 
-- **Three or more chains are not reachable from the web form.** The
-  pre-existing `len(target_chain) > 4` cap in the tools-hub adapters admits
-  `"A,B"` but not `"A,B,C"`. The pipelines themselves handle N chains;
-  raising the cap is a deliberate, separate decision. Direct Modal callers
-  are unaffected.
+- **`ipTM` is still the complex-wide value, not the binder-target pair.**
+  This was harmless while every target was single-chain, because the two
+  coincide for a 2-chain complex. On a multi-chain target they do not: the
+  target-target interface of a real crystal dimer scores ~0.9 and, since
+  `ipTM` is a max over residues rather than a mean, dominates almost
+  independently of binder quality. It is both the ranking key and the
+  `IPTM_THRESHOLD` gate, so a mediocre binder can rank first with a
+  plausible-looking number. BoltzGen exposes `design_iptm` in
+  `aggregate_metrics_analyze.csv` and could be fixed by reordering
+  `IPTM_KEYS`; RFdiffusion and PXDesign need a per-pair value derived from
+  the chain layout. **Not fixed — treat multi-chain `ipTM` as unreliable.**
 - **PXDesign's binder is single-chain** upstream. Only the target is
   multi-chain.
 - **BoltzGen and RFantibody are NOT multi-chain.** `pipeline_normalize`
