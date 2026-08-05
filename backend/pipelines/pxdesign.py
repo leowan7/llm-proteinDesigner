@@ -2,21 +2,26 @@
 
 PXDesign uses a YAML task specification with:
   - target: file path, chains with crop ranges and hotspots
-  - binder_length: integer or dict {min, max}
-  - preset: "basic" (no MSA), "extended" (requires MSA), or "custom"
+  - binder_length: a single integer (e.g. 80). PXDesign's YAML schema has
+    NO range form — unlike RFdiffusion/BoltzGen/BindCraft in this repo,
+    which take {"min": .., "max": ..}. Do not hand PXDesign a dict.
+  - preset: "preview" (no MSA), "extended" (requires MSA), or "custom".
+    Upstream's CLI is a click.Choice over exactly those three — "basic" is
+    NOT a valid value. SMOKE-TEST-SPEC.md calls the no-MSA mode "Basic",
+    which is where the wrong name in this file came from.
   - N_sample: number of designs to generate
 
-Only "basic" mode is used in Phase 4 smoke/mini_pilot — extended requires MSA
-preparation (deferred to a future release).
+Only "preview" mode is used in Phase 4 smoke/mini_pilot — extended requires
+MSA preparation (deferred to a future release).
 
 Crop must be a list of string residue ranges (e.g. ["1-116"]), NOT a boolean.
 The handler determines chain length from the CIF and fills crop accordingly.
 
 Expected runtime (A100-80GB, PD-L1 IgV target):
-  - smoke (N=1, basic):       ~8-12 min (JAX JIT + sampling + AF2 IG)
-  - mini_pilot (N=1, basic):  ~30-40 min (PXDesign-specific exception, see
-                               docs/SMOKE-TEST-SPEC.md Per-tool exceptions)
-  - pilot (N=2, basic):       ~12-18 min
+  - smoke (N=1, preview):       ~8-12 min (JAX JIT + sampling + AF2 IG)
+  - mini_pilot (N=1, preview):  ~30-40 min (PXDesign-specific exception, see
+                                 docs/SMOKE-TEST-SPEC.md Per-tool exceptions)
+  - pilot (N=2, preview):       ~12-18 min
 """
 
 from jobs.models import CandidateResult
@@ -36,15 +41,15 @@ class PXDesignPipeline(ToolPipeline):
         return "A100-80GB"
 
     def pilot_preset(self) -> dict:
-        """Pilot: 2 designs with basic preset — minimal pipeline validation.
+        """Pilot: 2 designs with preview preset — minimal pipeline validation.
 
-        10 designs @ basic takes ~30-40 min; 2 cuts that to ~10-15 min and
+        10 designs @ preview takes ~30-40 min; 2 cuts that to ~10-15 min and
         is enough to prove PXDesign + AF2-IG self-validation end-to-end.
         """
         return {"num_designs": 2, "preset": "preview"}
 
     def smoke_preset(self) -> dict:
-        """Smoke: N=1, basic preset, no post-filter.
+        """Smoke: N=1, preview preset, no post-filter.
 
         Fastest possible config that proves the pipeline runs end-to-end.
         Scores may be stubbed/real depending on whether AF2-IG runs.
@@ -58,7 +63,7 @@ class PXDesignPipeline(ToolPipeline):
         }
 
     def mini_pilot_preset(self) -> dict:
-        """Mini-pilot: N=1, basic preset, full post-scoring.
+        """Mini-pilot: N=1, preview preset, full post-scoring.
 
         Final success gate — the candidate must have real (non-zero, non-NaN)
         scores. Used by docker/pxdesign/run_pipeline.py when tier == "mini_pilot".
@@ -110,10 +115,13 @@ class PXDesignPipeline(ToolPipeline):
             job_spec.get("hotspot_residues", []), chains
         )
 
-        # PXDesign accepts integer (80) or dict ({"min": 50, "max": 100})
+        # PXDesign takes a scalar length only (80) — never a {min, max} dict.
+        # The container's build_yaml_spec is the enforcing choke point; this
+        # method only serializes config, so it mirrors the value as given.
         binder_length = params.get("binder_length", 80)
         num_designs = params.get("num_designs", 100)
-        preset = params.get("preset", "basic")
+        # "preview", not "basic" — upstream's click.Choice rejects "basic".
+        preset = params.get("preset", "preview")
 
         yaml_spec = {
             "target": {
