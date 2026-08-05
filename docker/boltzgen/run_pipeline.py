@@ -709,15 +709,39 @@ def post_webhook(
 # CIF conversion and re-indexing
 # ===========================================================================
 
+def parse_target_chains(target_chain) -> list:
+    """Parse ``job_spec["target_chain"]`` into an ordered chain list.
+
+    Thin wrapper over ``pipeline_normalize.parse_target_chains`` with a
+    guaranteed-non-empty result — BoltzGen always needs at least one named
+    target chain to build the ``include:`` list from.
+    """
+    from pipeline_normalize import parse_target_chains as _parse  # noqa: PLC0415
+
+    chains = _parse(target_chain)
+    if not chains:
+        raise ValueError(
+            f"target_chain must name at least one chain; got {target_chain!r}"
+        )
+    return chains
+
+
 def ensure_cif(
     input_path: str, work_dir: str, target_chain: str = "A",
 ) -> tuple[str, dict]:
     """Convert the downloaded PDB into a BoltzGen-ready mmCIF.
 
+    ``target_chain`` names one chain (``"A"``) or several (``"A,B"``).
+    BoltzGen's ``include:`` and ``binding_types:`` are both per-chain LISTS
+    upstream, so a multi-chain target is a first-class config there — the
+    previous single-chain filter here meant a correct multi-chain YAML
+    would point at a CIF that no longer contained the second protomer.
+
     Returns a tuple ``(cif_path, renumber_map)``. The renumber_map is
     ``{(chain_id, original_resnum): new_resnum}``. Callers
     (``build_yaml_spec``) use it to rewrite hotspot indices into the
-    cleaned coordinate space.
+    cleaned coordinate space. Hotspots MUST arrive unconverted;
+    pre-mapping them double-maps and silently aims at wrong residues.
 
     BoltzGen's mmcif parser is strict: it requires the
     ``_entity_poly_seq`` block to exist and every residue in
@@ -728,9 +752,12 @@ def ensure_cif(
     Pipeline (Bug 9 fix, 2026-04-30):
       1. Sanitize with Biopython (``pipeline_normalize.normalize_for_boltzgen``):
          drop waters, HETATM, hydrogens, altlocs, multi-model, MSE->MET,
-         filter to ``target_chain`` only, renumber 1..N. Result is a clean
-         single-chain PDB on disk.
+         filter to the target chain(s), renumber 1..N per chain. Result is
+         a clean polymer-only PDB on disk.
       2. Read that cleaned PDB with gemmi for the custom CIF write below.
+      3. Assert every requested chain is in the written CIF — the gemmi
+         round-trip is the last place a protomer can vanish unnoticed, and
+         a missing one is invisible in every downstream score.
 
     The resulting CIF contains only standard-20-AA polymer residues with
     contiguous seqids starting at 1 per chain, no altlocs, no hydrogens,
@@ -741,14 +768,17 @@ def ensure_cif(
     import gemmi  # noqa: PLC0415
     from gemmi import cif  # noqa: PLC0415
 
+    target_chains = parse_target_chains(target_chain)
+
     # ---- Stage 1: Biopython sanitize + renumber ----
     cleaned_pdb = os.path.join(work_dir, "cleaned.pdb")
     norm_report = normalize_for_boltzgen(
-        input_path, cleaned_pdb, target_chain=target_chain,
+        input_path, cleaned_pdb, target_chain=target_chains,
     )
     logger.info(
-        "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
-        "residues_dropped=%s changes=%s",
+        "Normalize: chains_requested=%s chains_kept=%s chains_dropped=%s "
+        "residues_kept=%s residues_dropped=%s changes=%s",
+        target_chains,
         norm_report.chains_kept, norm_report.chains_dropped,
         norm_report.residues_kept_per_chain,
         norm_report.residues_dropped_per_chain,
@@ -912,16 +942,41 @@ def ensure_cif(
     cif_path = os.path.join(work_dir, "target.cif")
     doc.write_file(cif_path)
     logger.info(
-        "CIF written to %s (%d bytes, %d atoms, %d residues)",
+        "CIF written to %s (%d bytes, %d atoms, %d residues, chains=%s)",
         cif_path, os.path.getsize(cif_path), atom_id,
-        sum(kept_counts.values()),
+        sum(kept_counts.values()), chain_names,
     )
+
+    missing_chains = [c for c in target_chains if c not in chains_data]
+    if missing_chains:
+        raise RuntimeError(
+            f"Target chain(s) {missing_chains} are missing from the generated "
+            f"CIF {cif_path}. Requested: {target_chains}; present: "
+            f"{sorted(chains_data)}"
+        )
+
     return cif_path, dict(norm_report.renumber_map)
 
 
 # ===========================================================================
 # BoltzGen YAML spec generation
 # ===========================================================================
+
+def _pick_binder_entity_id(target_chains: list) -> str:
+    """First uppercase letter not used by a target chain.
+
+    Preserves the historical value: a single target chain "A" still yields
+    "B". Only a target that already claims B moves the binder along.
+    """
+    taken = {str(c).strip().upper() for c in target_chains}
+    for letter in "BCDEFGHIJKLMNOPQRSTUVWXYZA":
+        if letter not in taken:
+            return letter
+    raise ValueError(
+        f"No free entity id for the binder; target chains {target_chains} "
+        f"claim the whole alphabet"
+    )
+
 
 def build_yaml_spec(
     job_spec: dict, target_cif_path: str,
@@ -952,38 +1007,57 @@ def build_yaml_spec(
     Returns:
         Dict representing the BoltzGen YAML spec (with an ``entities`` list).
     """
+    from pipeline_normalize import parse_hotspots  # noqa: PLC0415
+
     params = job_spec.get("parameters", {})
-    chain = job_spec.get("target_chain", "A")
+    target_chains = parse_target_chains(job_spec.get("target_chain", "A"))
     raw_hotspots = list(job_spec.get("hotspot_residues", []) or [])
 
+    # Bare-int hotspots attach to the first target chain (the historical
+    # single-chain shape); "A296"/"B264" address a chain explicitly.
+    # Unparseable tokens raise rather than being dropped.
+    parsed_hotspots = parse_hotspots(raw_hotspots, target_chains)
+
     # Hotspot remap (Bug 9 fix): user-supplied hotspots refer to original
-    # PDB numbering; the CIF stage renumbered residues 1..N. Use the
-    # renumber_map produced by ensure_cif to convert.
-    if renumber_map:
-        remapped: list = []
-        missing: list = []
-        for h in raw_hotspots:
-            try:
-                orig = int(h)
-            except (TypeError, ValueError):
-                missing.append(str(h))
-                continue
-            new = renumber_map.get((chain, orig))
+    # PDB numbering; the CIF stage renumbered residues 1..N per chain. Use
+    # the renumber_map produced by ensure_cif to convert. The map is keyed
+    # (chain, resnum), so identically-numbered residues on two protomers
+    # stay distinct.
+    hotspots_by_chain: dict[str, list] = {c: [] for c in target_chains}
+    unmapped: list = []
+    for chain_id, orig in parsed_hotspots:
+        if renumber_map:
+            new = renumber_map.get((chain_id, orig))
             if new is None:
-                missing.append(orig)
-            else:
-                remapped.append(new)
-        if missing:
-            logger.warning(
-                "build_yaml_spec: hotspot residues not found after cleanup "
-                "(skipped): %s. Original hotspots: %s. Chain %s has "
-                "renumber-map entries for residues: %s",
-                missing, raw_hotspots, chain,
-                sorted(r for c, r in renumber_map if c == chain)[:25],
-            )
-        hotspots = remapped
-    else:
-        hotspots = raw_hotspots
+                unmapped.append(f"{chain_id}{orig}")
+                continue
+        else:
+            new = orig
+        hotspots_by_chain[chain_id].append(new)
+
+    # An unmapped hotspot used to be logged and skipped. With per-chain
+    # binding_types that turns one wrong chain key into no binding
+    # constraint at all — an untargeted design that still completes, still
+    # scores, and still looks like a successful run.
+    if unmapped:
+        available = {
+            c: sorted(r for ch, r in renumber_map if ch == c)[:25]
+            for c in target_chains
+        }
+        raise ValueError(
+            f"Hotspot residue(s) {unmapped} are not present after structure "
+            f"cleanup, so they cannot be mapped into the renumbered "
+            f"coordinate space. Original hotspots: {raw_hotspots}. Target "
+            f"chains: {target_chains}. First 25 mappable residues per chain: "
+            f"{available}. Refusing to continue — dropping them would run an "
+            f"untargeted design that looks like a successful job."
+        )
+    if raw_hotspots and not any(hotspots_by_chain.values()):
+        raise ValueError(
+            f"All {len(raw_hotspots)} supplied hotspot(s) resolved to an "
+            f"empty per-chain map: {raw_hotspots} -> {hotspots_by_chain}. "
+            f"Refusing to run an untargeted design."
+        )
 
     # Binder length range from parameters.
     binder_length = params.get("binder_length", {"min": 50, "max": 100})
@@ -993,29 +1067,44 @@ def build_yaml_spec(
     else:
         min_len, max_len = 50, 100
 
+    # include: and binding_types: are both per-chain LISTS upstream, which
+    # is what makes a multi-chain target first-class here. Only chains that
+    # actually carry hotspots get a binding_types entry; a chain with none
+    # is still included as structure the binder must accommodate.
     file_entity: dict = {
         "file": {
             "path": target_cif_path,
-            "include": [{"chain": {"id": chain}}],
+            "include": [{"chain": {"id": c}} for c in target_chains],
         },
     }
-    if hotspots:
-        binding_str = ",".join(str(r) for r in sorted(hotspots))
-        file_entity["file"]["binding_types"] = [
-            {"chain": {"id": chain, "binding": binding_str}},
-        ]
+    binding_entries = [
+        {"chain": {"id": c, "binding": ",".join(
+            str(r) for r in sorted(hotspots_by_chain[c])
+        )}}
+        for c in target_chains if hotspots_by_chain[c]
+    ]
+    if binding_entries:
+        file_entity["file"]["binding_types"] = binding_entries
+
+    # The binder entity id must not collide with a target chain id. It was
+    # hardcoded "B", which is correct for the single-chain target "A" but
+    # collides head-on with the second protomer of an "A,B" target — two
+    # entities claiming id B in one spec.
+    binder_id = _pick_binder_entity_id(target_chains)
 
     binder_entity = {
         "protein": {
-            "id": "B",
+            "id": binder_id,
             "sequence": f"{min_len}..{max_len}",
         },
     }
 
     yaml_spec = {"entities": [file_entity, binder_entity]}
     logger.info(
-        "Built YAML spec: chain=%s, hotspots=%s, binder_length=%d..%d",
-        chain, hotspots, min_len, max_len,
+        "Built YAML spec: target_chains=%s, hotspots(orig=%s, per_chain=%s), "
+        "binder_id=%s, binder_length=%d..%d",
+        target_chains, raw_hotspots, hotspots_by_chain, binder_id,
+        min_len, max_len,
     )
     return yaml_spec
 
