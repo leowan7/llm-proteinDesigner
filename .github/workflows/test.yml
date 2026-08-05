@@ -42,6 +42,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # gemmi is a CONTAINER dependency, not a backend runtime one, so it is
+      # deliberately absent from requirements.txt. But tests/pdb/ exercises the
+      # container-side CIF handling and guards those modules with
+      # `pytest.importorskip("gemmi")`. Without it installed here, those
+      # modules skip SILENTLY: the suite still reports green while ~39 tests
+      # never run, and because --cov=. counts the skipped test files' own
+      # statements in the denominator, it also drags total coverage under the
+      # 80% gate. Installed as a test-only dep so the tests actually execute.
+      - name: Install test-only dependencies
+        run: pip install gemmi
+
       - name: Run tests with coverage
         run: python -m pytest tests/ --ignore=tests/integration --cov=. --cov-fail-under=80 --cov-report=xml --cov-report=term-missing
         env:
@@ -272,7 +283,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff
+        # PINNED. Unpinned, this job lints every PR with whatever ruff
+        # released most recently, so a ruff release turns previously-green
+        # code red with no commit having touched it. That is exactly what
+        # happened here: master last passed this job on 2026-07-17 with
+        # ruff 0.15.22, and by 2026-08-05 pip resolved 0.16.1, which reports
+        # 232 errors against that same unmodified master tree (new rules —
+        # UP007, UP035, SIM115, FLY002 — not new violations).
+        #
+        # Bumping is fine and probably overdue, but it is a deliberate act
+        # that owns the resulting cleanup, not something a PR should absorb
+        # by surprise. Raise this pin in its own change.
+        run: pip install ruff==0.15.22
 
       - name: Lint Python
         run: ruff check backend/
