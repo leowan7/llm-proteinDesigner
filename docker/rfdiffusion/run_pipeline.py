@@ -228,12 +228,22 @@ def preflight(payload: dict) -> None:
     logger.info("Preflight: OK (tier=%s)", tier)
 
 
-def _build_smoke_job_spec(tier: str) -> dict:
+def _build_smoke_job_spec(tier: str, overrides: dict | None = None) -> dict:
     """Build a job_spec dict for smoke/mini_pilot runs.
 
     Mirrors backend/pipelines/rfdiffusion.py::smoke_preset / mini_pilot_preset.
     Kept in sync manually because this script ships inside the Docker image
     and can't import from the backend package.
+
+    ``overrides`` is the caller's ``job_spec`` from the payload. The smoke
+    tier used to ignore it entirely and hardcode the single-chain PD-L1
+    fixture, which made the multi-chain path untestable at this tier — the
+    cheapest one, and the only one that returns results inline. Now
+    ``target_chain`` and ``hotspot_residues`` are honoured when supplied, so
+    a two-chain target can be smoked for the price of one design.
+
+    Everything still defaults to the baked single-chain fixture, so a
+    payload with no job_spec behaves exactly as before.
     """
     if tier == "smoke":
         parameters = {
@@ -252,10 +262,22 @@ def _build_smoke_job_spec(tier: str) -> dict:
     else:
         raise ValueError(f"Unknown tier: {tier}")
 
+    overrides = overrides or {}
+    target_chain = overrides.get("target_chain") or SMOKE_TARGET_CHAIN
+    hotspots = overrides.get("hotspot_residues")
+    if hotspots is None:
+        hotspots = SMOKE_HOTSPOTS
+    # A caller-supplied binder_length range is honoured too, so a large
+    # multi-chain target can be smoked against a sensible binder size.
+    caller_params = overrides.get("parameters") or {}
+    if caller_params.get("binder_length"):
+        parameters = {**parameters,
+                      "binder_length": caller_params["binder_length"]}
+
     return {
         "tool": "rfdiffusion",
-        "target_chain": SMOKE_TARGET_CHAIN,
-        "hotspot_residues": SMOKE_HOTSPOTS,
+        "target_chain": target_chain,
+        "hotspot_residues": list(hotspots),
         "parameters": parameters,
     }
 
@@ -289,13 +311,24 @@ def _build_smoke_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     return args
 
 
-def run_smoke_tier(tier: str, work_dir: str) -> dict:
+def run_smoke_tier(
+    tier: str,
+    work_dir: str,
+    job_spec_override: dict | None = None,
+    input_url: str = "",
+) -> dict:
     """Execute the RFdiffusion -> ProteinMPNN (-> AF2) pipeline for smoke/mini_pilot.
 
     Returns a dict shaped per SMOKE-TEST-SPEC.md Layer 3 "output shape".
+
+    ``job_spec_override`` and ``input_url`` come from the payload. Supplying
+    both is what makes a multi-chain target testable at this tier: the baked
+    fixture is PD-L1 chain A, a single chain, so without a caller-supplied
+    structure there is nothing here with two protomers to design against.
+    Omit both and the run is byte-for-byte the historical single-chain smoke.
     """
     start = time.time()
-    job_spec = _build_smoke_job_spec(tier)
+    job_spec = _build_smoke_job_spec(tier, job_spec_override)
     params = job_spec["parameters"]
     skip_af2 = bool(params.get("skip_af2", False))
     num_designs = int(params.get("num_designs", 1))
@@ -309,9 +342,30 @@ def run_smoke_tier(tier: str, work_dir: str) -> dict:
     webhook_url = os.environ.get("WEBHOOK_URL", "")
     job_id = os.environ.get("JOB_ID", "unknown")
 
-    # Copy baked fixture into work dir so RFdiffusion can write adjacent.
+    # Resolve the target into the work dir so RFdiffusion can write adjacent.
+    # A caller-supplied URL wins; otherwise the baked single-chain fixture.
     target_pdb = os.path.join(work_dir, "target.pdb")
-    shutil.copy(SMOKE_TARGET_PDB, target_pdb)
+    if input_url:
+        raw_target = os.path.join(work_dir, "target_raw.pdb")
+        download_input(input_url, raw_target)
+        logger.info("Smoke target from payload URL: %s", input_url)
+        # The webhook path sanitizes before RFdiffusion sees the structure;
+        # a caller-supplied smoke target needs the same treatment, and it is
+        # also what filters the structure down to the requested chains.
+        from pipeline_normalize import normalize_for_rfdiffusion  # noqa: PLC0415
+        norm_report = normalize_for_rfdiffusion(
+            raw_target, target_pdb,
+            target_chain=parse_target_chains(target_chain),
+        )
+        logger.info(
+            "Normalize: chains_requested=%s chains_kept=%s chains_dropped=%s "
+            "residues_kept=%s",
+            norm_report.chains_requested, norm_report.chains_kept,
+            norm_report.chains_dropped, norm_report.residues_kept_per_chain,
+        )
+    else:
+        shutil.copy(SMOKE_TARGET_PDB, target_pdb)
+        logger.info("Smoke target from baked fixture: %s", SMOKE_TARGET_PDB)
 
     # ---- Stage 1: RFdiffusion ----
     rfdiff_output = os.path.join(work_dir, "rfdiffusion_output")
@@ -1708,7 +1762,11 @@ def main():
 
         work_dir = tempfile.mkdtemp(prefix="rfdiffusion_smoke_")
         try:
-            result = run_smoke_tier(tier, work_dir)
+            result = run_smoke_tier(
+                tier, work_dir,
+                job_spec_override=job_payload.get("job_spec") or {},
+                input_url=(job_payload.get("input_pdb_url") or ""),
+            )
             with open(SMOKE_RESULTS_PATH, "w") as fh:
                 json.dump(result, fh)
             logger.info(

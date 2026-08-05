@@ -303,8 +303,11 @@ def _stub_scores(rank: int) -> dict:
     }
 
 
-def _build_smoke_job_spec(tier: str) -> dict:
-    """Build a job_spec dict for smoke/mini_pilot runs."""
+def _build_smoke_job_spec(tier: str, overrides: dict | None = None) -> dict:
+    """Build a job_spec dict for smoke/mini_pilot runs.
+
+    ``overrides`` is the caller's ``job_spec`` from the payload.
+    """
     if tier == "smoke":
         parameters = _smoke_params()
     elif tier == "mini_pilot":
@@ -312,10 +315,25 @@ def _build_smoke_job_spec(tier: str) -> dict:
     else:
         raise ValueError(f"Unknown tier: {tier}")
 
+    # The smoke tier used to ignore the payload's job_spec entirely and
+    # hardcode the single-chain PD-L1 fixture, which made the multi-chain
+    # path untestable at the cheapest tier — the only one that returns
+    # results inline. target_chain / hotspot_residues / binder_length are
+    # honoured when supplied; omit them and this is the historical smoke.
+    overrides = overrides or {}
+    target_chain = overrides.get("target_chain") or SMOKE_TARGET_CHAIN
+    hotspots = overrides.get("hotspot_residues")
+    if hotspots is None:
+        hotspots = SMOKE_HOTSPOTS
+    caller_params = overrides.get("parameters") or {}
+    if caller_params.get("binder_length"):
+        parameters = {**parameters,
+                      "binder_length": caller_params["binder_length"]}
+
     return {
         "tool": "boltzgen",
-        "target_chain": SMOKE_TARGET_CHAIN,
-        "hotspot_residues": SMOKE_HOTSPOTS,
+        "target_chain": target_chain,
+        "hotspot_residues": list(hotspots),
         "parameters": parameters,
     }
 
@@ -346,21 +364,38 @@ def _run_boltzgen_streaming(cmd: list[str], timeout: int, cwd: str | None = None
     return rc
 
 
-def run_smoke_tier(tier: str, work_dir: str) -> dict:
+def run_smoke_tier(
+    tier: str,
+    work_dir: str,
+    job_spec_override: dict | None = None,
+    input_url: str = "",
+) -> dict:
     """Execute the BoltzGen smoke/mini_pilot pipeline.
 
     Returns a dict shaped per SMOKE-TEST-SPEC.md Layer 3 "output shape".
+
+    ``job_spec_override`` and ``input_url`` come from the payload. Supplying
+    both is what makes a multi-chain target testable at this tier: the baked
+    fixture is PD-L1 chain A, a single chain, so without a caller-supplied
+    structure there is nothing here with two protomers to design against.
+    Omit both and the run is the historical single-chain smoke.
     """
     start = time.time()
-    job_spec = _build_smoke_job_spec(tier)
+    job_spec = _build_smoke_job_spec(tier, job_spec_override)
     params = job_spec["parameters"]
     num_designs = int(params["num_designs"])
     budget = int(params["budget"])
     protocol = params["protocol"]
 
-    # ---- Stage 1: copy baked fixture + re-index to CIF ----
+    # ---- Stage 1: resolve target + re-index to CIF ----
+    # A caller-supplied URL wins; otherwise the baked single-chain fixture.
     target_input = os.path.join(work_dir, "target_input.pdb")
-    shutil.copy(SMOKE_TARGET_PDB, target_input)
+    if input_url:
+        download_input(input_url, target_input)
+        logger.info("Smoke target from payload URL: %s", input_url)
+    else:
+        shutil.copy(SMOKE_TARGET_PDB, target_input)
+        logger.info("Smoke target from baked fixture: %s", SMOKE_TARGET_PDB)
 
     try:
         target_chain = job_spec.get("target_chain", "A")
@@ -1540,7 +1575,11 @@ def main():
         preflight(job_payload)
         work_dir = tempfile.mkdtemp(prefix="boltzgen_smoke_")
         try:
-            result = run_smoke_tier(tier, work_dir)
+            result = run_smoke_tier(
+                tier, work_dir,
+                job_spec_override=job_payload.get("job_spec") or {},
+                input_url=(job_payload.get("input_pdb_url") or ""),
+            )
             with open(SMOKE_RESULTS_PATH, "w") as fh:
                 json.dump(result, fh)
             logger.info(
