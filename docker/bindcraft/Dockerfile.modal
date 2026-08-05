@@ -41,21 +41,9 @@ RUN conda config --set channel_priority strict && \
     conda update -n base -c conda-forge conda && \
     conda clean -afy
 
-# ---------- Clone FreeBindCraft (PINNED 2026-08-05) ----------
-# Was `git clone --depth 1` with no ref, so the deployed image held whatever
-# the default branch happened to be on its build date. Pinned to upstream
-# master HEAD as of 2026-08-05 ("Support PyRosetta DockingPartners interface
-# API", 2026-07-10). Note the default branch here is `master`, not `main`.
-#
-# Editing this file busts modal.Image.from_dockerfile's content-hash cache
-# and forces a rebuild, which is what MOVES FreeBindCraft from its unknown
-# previous commit to this one. Re-pin only after a smoke run passes.
-ARG FREEBINDCRAFT_SHA=8b8d4c4627da06f084f46b7007450048fe3ca22f
+# ---------- Clone FreeBindCraft ----------
 WORKDIR /app
-RUN git clone https://github.com/cytokineking/FreeBindCraft.git /app/src && \
-    cd /app/src && git checkout $FREEBINDCRAFT_SHA && \
-    echo "FreeBindCraft pinned to $(git rev-parse HEAD)" && \
-    cd /app && \
+RUN git clone --depth 1 https://github.com/cytokineking/FreeBindCraft.git /app/src && \
     shopt -s dotglob && mv /app/src/* /app/ && rm -rf /app/src
 
 RUN chmod +x /app/functions/dssp || true && \
