@@ -14,7 +14,9 @@ import pytest
 from pdb_utils.pipeline_normalize import (
     normalize_for_pipeline,
     normalize_for_pxdesign,
+    normalize_for_rfantibody,
     normalize_for_rfdiffusion,
+    parse_target_chains,
     PipelineNormalizationReport,
     WATER_RESNAMES,
     MODRES_MAP,
@@ -131,6 +133,35 @@ ATOM      5  N   GLY A   2       0.000   0.000   0.000  1.00 10.00           N
 ATOM      6  CA  GLY A   2       0.000   0.000   0.000  1.00 10.00           C
 ATOM      7  C   GLY A   2       0.000   0.000   0.000  1.00 10.00           C
 ATOM      8  O   GLY A   2       0.000   0.000   0.000  1.00 10.00           O
+END
+"""
+
+
+# Two protein chains + a ligand chain. Stands in for the driving use case:
+# an IgG1 Fc homodimer where binders grip BOTH protomers, so a design run
+# filtered down to one chain is aimed at half the epitope. Chain A is
+# author-numbered 20-21, chain B 30-31 — deliberately different offsets so
+# a per-chain renumber map can be told apart from a global one.
+TWO_CHAIN_PLUS_LIGAND_PDB = """\
+HEADER    HOMODIMER PLUS LIGAND
+ATOM      1  N   ALA A  20       1.000   1.000   1.000  1.00 10.00           N
+ATOM      2  CA  ALA A  20       2.000   1.000   1.000  1.00 10.00           C
+ATOM      3  C   ALA A  20       3.000   1.000   1.000  1.00 10.00           C
+ATOM      4  O   ALA A  20       3.000   2.000   1.000  1.00 10.00           O
+ATOM      5  N   GLY A  21       4.000   1.000   1.000  1.00 10.00           N
+ATOM      6  CA  GLY A  21       5.000   1.000   1.000  1.00 10.00           C
+ATOM      7  C   GLY A  21       6.000   1.000   1.000  1.00 10.00           C
+ATOM      8  O   GLY A  21       6.000   2.000   1.000  1.00 10.00           O
+ATOM      9  N   SER B  30      21.000   1.000   1.000  1.00 10.00           N
+ATOM     10  CA  SER B  30      22.000   1.000   1.000  1.00 10.00           C
+ATOM     11  C   SER B  30      23.000   1.000   1.000  1.00 10.00           C
+ATOM     12  O   SER B  30      23.000   2.000   1.000  1.00 10.00           O
+ATOM     13  N   THR B  31      24.000   1.000   1.000  1.00 10.00           N
+ATOM     14  CA  THR B  31      25.000   1.000   1.000  1.00 10.00           C
+ATOM     15  C   THR B  31      26.000   1.000   1.000  1.00 10.00           C
+ATOM     16  O   THR B  31      26.000   2.000   1.000  1.00 10.00           O
+HETATM   17  C1  NAG C 200       9.000   9.000   9.000  1.00 10.00           C
+HETATM   18  C2  NAG C 200      10.000   9.000   9.000  1.00 10.00           C
 END
 """
 
@@ -500,3 +531,223 @@ def test_pxdesign_preset_strips_ligand_chain(tmp_path):
     assert "A" in report.chains_kept
     assert "B" not in report.chains_kept
     assert report.residues_kept_per_chain == {"A": 2}
+
+
+# ---------------------------------------------------------------------------
+# Tests: multi-chain targets (IgG1 Fc homodimer use case)
+#
+# The wrappers were written single-chain and silently discarded the
+# multi-chain capability the upstream models have. A one-chain filter on a
+# two-protomer target designs against half the epitope while still
+# returning plausible-looking output, so these tests assert on the surviving
+# structure, not just on the report.
+# ---------------------------------------------------------------------------
+
+def _chains_in_pdb(path: str) -> list:
+    """Chain ids actually present in ATOM records of a written PDB."""
+    seen: list = []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("ATOM") and len(line) > 21:
+                cid = line[21]
+                if cid not in seen:
+                    seen.append(cid)
+    return seen
+
+
+def _resnums_for_chain(path: str, chain: str) -> list:
+    nums: list = []
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("ATOM") and len(line) > 26 and line[21] == chain:
+                n = int(line[22:26])
+                if n not in nums:
+                    nums.append(n)
+    return nums
+
+
+# --- parse_target_chains ---------------------------------------------------
+
+def test_parse_target_chains_scalar():
+    assert parse_target_chains("A") == ["A"]
+
+
+def test_parse_target_chains_comma_string():
+    assert parse_target_chains("A,B") == ["A", "B"]
+
+
+def test_parse_target_chains_tolerates_whitespace():
+    assert parse_target_chains(" A , B ") == ["A", "B"]
+
+
+def test_parse_target_chains_preserves_caller_order():
+    """Order drives contig and FASTA concatenation downstream — it must not
+    be silently sorted."""
+    assert parse_target_chains("B,A") == ["B", "A"]
+
+
+def test_parse_target_chains_dedupes():
+    assert parse_target_chains("A,B,A") == ["A", "B"]
+
+
+def test_parse_target_chains_accepts_sequence():
+    assert parse_target_chains(["A", "B"]) == ["A", "B"]
+
+
+def test_parse_target_chains_none_and_empty_mean_no_filter():
+    assert parse_target_chains(None) is None
+    assert parse_target_chains("") is None
+    assert parse_target_chains("  ") is None
+    assert parse_target_chains([]) is None
+
+
+# --- structure survives with every requested chain --------------------------
+
+def test_two_chain_target_keeps_both_chains(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A,B")
+    assert report.chains_kept == ["A", "B"]
+    assert report.residues_kept_per_chain == {"A": 2, "B": 2}
+
+
+def test_two_chain_output_file_actually_contains_both_chains(tmp_path):
+    """The check every other assertion can pass without: does the file on
+    disk that the GPU tool reads still hold both protomers?"""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    normalize_for_pipeline(inp, out, target_chain="A,B")
+    assert _chains_in_pdb(out) == ["A", "B"]
+
+
+def test_two_chain_target_still_drops_ligand_chain(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A,B")
+    assert "C" not in report.chains_kept
+    assert "C" not in _chains_in_pdb(out)
+
+
+def test_chains_requested_records_caller_order(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="B,A")
+    assert report.chains_requested == ["B", "A"]
+    # chains_kept stays sorted (historical contract); order lives in
+    # chains_requested.
+    assert report.chains_kept == ["A", "B"]
+
+
+def test_chains_requested_empty_when_no_filter(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out)
+    assert report.chains_requested == []
+
+
+# --- backward compatibility -------------------------------------------------
+
+def test_single_chain_on_multi_chain_input_still_drops_the_others(tmp_path):
+    """Regression guard: target_chain="A" must behave exactly as before and
+    NOT start letting chain B through."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(inp, out, target_chain="A")
+    assert report.chains_kept == ["A"]
+    assert _chains_in_pdb(out) == ["A"]
+
+
+def test_scalar_and_single_element_list_are_byte_identical(tmp_path):
+    """"A" and ["A"] must produce the same file, byte for byte."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out_scalar = str(tmp_path / "scalar.pdb")
+    out_list = str(tmp_path / "list.pdb")
+    normalize_for_pipeline(inp, out_scalar, target_chain="A")
+    normalize_for_pipeline(inp, out_list, target_chain=["A"])
+    assert open(out_scalar, "rb").read() == open(out_list, "rb").read()
+
+
+def test_single_chain_missing_keeps_historical_error_message(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    with pytest.raises(ValueError, match="Target chain 'Z' is not present"):
+        normalize_for_pipeline(inp, out, target_chain="Z")
+
+
+# --- partially-missing multi-chain selector is a hard error -----------------
+
+def test_partially_missing_multi_chain_raises(tmp_path):
+    """"A,Z" must fail loudly rather than quietly designing against A alone."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    with pytest.raises(ValueError, match=r"Target chain\(s\) \['Z'\]"):
+        normalize_for_pipeline(inp, out, target_chain="A,Z")
+
+
+def test_multi_chain_naming_a_ligand_chain_raises(tmp_path):
+    """Chain C is NAG-only — it survives no protein filter, so naming it as
+    a target must raise instead of silently yielding an A-only structure."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    with pytest.raises(ValueError, match=r"Target chain\(s\) \['C'\]"):
+        normalize_for_pipeline(inp, out, target_chain="A,C")
+
+
+# --- renumbering is per-chain ----------------------------------------------
+
+def test_multi_chain_renumber_map_is_per_chain(tmp_path):
+    """Each chain restarts at 1, and the map keys keep the chain id so a
+    hotspot on B is never confused with one on A."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pipeline(
+        inp, out, target_chain="A,B", renumber_residues=True,
+    )
+    assert report.renumber_map == {
+        ("A", 20): 1, ("A", 21): 2,
+        ("B", 30): 1, ("B", 31): 2,
+    }
+
+
+def test_multi_chain_renumbered_output_restarts_each_chain(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    normalize_for_pipeline(
+        inp, out, target_chain="A,B", renumber_residues=True,
+    )
+    assert _resnums_for_chain(out, "A") == [1, 2]
+    assert _resnums_for_chain(out, "B") == [1, 2]
+
+
+# --- presets ----------------------------------------------------------------
+
+def test_pxdesign_preset_multi_chain(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_pxdesign(inp, out, target_chain="A,B")
+    assert report.chains_kept == ["A", "B"]
+    assert _chains_in_pdb(out) == ["A", "B"]
+    assert report.renumber_map == {
+        ("A", 20): 1, ("A", 21): 2,
+        ("B", 30): 1, ("B", 31): 2,
+    }
+
+
+def test_rfdiffusion_preset_multi_chain_preserves_author_numbering(tmp_path):
+    """RFdiffusion contigs and ppi.hotspot_res reference author numbering —
+    a multi-chain target must not start renumbering."""
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_rfdiffusion(inp, out, target_chain="A,B")
+    assert report.chains_kept == ["A", "B"]
+    assert report.renumber_map == {}
+    assert _resnums_for_chain(out, "A") == [20, 21]
+    assert _resnums_for_chain(out, "B") == [30, 31]
+
+
+def test_rfantibody_preset_accepts_multi_chain_selector(tmp_path):
+    inp = _write_pdb(str(tmp_path / "input.pdb"), TWO_CHAIN_PLUS_LIGAND_PDB)
+    out = str(tmp_path / "out.pdb")
+    report = normalize_for_rfantibody(inp, out, target_chain="A,B")
+    assert report.chains_kept == ["A", "B"]
+    assert report.renumber_map == {}
