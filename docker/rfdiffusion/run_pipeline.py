@@ -891,8 +891,16 @@ def post_webhook(webhook_url: str, job_id: str, pod_id: str, payload: dict) -> N
 # AF2 score parsing
 # ===========================================================================
 
-def parse_af2_scores(result_dir: str, design_name: str) -> dict | None:
-    """Extract ipTM, pLDDT, and i_pAE from ColabFold AF2 prediction output."""
+def parse_af2_scores(
+    result_dir: str, design_name: str, n_target_chains: int = 1,
+) -> dict | None:
+    """Extract ipTM, pLDDT, and i_pAE from ColabFold AF2 prediction output.
+
+    ``n_target_chains`` tells the interface-PAE calculation how many leading
+    chains of the complex are target. The AF2 FASTA is written target
+    chain(s) first, binder last, so the interface boundary sits after the
+    target block. Defaults to 1 — the historical single-chain shape.
+    """
     score_files = glob(os.path.join(result_dir, f"{design_name}*scores*.json"))
     if not score_files:
         score_files = glob(os.path.join(result_dir, "*scores*.json"))
@@ -909,7 +917,10 @@ def parse_af2_scores(result_dir: str, design_name: str) -> dict | None:
         mean_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else 0.0
 
         pae_matrix = data.get("pae", [])
-        ipae = _compute_interface_pae(pae_matrix, data) if pae_matrix else 99.0
+        ipae = (
+            _compute_interface_pae(pae_matrix, data, n_target_chains)
+            if pae_matrix else 99.0
+        )
 
         return {
             "ipTM": round(iptm, 4),
@@ -921,15 +932,27 @@ def parse_af2_scores(result_dir: str, design_name: str) -> dict | None:
         return None
 
 
-def _compute_interface_pae(pae_matrix: list, score_data: dict) -> float:
-    """Compute mean interface PAE from the PAE matrix."""
+def _compute_interface_pae(
+    pae_matrix: list, score_data: dict, n_target_chains: int = 1,
+) -> float:
+    """Compute mean interface PAE from the PAE matrix.
+
+    The complex is laid out target chain(s) first, binder last, so the
+    target/binder boundary is the summed length of the first
+    ``n_target_chains`` chains — NOT ``chain_lengths[0]``. On a two-chain
+    target that difference silently reclassifies the second protomer as
+    binder-side and returns an i_pAE computed across the wrong interface,
+    with no visible symptom. Reduces to ``chain_lengths[0]`` when
+    ``n_target_chains == 1``.
+    """
     total_res = len(pae_matrix)
     if total_res == 0:
         return 99.0
 
+    n_target_chains = max(1, int(n_target_chains))
     chain_lengths = score_data.get("chain_lengths", None)
-    if chain_lengths and len(chain_lengths) >= 2:
-        boundary = chain_lengths[0]
+    if chain_lengths and len(chain_lengths) >= n_target_chains + 1:
+        boundary = sum(chain_lengths[:n_target_chains])
     else:
         boundary = total_res // 2
 
@@ -981,10 +1004,65 @@ def _get_chain_residue_range(pdb_path: str, chain_id: str) -> tuple[int, int]:
         raise RuntimeError("Biopython is required to parse PDB residue ranges")
 
 
+def parse_target_chains(target_chain) -> list:
+    """Parse ``job_spec["target_chain"]`` into an ordered chain list.
+
+    Thin wrapper over ``pipeline_normalize.parse_target_chains`` with a
+    guaranteed-non-empty result — RFdiffusion always needs at least one
+    named target chain to build a contig from.
+    """
+    from pipeline_normalize import parse_target_chains as _parse  # noqa: PLC0415
+
+    chains = _parse(target_chain)
+    if not chains:
+        raise ValueError(
+            f"target_chain must name at least one chain; got {target_chain!r}"
+        )
+    return chains
+
+
+def build_contig_string(
+    target_pdb_path: str, target_chains: list, binder_min: int, binder_max: int,
+) -> str:
+    """Build ``contigmap.contigs`` for a fixed target plus a diffused binder.
+
+    Multi-chain fixed targets are separated by a ``/0 `` chain break —
+    upstream is explicit that THE SPACE AFTER /0 IS REQUIRED; it tells the
+    model to insert a large residue gap so the chains are treated as
+    separate entities rather than one continuous polymer.
+
+        one chain : [A18-132/0 50-100]
+        two chains: [A1-223/0 B1-223/0 50-70]
+
+    Residue ranges are read from the PDB per chain rather than assumed.
+    """
+    segments = []
+    for chain in target_chains:
+        first_res, last_res = _get_chain_residue_range(target_pdb_path, chain)
+        logger.info("Chain %s residue range: %d-%d", chain, first_res, last_res)
+        segments.append(f"{chain}{first_res}-{last_res}")
+    segments.append(f"{binder_min}-{binder_max}")
+    return "[" + "/0 ".join(segments) + "]"
+
+
+def build_hotspot_string(hotspots, target_chains: list) -> str:
+    """Build ``ppi.hotspot_res``, e.g. ``[A30,A33,B264]``.
+
+    Accepts already-chain-qualified tokens ("A296", "B264") and bare ints
+    (attributed to the first target chain, the historical shape). Hotspots
+    may span chains — that is the point for an oligomeric target, where a
+    binder grips both protomers.
+    """
+    from pipeline_normalize import parse_hotspots  # noqa: PLC0415
+
+    parsed = parse_hotspots(hotspots, target_chains)
+    return "[" + ",".join(f"{chain}{res}" for chain, res in parsed) + "]"
+
+
 def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     """Build RFdiffusion Hydra CLI override args from JobSpec parameters."""
     params = job_spec.get("parameters", {})
-    chain = job_spec.get("target_chain", "A")
+    target_chains = parse_target_chains(job_spec.get("target_chain", "A"))
     hotspots = job_spec.get("hotspot_residues", [])
 
     binder_length = params.get("binder_length", {"min": 50, "max": 100})
@@ -997,9 +1075,9 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     num_designs = params.get("num_designs", 10)
 
     # Read actual residue range from PDB instead of hardcoding
-    first_res, last_res = _get_chain_residue_range(target_pdb_path, chain)
-    logger.info("Chain %s residue range: %d-%d", chain, first_res, last_res)
-    contig_str = f"[{chain}{first_res}-{last_res}/0 {binder_min}-{binder_max}]"
+    contig_str = build_contig_string(
+        target_pdb_path, target_chains, binder_min, binder_max,
+    )
 
     checkpoint = params.get("checkpoint", "Complex_base_ckpt.pt")
     ckpt_path = os.path.join(MODELS_DIR, checkpoint)
@@ -1012,9 +1090,14 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     ]
 
     if hotspots:
-        hotspot_str = "[" + ",".join(f"{chain}{res}" for res in hotspots) + "]"
-        hydra_args.append(f"ppi.hotspot_res={hotspot_str}")
+        hydra_args.append(
+            f"ppi.hotspot_res={build_hotspot_string(hotspots, target_chains)}"
+        )
 
+    logger.info(
+        "Hydra args: target_chains=%s contigs=%s hotspots=%s",
+        target_chains, contig_str, hotspots,
+    )
     return hydra_args
 
 
@@ -1055,20 +1138,65 @@ def stage_rfdiffusion(
     return generated
 
 
+def _chains_in_pdb(pdb_path: str) -> list:
+    """Chain ids present in a PDB's ATOM records, in file order."""
+    seen: list = []
+    with open(pdb_path) as fh:
+        for line in fh:
+            if line.startswith(("ATOM", "HETATM")) and len(line) > 21:
+                cid = line[21]
+                if cid not in seen:
+                    seen.append(cid)
+    return seen
+
+
+def infer_binder_chain(backbone_pdb: str, target_chains: list) -> str:
+    """Identify the diffused binder chain in an RFdiffusion output backbone.
+
+    Read from the file rather than assumed. The previous
+    ``"B" if target_chain == "A" else "A"`` hardcoded exactly two chains,
+    so any N-chain target silently fixed the wrong chain in ProteinMPNN and
+    still produced sequences — designs against a target the model was told
+    to redesign.
+
+    Raises if the output does not contain exactly one non-target chain: a
+    wrong guess here is invisible in every downstream score.
+    """
+    present = _chains_in_pdb(backbone_pdb)
+    candidates = [c for c in present if c not in set(target_chains)]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"Cannot identify the binder chain in {backbone_pdb}: chains "
+            f"present are {present}, target chains are {target_chains}, "
+            f"leaving {candidates} as binder candidate(s). Expected exactly "
+            f"one. Refusing to guess — fixing the wrong chain in ProteinMPNN "
+            f"still yields plausible sequences."
+        )
+    logger.info(
+        "Binder chain inferred as %r (backbone chains=%s, targets=%s)",
+        candidates[0], present, target_chains,
+    )
+    return candidates[0]
+
+
 def stage_proteinmpnn(
     backbone_pdbs: list[str],
-    target_chain: str,
+    target_chain,
     output_dir: str,
     webhook_url: str = "",
     job_id: str = "",
 ) -> list[str]:
-    """Stage 2: Run ProteinMPNN sequence design on each backbone."""
+    """Stage 2: Run ProteinMPNN sequence design on each backbone.
+
+    ``target_chain`` accepts one chain ("A") or several ("A,B").
+    """
     logger.info("=== Stage 2: ProteinMPNN sequence design ===")
     os.makedirs(output_dir, exist_ok=True)
     if webhook_url and job_id:
         send_heartbeat(webhook_url, job_id, "Running ProteinMPNN", 0, len(backbone_pdbs))
 
-    binder_chain = "B" if target_chain == "A" else "A"
+    target_chains = parse_target_chains(target_chain)
+    binder_chain = infer_binder_chain(backbone_pdbs[0], target_chains)
 
     # Step 1: Parse all backbone PDBs into JSONL format
     parsed_jsonl = os.path.join(output_dir, "parsed_pdbs.jsonl")
@@ -1211,16 +1339,67 @@ def _af2_env_with_jax_cache() -> dict:
     return env
 
 
+def _resolve_binder_sequence(
+    full_designed_seq: str, target_sequences: list, design_name: str,
+) -> str:
+    """Pull the binder sequence out of a ProteinMPNN FASTA entry.
+
+    Vanilla ProteinMPNN with assign_fixed_chains emits ONLY the designed
+    chain, which is the common path. Some forks emit the whole complex with
+    chains joined by '/'.
+
+    In the joined case the binder is identified by IDENTITY — every target
+    chain's own sequence is struck off the segment list and what remains is
+    the binder. The previous positional pick (``chain_seqs[1] if
+    target_chain == "A" else chain_seqs[0]``) hardcoded two chains and
+    depended on an unverified ordering convention; picking the wrong
+    segment feeds AF2 a target chain as though it were the binder and
+    returns a fully plausible ipTM for the wrong molecule.
+
+    Raises rather than guessing if the segments cannot be resolved.
+    """
+    if "/" not in full_designed_seq:
+        return full_designed_seq
+
+    segments = full_designed_seq.split("/")
+    remaining_targets = list(target_sequences)
+    leftovers: list = []
+    for seg in segments:
+        if seg in remaining_targets:
+            remaining_targets.remove(seg)
+        else:
+            leftovers.append(seg)
+
+    if len(leftovers) != 1:
+        raise RuntimeError(
+            f"Cannot identify the binder sequence for {design_name}: the "
+            f"ProteinMPNN entry has {len(segments)} '/'-joined chain(s) with "
+            f"lengths {[len(s) for s in segments]}; after removing the "
+            f"{len(target_sequences)} known target chain sequence(s) "
+            f"(lengths {[len(s) for s in target_sequences]}), "
+            f"{len(leftovers)} segment(s) remain, expected exactly 1. "
+            f"Refusing to guess positionally — the wrong pick scores a "
+            f"target chain as the binder and looks entirely normal."
+        )
+    return leftovers[0]
+
+
 def stage_af2_validation(
     designed_fastas: list[str],
     target_pdb: str,
-    target_chain: str,
+    target_chain,
     output_dir: str,
     webhook_url: str = "",
     job_id: str = "",
     tier: str = "",
 ) -> list[dict]:
-    """Stage 3: AF2 multimer validation of designed binder-target complexes."""
+    """Stage 3: AF2 multimer validation of designed binder-target complexes.
+
+    ``target_chain`` accepts one chain ("A") or several ("A,B"). Every
+    target chain goes on the target side of the AF2 complex FASTA, in the
+    caller-supplied order, with the binder last:
+    ``targetA:targetB:binder``.
+    """
     logger.info("=== Stage 3: AF2 multimer validation ===")
     os.makedirs(output_dir, exist_ok=True)
     if webhook_url and job_id:
@@ -1237,11 +1416,21 @@ def stage_af2_validation(
             "JAX cache cold — first AF2 run may take 10-15 min for XLA compile"
         )
 
-    target_sequence = _extract_target_sequence(target_pdb, target_chain)
-    if not target_sequence:
-        raise RuntimeError(
-            f"Could not extract target sequence from {target_pdb} chain {target_chain}"
-        )
+    target_chains = parse_target_chains(target_chain)
+    target_sequences: list = []
+    for chain in target_chains:
+        seq = _extract_target_sequence(target_pdb, chain)
+        if not seq:
+            raise RuntimeError(
+                f"Could not extract target sequence from {target_pdb} "
+                f"chain {chain} (requested target chains: {target_chains})"
+            )
+        target_sequences.append(seq)
+    target_side = ":".join(target_sequences)
+    logger.info(
+        "AF2 target side: chains=%s lengths=%s total=%d",
+        target_chains, [len(s) for s in target_sequences], len(target_side),
+    )
 
     results = []
     for idx, fasta_path in enumerate(designed_fastas):
@@ -1262,24 +1451,22 @@ def stage_af2_validation(
         # Index 1 is the first designed sequence from ProteinMPNN.
         full_designed_seq = seq_list[1]
 
-        # Extract binder sequence.
-        # With assign_fixed_chains, vanilla ProteinMPNN outputs ONLY the
-        # designed chain (binder). Some forks output the full complex with
-        # chains joined by '/'. Handle both.
-        if "/" in full_designed_seq:
-            chain_seqs = full_designed_seq.split("/")
-            binder_sequence = chain_seqs[1] if target_chain == "A" else chain_seqs[0]
-        else:
-            binder_sequence = full_designed_seq
+        # Extract binder sequence (by identity, not position — see
+        # _resolve_binder_sequence).
+        binder_sequence = _resolve_binder_sequence(
+            full_designed_seq, target_sequences, design_name,
+        )
 
         combined_fasta = os.path.join(output_dir, f"{design_name}.fasta")
         with open(combined_fasta, "w") as fh:
             fh.write(f">{design_name}\n")
-            fh.write(f"{target_sequence}:{binder_sequence}\n")
+            fh.write(f"{target_side}:{binder_sequence}\n")
 
         logger.info(
-            "AF2 input for %s: target_len=%d, binder_len=%d, fasta=%s",
-            design_name, len(target_sequence), len(binder_sequence), combined_fasta,
+            "AF2 input for %s: target_chains=%s target_len=%d, binder_len=%d, "
+            "fasta=%s",
+            design_name, target_chains, len(target_side), len(binder_sequence),
+            combined_fasta,
         )
 
         per_design_out = os.path.join(output_dir, design_name)
@@ -1335,7 +1522,9 @@ def stage_af2_validation(
             af2_files = os.listdir(per_design_out) if os.path.isdir(per_design_out) else []
             logger.info("AF2 output files for %s: %s", design_name, af2_files)
 
-            scores = parse_af2_scores(per_design_out, design_name)
+            scores = parse_af2_scores(
+                per_design_out, design_name, n_target_chains=len(target_chains),
+            )
             if scores:
                 results.append({
                     "design_name": design_name,
@@ -1510,11 +1699,14 @@ def main():
         try:
             from pipeline_normalize import normalize_for_rfdiffusion
             norm_report = normalize_for_rfdiffusion(
-                raw_target_pdb, target_pdb, target_chain=target_chain,
+                raw_target_pdb, target_pdb,
+                target_chain=parse_target_chains(target_chain),
             )
             logger.info(
-                "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
+                "Normalize: chains_requested=%s chains_kept=%s "
+                "chains_dropped=%s residues_kept=%s "
                 "residues_dropped=%s changes=%s",
+                norm_report.chains_requested,
                 norm_report.chains_kept, norm_report.chains_dropped,
                 norm_report.residues_kept_per_chain,
                 norm_report.residues_dropped_per_chain,
