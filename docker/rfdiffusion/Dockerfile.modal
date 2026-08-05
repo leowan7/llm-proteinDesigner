@@ -26,8 +26,24 @@ RUN python3 -m pip install --no-cache-dir \
     python3 -m pip install --no-cache-dir dgl -f https://data.dgl.ai/wheels/torch-2.2/cu118/repo.html
 RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
-# ---------- RFdiffusion + SE3Transformer ----------
-RUN git clone --depth 1 https://github.com/RosettaCommons/RFdiffusion.git /opt/rfdiffusion && \
+# ---------- RFdiffusion + SE3Transformer (PINNED 2026-08-05) ----------
+# Was `git clone --depth 1 ...` with no ref: the deployed image held whatever
+# `main` happened to be on its build date and nobody could say what that was.
+# Pinned to upstream main HEAD as of 2026-08-05 ("Fix github workflow tests",
+# #458, 2026-07-15). Follows the docker/pxdesign/Dockerfile.modal ARG pattern.
+#
+# NOT pinned to tag v1.1.0 on purpose — that tag is from April 2023 and sits
+# 96 commits behind this SHA. Pinning to it would be a three-year rollback of
+# the code the tool has actually been running.
+#
+# Editing this file busts modal.Image.from_dockerfile's content-hash cache
+# (infrastructure/modal/rfdiffusion_app.py:78-79) and forces a rebuild, which
+# is what MOVES RFdiffusion from its unknown previous commit to this one.
+# Re-pin only after a smoke run passes on the rebuilt image.
+ARG RFDIFFUSION_SHA=86507b6538f51fce57b5a72477165f03999ed7ae
+RUN git clone https://github.com/RosettaCommons/RFdiffusion.git /opt/rfdiffusion && \
+    cd /opt/rfdiffusion && git checkout $RFDIFFUSION_SHA && \
+    echo "RFdiffusion pinned to $(git rev-parse HEAD)" && \
     cd /opt/rfdiffusion/env/SE3Transformer && \
     python3 -m pip install --no-cache-dir -r requirements.txt && \
     python3 setup.py install && \
@@ -50,10 +66,18 @@ RUN mkdir -p $MODELS_DIR && \
 RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
 # ---------- ProteinMPNN + weights — PATCHED: curl with retries ----------
-RUN git clone --depth 1 https://github.com/dauparas/ProteinMPNN.git /opt/ProteinMPNN && \
+# PINNED 2026-08-05, same rationale as RFdiffusion above. This SHA is
+# upstream main HEAD ("updating solubleMPNN weights...", 2023-06-27); the
+# repo has been effectively frozen since, so the pin costs nothing today and
+# stops a future upstream push from silently changing the sequence-design
+# stage of a deployed image.
+ARG PROTEINMPNN_SHA=8907e6671bfbfc92303b5f79c4b5e6ce47cdef57
+RUN git clone https://github.com/dauparas/ProteinMPNN.git /opt/ProteinMPNN && \
+    cd /opt/ProteinMPNN && git checkout $PROTEINMPNN_SHA && \
+    echo "ProteinMPNN pinned to $(git rev-parse HEAD)" && \
     mkdir -p /opt/ProteinMPNN/vanilla_model_weights && \
     curl -fsSL --retry 5 --retry-delay 10 \
-        https://github.com/dauparas/ProteinMPNN/raw/main/vanilla_model_weights/v_48_020.pt \
+        https://github.com/dauparas/ProteinMPNN/raw/$PROTEINMPNN_SHA/vanilla_model_weights/v_48_020.pt \
         -o /opt/ProteinMPNN/vanilla_model_weights/v_48_020.pt
 RUN find / -xdev -uid +65533 -exec chown root:root {} + 2>/dev/null || true
 
