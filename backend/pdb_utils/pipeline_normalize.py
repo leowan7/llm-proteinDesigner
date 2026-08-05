@@ -237,6 +237,88 @@ def parse_target_chains(target_chain: TargetChainSpec) -> Optional[list]:
     return ordered or None
 
 
+def parse_hotspot_token(token, target_chains: Sequence[str]) -> tuple:
+    """Resolve one hotspot token into ``(chain_id, residue_number)``.
+
+    Two accepted forms, the cross-tool contract shared by every Kendrew
+    binder generator:
+
+    - chain-prefixed, ``"A296"`` / ``"B264"`` — required to address a
+      residue on any chain but the first.
+    - bare integer, ``296`` or ``"296"`` — attributed to the FIRST entry of
+      ``target_chains``. This is the historical single-chain shape and is
+      what every existing caller sends.
+
+    The chain prefix is matched against the declared target chains, longest
+    first, rather than by assuming a one-character id. That makes
+    multi-character mmCIF-style ids work and turns an unknown prefix into
+    an error here rather than a silently-dropped hotspot downstream.
+
+    Raises:
+        ValueError: empty token, unknown chain prefix, or a residue part
+            that is not an integer. Never returns a sentinel — a hotspot
+            that quietly disappears yields an untargeted design that still
+            completes, still scores, and only fails at the bench.
+    """
+    if not target_chains:
+        raise ValueError("parse_hotspot_token requires at least one target chain")
+
+    raw = str(token).strip()
+    if not raw:
+        raise ValueError("empty hotspot token")
+
+    # Bare integer -> first target chain (historical single-chain shape).
+    try:
+        return target_chains[0], int(raw)
+    except ValueError:
+        pass
+
+    for chain in sorted(target_chains, key=len, reverse=True):
+        if raw.startswith(chain):
+            remainder = raw[len(chain):].strip()
+            try:
+                return chain, int(remainder)
+            except ValueError:
+                raise ValueError(
+                    f"hotspot {token!r}: chain {chain!r} is not followed by an "
+                    f"integer residue number (got {remainder!r})"
+                ) from None
+
+    raise ValueError(
+        f"hotspot {token!r} does not name any target chain. Expected a bare "
+        f"integer (attributed to chain {target_chains[0]!r}) or a "
+        f"chain-prefixed token such as {target_chains[0] + '296'!r}. "
+        f"Target chains: {list(target_chains)!r}"
+    )
+
+
+def parse_hotspots(raw_hotspots, target_chains: Sequence[str]) -> list:
+    """Resolve every hotspot token into ``(chain_id, residue_number)`` pairs.
+
+    Order is preserved. Raises on the first unparseable token — see
+    ``parse_hotspot_token``.
+    """
+    return [
+        parse_hotspot_token(tok, target_chains) for tok in (raw_hotspots or [])
+    ]
+
+
+def group_hotspots_by_chain(raw_hotspots, target_chains: Sequence[str]) -> dict:
+    """Bucket hotspot tokens into ``{chain_id: [resnum, ...]}``.
+
+    Every entry of ``target_chains`` gets a key, empty list included, so
+    callers can emit a complete per-chain map without re-checking. Residue
+    numbers are in whatever numbering the caller passed in — this does no
+    renumbering, deliberately: PXDesign's hotspots must be rewritten into
+    the post-cleanup coordinate space by the caller that owns the
+    renumber_map, and doing it twice aims the design at the wrong residues.
+    """
+    grouped: dict = {chain: [] for chain in target_chains}
+    for chain, resnum in parse_hotspots(raw_hotspots, target_chains):
+        grouped[chain].append(resnum)
+    return grouped
+
+
 # -- Public entry points ------------------------------------------------------
 
 def normalize_for_pipeline(
