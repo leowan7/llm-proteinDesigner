@@ -12,9 +12,9 @@ infrastructure level by running multiple worker containers.
 import sentry_sdk
 from arq.connections import RedisSettings
 from arq.cron import cron
-
 from config import settings
 from jobs.progress import refresh_live_stats
+
 from worker.cleanup import check_daily_gpu_spend, cleanup_orphan_pods, detect_stale_jobs
 from worker.deletion_cron import process_pending_deletions
 from worker.retention_cron import retention_cron

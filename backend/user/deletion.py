@@ -18,7 +18,6 @@ import datetime  # noqa: F401  — exposed to callers that pass datetime-aware t
 import logging
 
 import stripe  # stripe_client.py sets stripe.api_key at its module import
-
 from auth.admin_client import delete_auth_user
 from db.connection import get_db_pool
 from jobs.notifications import send_deletion_completed_email

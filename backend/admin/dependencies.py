@@ -4,10 +4,9 @@ Extends the standard get_current_user dependency with an is_admin DB check.
 Returns 403 Forbidden for any non-admin user — does not reveal admin routes exist.
 """
 
-from fastapi import Depends, HTTPException, status
-
 from auth.dependencies import get_current_user
 from db.connection import get_db_pool
+from fastapi import Depends, HTTPException, status
 
 
 async def get_current_admin(user_id: str = Depends(get_current_user)) -> str:

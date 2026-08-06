@@ -4,9 +4,8 @@ Used by Phase 11 SC 8 validation: a synthetic error that Sentry captures to
 prove error tracking is wired. Never exposed in production builds.
 """
 
-from fastapi import APIRouter, HTTPException
-
 from config import settings
+from fastapi import APIRouter, HTTPException
 
 router = APIRouter(prefix="/debug", tags=["debug"])
 

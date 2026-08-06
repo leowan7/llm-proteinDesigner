@@ -6,13 +6,14 @@ Verifies:
 - Missing user rows (not found in DB) also receive 403
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from fastapi import HTTPException
 
+import pytest
 from admin.dependencies import get_current_admin
+from fastapi import HTTPException
 
 
 def _make_ctx(conn):

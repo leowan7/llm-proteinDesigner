@@ -23,14 +23,11 @@ import logging
 
 import anthropic
 import sentry_sdk
+from auth.dependencies import get_current_user
+from config import settings
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
-from agent.system_prompt import AGENT_SYSTEM_PROMPT
-from agent.tools import TOOL_DEFINITIONS, dispatch_tool
-from auth.dependencies import get_current_user
-from config import settings
 from sessions.queries import (
     append_message,
     get_agent_history,
@@ -38,6 +35,9 @@ from sessions.queries import (
     update_agent_history,
     update_session_title,
 )
+
+from agent.system_prompt import AGENT_SYSTEM_PROMPT
+from agent.tools import TOOL_DEFINITIONS, dispatch_tool
 
 logger = logging.getLogger(__name__)
 

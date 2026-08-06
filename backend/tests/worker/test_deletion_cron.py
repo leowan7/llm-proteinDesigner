@@ -1,9 +1,9 @@
 """Tests for ``worker/deletion_cron.py`` — daily hard-delete sweep (Plan 10-04)."""
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import AsyncMock, MagicMock, patch
-
 
 from worker.deletion_cron import process_pending_deletions
 

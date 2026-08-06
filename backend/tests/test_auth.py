@@ -5,6 +5,7 @@ Test user: test@example.com / Password123! (created by seed.sql)
 """
 
 import pytest
+
 from tests.conftest import TEST_USER_EMAIL, TEST_USER_PASSWORD
 
 

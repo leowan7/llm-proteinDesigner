@@ -1,10 +1,9 @@
 """Tests for PDB normalization pipeline (INPUT-01, INPUT-05)."""
 import os
+
 import pytest
-
-from pdb_utils.normalize import normalize_structure
 from pdb_utils.models import NormalizationResult
-
+from pdb_utils.normalize import normalize_structure
 
 # ---------------------------------------------------------------------------
 # Minimal PDB content helpers

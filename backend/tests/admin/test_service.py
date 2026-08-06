@@ -9,6 +9,7 @@ These tests call cancel_job_by_id directly (not via HTTP) so they do not
 require FastAPI TestClient or dependency_overrides.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
@@ -17,7 +18,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-
 from jobs.service import cancel_job_by_id
 
 
@@ -76,7 +76,7 @@ def _make_pool_for_cancel(job_row, cust_row=None):
 
 async def test_cancel_job_by_id_success():
     """Running job is cancelled and returns status='cancelled' with gpu_seconds > 0."""
-    started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
+    started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
     job_row = {
         "runpod_job_id": "rp-job-001",
         "job_spec": json.dumps({"tool": "rfdiffusion"}),
@@ -117,7 +117,7 @@ async def test_cancel_records_billing():
 
     Job started 60 seconds ago — billing must record a positive gpu_seconds value.
     """
-    started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
+    started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
     job_row = {
         "runpod_job_id": "rp-job-002",
         "job_spec": json.dumps({"tool": "bindcraft"}),

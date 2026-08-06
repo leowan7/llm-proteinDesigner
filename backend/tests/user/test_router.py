@@ -10,6 +10,7 @@ Uses FastAPI dependency_overrides to bypass get_current_user auth and patches
 get_db_pool at the user.router module level.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
@@ -17,13 +18,13 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ _limiter.enabled = False
 # ---------------------------------------------------------------------------
 
 USER_ID = "test-user-uuid"
-NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
 
 # ---------------------------------------------------------------------------

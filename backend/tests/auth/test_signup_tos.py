@@ -11,17 +11,18 @@ do not hit a real auth server, and patches `auth.router.get_db_pool` so the post
 UPDATE runs against a mock asyncpg connection.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from httpx import AsyncClient, ASGITransport
-
 from config import settings
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 

@@ -26,9 +26,9 @@ def test_r2_roundtrip():
     Fails fast with an informative AssertionError if the downloaded bytes do
     not match the uploaded payload (the whole point of the smoke test).
     """
-    import boto3
     import urllib.request
 
+    import boto3
     from config import settings
 
     client = boto3.client(

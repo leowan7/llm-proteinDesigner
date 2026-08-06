@@ -9,19 +9,18 @@ synthetic PDB strings so we do not need network access or real fixtures.
 from __future__ import annotations
 
 import os
-import pytest
 
+import pytest
 from pdb_utils.pipeline_normalize import (
+    MODRES_MAP,
+    WATER_RESNAMES,
+    PipelineNormalizationReport,
     normalize_for_pipeline,
     normalize_for_pxdesign,
     normalize_for_rfantibody,
     normalize_for_rfdiffusion,
     parse_target_chains,
-    PipelineNormalizationReport,
-    WATER_RESNAMES,
-    MODRES_MAP,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures (synthetic PDB strings)

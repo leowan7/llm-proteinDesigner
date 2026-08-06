@@ -40,12 +40,11 @@ import httpx
 # this being on sys.path, but be defensive if invoked with a different CWD.
 sys.path.insert(0, "/app")
 
-from agent.jobspec import JobSpec, ValidationResult  # noqa: E402
-from config import settings  # noqa: E402
-from db.connection import get_db_pool  # noqa: E402
-from jobs.dispatch import launch_job  # noqa: E402
-from storage.client import get_s3_client  # noqa: E402
-
+from agent.jobspec import JobSpec, ValidationResult
+from config import settings
+from db.connection import get_db_pool
+from jobs.dispatch import launch_job
+from storage.client import get_s3_client
 
 # Minimal default parameters per tool. These mirror what the agent wizard
 # would have produced for a simple pilot. Tune only if you need to.

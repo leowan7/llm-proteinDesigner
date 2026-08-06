@@ -13,7 +13,7 @@ Kendrew docker image and must not depend on this one.
 """
 import os
 
-from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select
+from Bio.PDB import PDBIO, MMCIFParser, PDBParser, Select
 from Bio.PDB.Polypeptide import is_aa
 
 from pdb_utils.models import NormalizationResult

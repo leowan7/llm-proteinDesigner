@@ -371,7 +371,12 @@ async def _handle_resolve_structure(tool_input: dict) -> str:
     query_type = tool_input["query_type"]
 
     try:
-        from pdb_utils.fetch import fetch_pdb_file, fetch_pdb_metadata, search_uniprot, resolve_pdb_for_uniprot
+        from pdb_utils.fetch import (
+            fetch_pdb_file,
+            fetch_pdb_metadata,
+            resolve_pdb_for_uniprot,
+            search_uniprot,
+        )
     except ImportError:
         # pdb_utils.fetch not yet available (Plan 02-02 not yet run)
         return json.dumps({
@@ -664,8 +669,9 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
     # turns a $1.65/hr GPU crash into a synchronous validation fail.
     tool = tool_input["tool"]
     try:
-        from pdb_utils.validate import scan_chain_gaps, check_hotspots_present
         import asyncio as _asyncio
+
+        from pdb_utils.validate import check_hotspots_present, scan_chain_gaps
 
         loop = _asyncio.get_event_loop()
         gaps = await loop.run_in_executor(None, scan_chain_gaps, pdb_path, chain_id)
@@ -774,6 +780,7 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
     if not has_fail and user_id:
         try:
             import uuid
+
             from db.connection import get_db_pool
             from storage.client import ensure_pdb_in_s3
 

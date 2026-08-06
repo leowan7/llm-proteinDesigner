@@ -12,9 +12,8 @@ JobStatus and JobStage are distinct:
 
 from enum import Enum
 
-from pydantic import BaseModel
-
 from agent.jobspec import JobSpec  # noqa: F401 — re-exported for consumer convenience
+from pydantic import BaseModel
 
 
 class JobStatus(str, Enum):

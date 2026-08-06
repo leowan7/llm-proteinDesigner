@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -261,8 +260,8 @@ def test_generate_markdown_report_has_next_steps_section():
 @pytest.mark.asyncio
 async def test_handle_generate_report_returns_expected_keys():
     """handle_generate_report returns JSON with pdf_url, csv_url, markdown_url."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.report import handle_generate_report
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_JOB_ID, FAKE_CANDIDATES)
@@ -302,8 +301,8 @@ async def test_handle_generate_report_returns_expected_keys():
 @pytest.mark.asyncio
 async def test_handle_generate_report_error_when_not_cached():
     """handle_generate_report returns error if job not in cache."""
-    from agent.analysis.report import handle_generate_report
     from agent.analysis.cache import clear_cache
+    from agent.analysis.report import handle_generate_report
 
     clear_cache()
 

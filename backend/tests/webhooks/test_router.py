@@ -15,6 +15,7 @@ Uses patch() to replace get_db_pool and external service calls so no real
 DB, Stripe, RunPod, or email service is required.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
@@ -23,12 +24,12 @@ import hmac
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from httpx import AsyncClient, ASGITransport
-
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 # ---------------------------------------------------------------------------
@@ -37,7 +38,7 @@ _limiter.enabled = False
 
 JOB_ID = "job-1111-2222-3333"
 POD_ID = "pod-abc123"
-NOW_UTC = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+NOW_UTC = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
 # started_at 5 minutes ago → 300 gpu_seconds
 STARTED_AT = NOW_UTC - datetime.timedelta(minutes=5)
 

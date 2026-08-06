@@ -10,7 +10,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from agent.analysis.cache import clear_cache, get_cached, set_cached
 
 # ---------------------------------------------------------------------------

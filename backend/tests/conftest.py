@@ -10,6 +10,7 @@ require no external services.
 import os
 import pathlib
 import tempfile
+
 from dotenv import load_dotenv
 
 # Load .env.local BEFORE setting defaults -- this ensures the real
@@ -23,8 +24,7 @@ os.environ.setdefault("COOKIE_SECURE", "false")
 os.environ.setdefault("CSRF_SECRET", "test-csrf-secret")
 
 import pytest  # noqa: E402  # imports after env setup above
-from httpx import AsyncClient, ASGITransport  # noqa: E402
-
+from httpx import ASGITransport, AsyncClient  # noqa: E402
 from main import app  # noqa: E402  # app reads env vars at import time
 
 

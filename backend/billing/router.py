@@ -6,10 +6,12 @@ JWT in the access_token HTTP-only cookie.
 """
 
 import stripe
+from auth.dependencies import get_current_user
+from config import settings
+from db.connection import get_db_pool
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
-from auth.dependencies import get_current_user
 from billing.estimate import estimate_cost_range
 from billing.stripe_client import (
     check_payment_method,
@@ -17,8 +19,6 @@ from billing.stripe_client import (
     create_setup_session,
     get_or_create_customer,
 )
-from config import settings
-from db.connection import get_db_pool
 
 router = APIRouter(prefix="/billing", tags=["billing"])
 

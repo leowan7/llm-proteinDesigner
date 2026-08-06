@@ -2,7 +2,6 @@
 import json
 
 import pytest
-
 from agent.tools import TOOL_DEFINITIONS, dispatch_tool
 
 

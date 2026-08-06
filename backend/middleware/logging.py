@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import jwt
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -85,7 +85,7 @@ class StructuredLoggingMiddleware(BaseHTTPMiddleware):
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
 
         log_dict = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "method": request.method,
             "path": request.url.path,
             "status_code": response.status_code,

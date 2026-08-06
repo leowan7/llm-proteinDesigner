@@ -34,7 +34,6 @@ import time
 import sentry_sdk
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings
-
 from config import settings
 from db.connection import get_db_pool
 from gpu import endpoint_for_tool, get_provider
@@ -198,6 +197,7 @@ async def spawn_session(
             )
         # Publish a failure status event so the SSE stream flips the UI.
         import json as _json
+
         import redis.asyncio as _aioredis
         _r = _aioredis.from_url(settings.redis_url)
         try:

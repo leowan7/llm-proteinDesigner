@@ -326,19 +326,22 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        # PINNED. Unpinned, this job lints every PR with whatever ruff
-        # released most recently, so a ruff release turns previously-green
-        # code red with no commit having touched it. That is exactly what
-        # happened here: master last passed this job on 2026-07-17 with
-        # ruff 0.15.22, and by 2026-08-05 pip resolved 0.16.1, which reports
-        # 232 errors against that same unmodified master tree (new rules —
-        # UP007, UP035, SIM115, FLY002 — not new violations).
+        # PINNED, and raised deliberately. The previous pin sat at 0.15.22 --
+        # the last version this repo was validated against -- because an
+        # unpinned `pip install ruff` had let 0.16.1 turn 232 pre-existing
+        # findings red with no commit having touched them. That pin said:
         #
-        # Bumping is fine and probably overdue, but it is a deliberate act
-        # that owns the resulting cleanup, not something a PR should absorb
-        # by surprise. Raise this pin in its own change.
-        run: pip install ruff==0.15.22
+        #   "Bumping is fine and probably overdue, but it is a deliberate act
+        #    that owns the resulting cleanup ... Raise this pin in its own
+        #    change."
+        #
+        # This is that change. The cleanup it asked for ships alongside this
+        # line: an explicit rule set in ruff.toml (so the scope is ours, not a
+        # release note's) and the autofixes that clear it to zero.
+        run: pip install ruff==0.16.1
 
+      # Rule set lives in ruff.toml at the repo root, not in ruff's shifting
+      # defaults. See that file for what is selected and what is deliberately not.
       - name: Lint Python
         run: ruff check backend/
 

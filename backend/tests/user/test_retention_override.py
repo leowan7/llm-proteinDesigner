@@ -6,18 +6,19 @@ endpoint uses ``Depends(get_current_user)`` and validates the value server-side
 don't test that here; only the HTTP layer.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment.
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 USER_ID = "test-user-uuid"

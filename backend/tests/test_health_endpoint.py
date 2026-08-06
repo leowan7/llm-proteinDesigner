@@ -28,7 +28,6 @@ def test_health_returns_structured_json():
     reachability probe and a top-level 'status' summary key.
     """
     from fastapi.testclient import TestClient
-
     from main import app
 
     client = TestClient(app)

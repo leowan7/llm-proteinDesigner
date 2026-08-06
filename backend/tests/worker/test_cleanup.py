@@ -10,11 +10,11 @@ Patches db.connection.get_db_pool, gpu.runpod.RunPodProvider,
 jobs.notifications.send_failure_email, and worker.tasks.publish_status.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
-
 
 from worker.cleanup import (
     MAX_POD_LIFETIME_SECONDS,
@@ -22,7 +22,6 @@ from worker.cleanup import (
     cleanup_orphan_pods,
     detect_stale_jobs,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,7 +44,7 @@ def _make_ctx(conn):
 
 # Use real system time so elapsed-time comparisons in cleanup functions are accurate.
 # Tests that need "old" timestamps compute them relative to actual now().
-NOW_UTC = datetime.datetime.now(datetime.timezone.utc)
+NOW_UTC = datetime.datetime.now(datetime.UTC)
 
 # A job started beyond MAX_POD_LIFETIME_SECONDS ago — should be orphaned.
 ORPHAN_STARTED_AT = NOW_UTC - datetime.timedelta(seconds=MAX_POD_LIFETIME_SECONDS + 600)

@@ -6,14 +6,13 @@ Covers:
 - get_rate_limit_key falls back to IP on malformed JWT
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import MagicMock
 
 import jwt
-
 from middleware.rate_limit import get_rate_limit_key
-
 
 # ---------------------------------------------------------------------------
 # Helpers

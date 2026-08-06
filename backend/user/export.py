@@ -92,9 +92,9 @@ async def _build_and_deliver_export_inner(user_id: str, user_email: str) -> None
     """Core export flow — extracted from ``build_and_deliver_export`` so the
     outer wrapper owns the WR-08 failure-sentinel try/except block.
     """
-    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.datetime.now(datetime.UTC).strftime("%Y%m%dT%H%M%SZ")
     key = f"users/{user_id}/exports/export-{ts}.zip"
-    expires_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+    expires_at = datetime.datetime.now(datetime.UTC) + datetime.timedelta(
         seconds=EXPORT_URL_TTL_SECONDS,
     )
 

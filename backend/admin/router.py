@@ -19,13 +19,14 @@ import logging
 import uuid as uuid_mod
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, status as http_status
+from config import settings
+from db.connection import get_db_pool
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import status as http_status
+from jobs.service import cancel_job_by_id
 
 from admin.audit import write_audit
 from admin.dependencies import get_current_admin
-from config import settings
-from db.connection import get_db_pool
-from jobs.service import cancel_job_by_id
 
 _log = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ async def list_users(
         try:
             before_dt = datetime.datetime.fromisoformat(before)
             if before_dt.tzinfo is None:
-                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+                before_dt = before_dt.replace(tzinfo=datetime.UTC)
         except ValueError:
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
@@ -197,7 +198,7 @@ async def list_jobs(
         try:
             before_dt = datetime.datetime.fromisoformat(before)
             if before_dt.tzinfo is None:
-                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+                before_dt = before_dt.replace(tzinfo=datetime.UTC)
         except ValueError:
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
@@ -420,7 +421,7 @@ async def get_revenue(
         )
 
     # Calculate period_start from the period label.
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_utc = datetime.datetime.now(datetime.UTC)
     if period == "this_month":
         period_start: datetime.datetime | None = now_utc.replace(
             day=1, hour=0, minute=0, second=0, microsecond=0
@@ -588,7 +589,7 @@ async def get_audit_log(
         try:
             before_dt = datetime.datetime.fromisoformat(before)
             if before_dt.tzinfo is None:
-                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+                before_dt = before_dt.replace(tzinfo=datetime.UTC)
         except ValueError:
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,

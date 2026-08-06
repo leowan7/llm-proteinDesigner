@@ -1,7 +1,7 @@
 """Tests for pre-flight PDB validation (AGENT-04)."""
 
-from pdb_utils.validate import check_hotspot_accessibility, run_preflight_checks
 from pdb_utils.models import StructureSummary
+from pdb_utils.validate import check_hotspot_accessibility, run_preflight_checks
 
 
 def _make_summary(

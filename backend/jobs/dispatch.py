@@ -6,10 +6,9 @@ between the DB write and RunPod submission.
 """
 
 import asyncpg
+from agent.jobspec import JobSpec
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings
-
-from agent.jobspec import JobSpec
 from config import settings
 
 

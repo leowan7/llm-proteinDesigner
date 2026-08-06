@@ -8,13 +8,12 @@ The cache is module-level (process-local). In a multi-worker deployment each
 worker has its own cache; a cache miss simply triggers a DB re-fetch.
 """
 
-from typing import Optional
 
 # Module-level cache dict: job_id -> list of candidate dicts
 _CANDIDATE_CACHE: dict[str, list[dict]] = {}
 
 
-def get_cached(job_id: str) -> Optional[list[dict]]:
+def get_cached(job_id: str) -> list[dict] | None:
     """Return cached candidates for job_id, or None if not present.
 
     Args:

@@ -9,24 +9,25 @@ Covers:
 - POST /user/data-export — 401 unauthenticated
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 
 USER_ID = "test-user-uuid"
-NOW = datetime.datetime(2026, 4, 23, tzinfo=datetime.timezone.utc)
+NOW = datetime.datetime(2026, 4, 23, tzinfo=datetime.UTC)
 
 
 async def _mock_user():
@@ -128,8 +129,8 @@ async def test_get_data_export_status_none_when_never_requested():
 
 async def test_get_data_export_status_ready_when_url_not_expired():
     """GET /user/data-export re-presigns the key on each GET and returns ready + url."""
-    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
-    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
+    future = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=30)
+    past_request = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=30)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
@@ -156,8 +157,8 @@ async def test_get_data_export_status_ready_when_url_not_expired():
 
 async def test_get_data_export_status_expired_when_url_past_ttl():
     """GET /user/data-export returns expired once last_export_expires_at <= now."""
-    past_expiry = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
-    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=2)
+    past_expiry = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
+    past_request = datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=2)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
@@ -180,7 +181,7 @@ async def test_get_data_export_status_expired_when_url_past_ttl():
 async def test_get_data_export_status_pending_when_url_not_yet_written():
     """GET /user/data-export returns pending when requested but the background task
     has not yet persisted last_export_url."""
-    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
+    past_request = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=1)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,
@@ -206,8 +207,8 @@ async def test_get_data_export_status_failed_when_sentinel_stamp_present():
     last_export_url still NULL). Without this branch the UI would keep
     polling "pending" forever when the build raised.
     """
-    past_request = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=5)
-    past_expires = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=1)
+    past_request = datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=5)
+    past_expires = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=1)
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value={
         "last_export_requested_at": past_request,

@@ -28,7 +28,6 @@ import asyncio
 import logging
 
 import resend
-
 from config import settings
 
 logger = logging.getLogger(__name__)

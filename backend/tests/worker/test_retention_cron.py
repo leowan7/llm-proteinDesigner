@@ -20,6 +20,7 @@ Eight behaviors covered:
     8. Deletion pass respects each user's own ``data_retention_days`` column.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
@@ -27,7 +28,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
-
 from worker.retention_cron import (
     TERMINAL_STATUSES,
     WARNING_DAYS_BEFORE,
@@ -36,12 +36,11 @@ from worker.retention_cron import (
     send_retention_warnings,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-NOW = datetime.datetime.now(datetime.timezone.utc)
+NOW = datetime.datetime.now(datetime.UTC)
 POLICY_OLD = NOW - datetime.timedelta(days=365)  # policy effective a year ago
 POLICY_RECENT = NOW - datetime.timedelta(days=30)  # policy effective 30 days ago
 

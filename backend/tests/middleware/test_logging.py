@@ -5,18 +5,19 @@ Covers:
 - Log line contains user_id when an access_token cookie is present
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import json
 import logging
 
 import jwt
-from httpx import AsyncClient, ASGITransport
-
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 

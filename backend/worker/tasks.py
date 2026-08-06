@@ -17,7 +17,6 @@ import secrets
 
 import redis.asyncio as aioredis
 import sentry_sdk
-
 from config import settings
 from db.connection import get_db_pool
 from gpu import endpoint_for_tool, get_provider

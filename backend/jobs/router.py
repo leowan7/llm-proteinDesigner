@@ -14,20 +14,26 @@ import io
 import json
 import uuid as uuid_mod
 import zipfile
-import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status as http_status
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
+import redis.asyncio as aioredis
 from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
-from middleware.rate_limit import limiter
 from billing.stripe_client import check_payment_method, get_or_create_customer
 from config import settings
 from db.connection import get_db_pool
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import status as http_status
+from fastapi.responses import StreamingResponse
+from middleware.rate_limit import limiter
+from pydantic import BaseModel
+from storage.client import (
+    generate_presigned_get_url,
+    generate_presigned_put_url,
+    get_s3_client,
+)
+
 from jobs.dispatch import launch_job
-from jobs.service import cancel_job_by_id, TOOL_IMAGES
-from storage.client import generate_presigned_get_url, generate_presigned_put_url, get_s3_client
+from jobs.service import TOOL_IMAGES, cancel_job_by_id
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -377,7 +383,7 @@ async def list_jobs(
             before_dt = datetime.datetime.fromisoformat(before)
             # Ensure timezone-aware for comparison with timestamptz column.
             if before_dt.tzinfo is None:
-                before_dt = before_dt.replace(tzinfo=datetime.timezone.utc)
+                before_dt = before_dt.replace(tzinfo=datetime.UTC)
         except ValueError:
             raise HTTPException(
                 status_code=http_status.HTTP_400_BAD_REQUEST,
