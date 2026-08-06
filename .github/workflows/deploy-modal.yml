@@ -18,6 +18,22 @@ name: Deploy Modal apps
 # Matrix strategy: one job per app so a single-app failure does not abort the
 # other four. `fail-fast: false` is required — prod deploys must be attempted
 # independently.
+#
+# On PRs the matrix is SCOPED to the apps whose files actually changed, because
+# every runner job is an independent chance to hit an infrastructure flake:
+# GitHub resolves a job's actions in a single "Getting action download info"
+# call during Set up job, and when that service 503s the job dies before any
+# repo content exists. Nothing in this repo participates, so the only lever is
+# job count. A hard-coded five-way matrix meant a one-line COMMENT change in
+# rfdiffusion_app.py redeployed all five GPU apps and rolled the dice five
+# times — it lost twice in one afternoon (2026-08-06: bindcraft, then pxdesign
+# and boltzgen, all "Failed to resolve action download info / Service
+# Unavailable").
+#
+# Scoping applies to pull_request ONLY. push-to-master (prod) and
+# workflow_dispatch still deploy all five: a redundant prod deploy is merely
+# slow, whereas a missed one is silent drift between the repo and what is
+# actually serving.
 
 on:
   pull_request:
@@ -53,19 +69,93 @@ permissions:
   pull-requests: write  # required to post the deploy summary comment
 
 jobs:
+  detect:
+    name: Detect changed apps
+    runs-on: ubuntu-latest
+    # Deliberately uses NO actions. A job's `uses:` steps are all resolved in
+    # the single "Getting action download info" call that is exactly what
+    # intermittently 503s. A job with only `run:` steps never makes that call,
+    # so this gate cannot be taken out by the flake it exists to reduce.
+    # `gh` and `jq` are preinstalled on ubuntu runners.
+    outputs:
+      apps: ${{ steps.pick.outputs.apps }}
+      any: ${{ steps.pick.outputs.any }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ALL='bindcraft boltzgen pxdesign rfantibody rfdiffusion'
+
+          emit() {
+            list=$(printf '%s\n' $1 | sed '/^$/d' | sort -u)
+            if [ -z "$list" ]; then
+              echo 'apps=[]' >> "$GITHUB_OUTPUT"
+              echo 'any=false' >> "$GITHUB_OUTPUT"
+              echo "No app-owned files changed — skipping all Modal deploys."
+            else
+              # printf/paste rather than jq: every value has already been
+              # filtered through the ALL allow-list below, so it is a bare
+              # lowercase name needing no escaping. Keeps this job free of
+              # tool dependencies and lets the logic be exercised locally.
+              json="[$(printf '%s\n' $list | sed 's/.*/"&"/' | paste -sd, -)]"
+              echo "apps=$json" >> "$GITHUB_OUTPUT"
+              echo 'any=true' >> "$GITHUB_OUTPUT"
+              echo "Deploying: $json"
+            fi
+          }
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "Event is ${{ github.event_name }} (not a PR) — deploying all five."
+            emit "$ALL"
+            exit 0
+          fi
+
+          files=$(gh api --paginate \
+            "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" \
+            --jq '.[].filename')
+          echo "Changed files:"; printf '%s\n' "$files" | sed 's/^/  /'
+
+          picked=''
+          for f in $files; do
+            case "$f" in
+              # Shared inputs — a change here cannot be attributed to one app,
+              # so fall back to deploying everything rather than guessing.
+              .github/workflows/deploy-modal.yml|\
+              infrastructure/modal/base_image.py|\
+              infrastructure/modal/__init__.py|\
+              backend/pipelines/base.py|\
+              backend/pipelines/__init__.py)
+                echo "Shared input changed ($f) — deploying all five."
+                emit "$ALL"
+                exit 0
+                ;;
+              docker/*/*)                    picked="$picked ${f#docker/}" ;;
+              infrastructure/modal/*_app.py) picked="$picked $(basename "$f" _app.py)" ;;
+              backend/pipelines/*.py)        picked="$picked $(basename "$f" .py)" ;;
+            esac
+          done
+          picked=$(printf '%s\n' $picked | cut -d/ -f1)
+
+          # Keep only names that are really apps, so a future docker/<other>/
+          # or pipelines/<helper>.py cannot inject a bogus matrix entry.
+          final=''
+          for p in $picked; do
+            case " $ALL " in *" $p "*) final="$final $p" ;; esac
+          done
+          emit "$final"
+
   deploy:
     # Guard removed 2026-04-24 (Phase 11 D-07). Workflow is now live.
     name: Deploy ${{ matrix.app }} to ${{ github.event_name == 'pull_request' && 'staging' || (github.event_name == 'push' && 'main' || inputs.environment) }}
+    needs: detect
+    if: ${{ needs.detect.outputs.any == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        app:
-          - bindcraft
-          - boltzgen
-          - pxdesign
-          - rfantibody
-          - rfdiffusion
+        app: ${{ fromJSON(needs.detect.outputs.apps) }}
 
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
@@ -130,8 +220,8 @@ jobs:
 
   comment-on-pr:
     name: Post deploy summary to PR
-    needs: deploy
-    if: ${{ github.event_name == 'pull_request' }}
+    needs: [detect, deploy]
+    if: ${{ github.event_name == 'pull_request' && needs.detect.outputs.any == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download all deploy logs
@@ -143,6 +233,12 @@ jobs:
 
       - name: Build comment body
         id: body
+        env:
+          # Only the apps this PR actually deployed. Iterating the hard-coded
+          # five here would print "(no log produced — job may have failed
+          # before deploy)" for apps that were correctly skipped, which reads
+          # as four failures on every PR.
+          APPS: ${{ join(fromJSON(needs.detect.outputs.apps), ' ') }}
         run: |
           {
             echo "body<<EOF"
@@ -151,7 +247,7 @@ jobs:
             echo "Commit: \`${{ github.event.pull_request.head.sha }}\`"
             echo "Environment: \`staging\`"
             echo
-            for app in bindcraft boltzgen pxdesign rfantibody rfdiffusion; do
+            for app in $APPS; do
               echo "<details><summary><code>ranomics-${app}-prod</code></summary>"
               echo
               echo '```'
