@@ -20,6 +20,10 @@ Expected runtime (A100-80GB, PD-L1 IgV target):
 """
 
 from jobs.models import CandidateResult
+from pdb_utils.pipeline_normalize import (
+    group_hotspots_by_chain,
+    parse_target_chains,
+)
 from pipelines.base import ToolPipeline, merge_pilot_params
 
 
@@ -77,6 +81,18 @@ class PXDesignPipeline(ToolPipeline):
         The crop field is set to None here — the handler fills it with the
         actual chain length (e.g. ["1-116"]) after reading the target CIF.
 
+        ``target_chain`` may name one chain ("A") or several ("A,B");
+        PXDesign's ``target.chains`` is a per-chain map upstream. Hotspots
+        may be bare ints (attributed to the first target chain) or
+        chain-prefixed ("A296", "B264").
+
+        NOTE: the container's run_pipeline.py rebuilds this spec from the
+        cleaned CIF and is the authority — see
+        ``docker/pxdesign/run_pipeline.py::build_yaml_spec``, which also
+        renumbers hotspots into the cleaned coordinate space. This method
+        exists for config serialization, so it mirrors the shape without
+        the renumbering.
+
         Args:
             job_spec: Deserialized JobSpec dict.
             target_local_path: Path to target structure inside the container.
@@ -87,8 +103,12 @@ class PXDesignPipeline(ToolPipeline):
         # Clamp to pilot preset when job_tier=pilot.
         job_spec = merge_pilot_params(job_spec, self.pilot_preset())
         params = job_spec.get("parameters", {})
-        chain = job_spec.get("target_chain", "A")
-        hotspots = job_spec.get("hotspot_residues", [])
+        chains = parse_target_chains(job_spec.get("target_chain", "A")) or ["A"]
+        # Bucket hotspots per chain. A bare int belongs to the first target
+        # chain (the historical single-chain shape); "B264" names its chain.
+        hotspots_by_chain = group_hotspots_by_chain(
+            job_spec.get("hotspot_residues", []), chains
+        )
 
         # PXDesign accepts integer (80) or dict ({"min": 50, "max": 100})
         binder_length = params.get("binder_length", 80)
@@ -101,8 +121,9 @@ class PXDesignPipeline(ToolPipeline):
                 "chains": {
                     chain: {
                         "crop": None,  # handler fills after reading CIF
-                        "hotspots": hotspots,
-                    },
+                        "hotspots": hotspots_by_chain[chain],
+                    }
+                    for chain in chains
                 },
             },
             "binder_length": binder_length,

@@ -10,6 +10,14 @@ Used by:
 - docker/rfdiffusion/run_pipeline.py
 - docker/rfantibody/run_pipeline.py
 
+Target chains:
+``target_chain`` accepts one chain (``"A"``) or several (``"A,B"``). The
+multi-chain form exists because real targets are often oligomers — an IgG1
+Fc homodimer binder grips both protomers — and filtering to a single chain
+designs against half the epitope while still producing plausible output.
+``parse_target_chains`` is the single parser; every caller goes through it
+so "A,B" means the same thing in every pipeline.
+
 Why this exists:
 gemmi's ``Structure.remove_ligands_and_waters()`` raises ``missing
 entity_type`` on user-uploaded PDBs that don't carry ``_entity.type``
@@ -20,10 +28,17 @@ structure.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select
+
+
+# A target-chain selector: ``None`` (keep every protein chain), a single
+# chain id ``"A"``, a comma string ``"A,B"``, or an explicit sequence
+# ``["A", "B"]``.
+TargetChainSpec = Union[str, Sequence[str], None]
 
 
 # -- Constants ----------------------------------------------------------------
@@ -64,6 +79,11 @@ class PipelineNormalizationReport:
         Human-readable list of operations applied.
     chains_kept
         Chain IDs surviving cleanup (in order).
+    chains_requested
+        The parsed ``target_chain`` selector, in caller-supplied order
+        (``["A", "B"]`` for ``target_chain="A,B"``). Empty when no chain
+        filter was applied. Downstream contig/FASTA builders read this so
+        multi-chain ordering is decided in exactly one place.
     chains_dropped
         Chain IDs removed (with reason, e.g. "B (NAG ligand)").
     residues_kept_per_chain
@@ -84,6 +104,7 @@ class PipelineNormalizationReport:
     output_path: str
     changes: list = field(default_factory=list)
     chains_kept: list = field(default_factory=list)
+    chains_requested: list = field(default_factory=list)
     chains_dropped: list = field(default_factory=list)
     residues_kept_per_chain: dict = field(default_factory=dict)
     residues_dropped_per_chain: dict = field(default_factory=dict)
@@ -183,13 +204,140 @@ def _pick_altloc_per_residue(residue) -> tuple[dict, int]:
     return chosen, collapsed
 
 
+# -- Target-chain parsing -----------------------------------------------------
+
+def parse_target_chains(target_chain: TargetChainSpec) -> Optional[list]:
+    """Normalize a target-chain selector into an ordered list of chain ids.
+
+    Accepts the historical scalar form (``"A"``), the multi-chain comma
+    string (``"A,B"``), the whitespace form (``"A B"``), an explicit
+    sequence (``["A", "B"]``), or ``None``. Returns ``None`` when no chain
+    filter should be applied, otherwise a de-duplicated list in
+    **caller-supplied order**.
+
+    BOTH separators are accepted because the two repos arrived at different
+    conventions independently: this one specifies ``"A,B"``, while tools-hub
+    has shipped whitespace (``"A B C"``) for some time —
+    ``shared/pdb_inspect.validate_target_chain`` splits on it, five tools
+    declare ``multi_chain_supported=True``, and the form copy tells users
+    "List chains separated by spaces". Accepting only commas here made
+    multi-chain unreachable from the web form; accepting only whitespace
+    would break the documented contract. Accepting both breaks neither, and
+    a mixed string ("A, B") works too.
+
+    Order matters downstream: RFdiffusion's ``contigmap.contigs`` and the
+    AF2 complex FASTA both concatenate target chains, and the pipelines
+    key off this order so a given ``target_chain`` string always produces
+    the same contig. Chain ids are case-sensitive (PDB chain ids are).
+
+    A whitespace-only or empty selector is treated as "no filter", which
+    is what a caller passing ``form.get("target_chain", "")`` through
+    would previously have hit as ``target_chain=""`` — that used to filter
+    every chain out and raise; treating it as ``None`` is strictly kinder
+    and cannot change behaviour for any caller that passed a real id.
+    """
+    if target_chain is None:
+        return None
+    if isinstance(target_chain, str):
+        tokens = re.split(r"[,\s]+", target_chain.strip())
+    else:
+        tokens = [str(tok).strip() for tok in target_chain]
+    ordered: list = []
+    for tok in tokens:
+        if tok and tok not in ordered:
+            ordered.append(tok)
+    return ordered or None
+
+
+def parse_hotspot_token(token, target_chains: Sequence[str]) -> tuple:
+    """Resolve one hotspot token into ``(chain_id, residue_number)``.
+
+    Two accepted forms, the cross-tool contract shared by every Kendrew
+    binder generator:
+
+    - chain-prefixed, ``"A296"`` / ``"B264"`` — required to address a
+      residue on any chain but the first.
+    - bare integer, ``296`` or ``"296"`` — attributed to the FIRST entry of
+      ``target_chains``. This is the historical single-chain shape and is
+      what every existing caller sends.
+
+    The chain prefix is matched against the declared target chains, longest
+    first, rather than by assuming a one-character id. That makes
+    multi-character mmCIF-style ids work and turns an unknown prefix into
+    an error here rather than a silently-dropped hotspot downstream.
+
+    Raises:
+        ValueError: empty token, unknown chain prefix, or a residue part
+            that is not an integer. Never returns a sentinel — a hotspot
+            that quietly disappears yields an untargeted design that still
+            completes, still scores, and only fails at the bench.
+    """
+    if not target_chains:
+        raise ValueError("parse_hotspot_token requires at least one target chain")
+
+    raw = str(token).strip()
+    if not raw:
+        raise ValueError("empty hotspot token")
+
+    # Bare integer -> first target chain (historical single-chain shape).
+    try:
+        return target_chains[0], int(raw)
+    except ValueError:
+        pass
+
+    for chain in sorted(target_chains, key=len, reverse=True):
+        if raw.startswith(chain):
+            remainder = raw[len(chain):].strip()
+            try:
+                return chain, int(remainder)
+            except ValueError:
+                raise ValueError(
+                    f"hotspot {token!r}: chain {chain!r} is not followed by an "
+                    f"integer residue number (got {remainder!r})"
+                ) from None
+
+    raise ValueError(
+        f"hotspot {token!r} does not name any target chain. Expected a bare "
+        f"integer (attributed to chain {target_chains[0]!r}) or a "
+        f"chain-prefixed token such as {target_chains[0] + '296'!r}. "
+        f"Target chains: {list(target_chains)!r}"
+    )
+
+
+def parse_hotspots(raw_hotspots, target_chains: Sequence[str]) -> list:
+    """Resolve every hotspot token into ``(chain_id, residue_number)`` pairs.
+
+    Order is preserved. Raises on the first unparseable token — see
+    ``parse_hotspot_token``.
+    """
+    return [
+        parse_hotspot_token(tok, target_chains) for tok in (raw_hotspots or [])
+    ]
+
+
+def group_hotspots_by_chain(raw_hotspots, target_chains: Sequence[str]) -> dict:
+    """Bucket hotspot tokens into ``{chain_id: [resnum, ...]}``.
+
+    Every entry of ``target_chains`` gets a key, empty list included, so
+    callers can emit a complete per-chain map without re-checking. Residue
+    numbers are in whatever numbering the caller passed in — this does no
+    renumbering, deliberately: PXDesign's hotspots must be rewritten into
+    the post-cleanup coordinate space by the caller that owns the
+    renumber_map, and doing it twice aims the design at the wrong residues.
+    """
+    grouped: dict = {chain: [] for chain in target_chains}
+    for chain, resnum in parse_hotspots(raw_hotspots, target_chains):
+        grouped[chain].append(resnum)
+    return grouped
+
+
 # -- Public entry points ------------------------------------------------------
 
 def normalize_for_pipeline(
     input_path: str,
     output_path: Optional[str] = None,
     *,
-    target_chain: Optional[str] = None,
+    target_chain: TargetChainSpec = None,
     keep_hetatm: bool = False,
     hetatm_whitelist: Optional[set] = None,
     keep_waters: bool = False,
@@ -217,6 +365,10 @@ def normalize_for_pipeline(
         output_path: Where to write the cleaned PDB. Pass ``None`` for a
             dry-run preview that only fills in the report.
         target_chain: If given, drop all other chains. Case-sensitive.
+            Accepts a single chain id (``"A"``), a comma-separated string
+            of ids (``"A,B"``) for multi-chain targets such as an IgG1 Fc
+            homodimer, or an explicit sequence (``["A", "B"]``). Every
+            named chain must survive cleanup or a ValueError is raised.
         keep_hetatm: If False (default), drop all HETATM residues except
             those in hetatm_whitelist.
         hetatm_whitelist: 3-letter resnames to retain even with
@@ -237,9 +389,11 @@ def normalize_for_pipeline(
 
     Raises:
         ValueError: Unsupported extension; zero standard polymer residues
-            survived; user-named target_chain not present after cleanup.
+            survived; any user-named target chain not present after cleanup.
     """
     hetatm_whitelist = hetatm_whitelist or set()
+    target_chains = parse_target_chains(target_chain)
+    target_chain_set = set(target_chains) if target_chains else None
 
     ext = os.path.splitext(input_path)[1].lower()
     if ext in (".cif", ".mmcif"):
@@ -306,7 +460,7 @@ def normalize_for_pipeline(
 
     for chain in target_model:
         chain_id = chain.get_id()
-        if target_chain is not None and chain_id != target_chain:
+        if target_chain_set is not None and chain_id not in target_chain_set:
             drop_chain_reasons[chain_id] = "non-target chain"
             continue
 
@@ -387,19 +541,33 @@ def normalize_for_pipeline(
         if dropped_count:
             dropped_per_chain[chain_id] = dropped_count
 
-    # Validation
-    if target_chain is not None and target_chain not in keep_chains:
-        raise ValueError(
-            f"Target chain {target_chain!r} is not present (or has no "
-            f"protein residues) in the input structure. Found chains: "
-            f"{sorted(c.get_id() for c in target_model)}"
-        )
+    # Validation. Every requested chain must survive — a target the caller
+    # named but that silently vanished (wrong id, ligand-only, all-bad
+    # backbones) would otherwise produce a design run against a partial
+    # epitope that still looks successful.
+    if target_chains:
+        absent = [cid for cid in target_chains if cid not in keep_chains]
+        if len(target_chains) == 1 and absent:
+            # Preserve the historical single-chain message verbatim.
+            raise ValueError(
+                f"Target chain {target_chains[0]!r} is not present (or has no "
+                f"protein residues) in the input structure. Found chains: "
+                f"{sorted(c.get_id() for c in target_model)}"
+            )
+        if absent:
+            raise ValueError(
+                f"Target chain(s) {absent!r} are not present (or have no "
+                f"protein residues) in the input structure. Requested: "
+                f"{target_chains!r}. Found chains: "
+                f"{sorted(c.get_id() for c in target_model)}"
+            )
     if not keep_chains:
         raise ValueError(
             "Structure contains no standard polymer residues after cleanup"
         )
 
     report.chains_kept = sorted(keep_chains)
+    report.chains_requested = list(target_chains or [])
     report.chains_dropped = [
         f"{cid} ({reason})" for cid, reason in sorted(drop_chain_reasons.items())
     ]
@@ -514,9 +682,16 @@ def _blank_altloc_column(path: str) -> None:
 # -- Per-tool presets ---------------------------------------------------------
 
 def normalize_for_pxdesign(
-    input_path: str, output_path: Optional[str], *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
-    """pxdesign preset: single chain, strip everything non-polymer, renumber."""
+    """pxdesign preset: strip everything non-polymer, renumber 1..N per chain.
+
+    ``target_chain`` may name one chain (``"A"``) or several (``"A,B"``).
+    PXDesign's ``target.chains`` is a per-chain map upstream, so a
+    multi-chain target is a first-class config there; the renumber_map
+    returned here is keyed ``(chain, orig_resnum)`` and therefore already
+    disambiguates hotspots across chains.
+    """
     return normalize_for_pipeline(
         input_path, output_path,
         target_chain=target_chain,
@@ -527,9 +702,14 @@ def normalize_for_pxdesign(
 
 
 def normalize_for_boltzgen(
-    input_path: str, output_path: Optional[str], *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
-    """boltzgen preset: same as pxdesign — single chain, renumbered."""
+    """boltzgen preset: same as pxdesign — renumbered 1..N per chain.
+
+    Accepts a multi-chain selector for signature parity with the other
+    presets. boltzgen's own run_pipeline.py still passes a single id; this
+    preset does not by itself make boltzgen multi-chain-capable.
+    """
     return normalize_for_pipeline(
         input_path, output_path,
         target_chain=target_chain,
@@ -540,13 +720,17 @@ def normalize_for_boltzgen(
 
 
 def normalize_for_rfdiffusion(
-    input_path: str, output_path: Optional[str], *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
-    """rfdiffusion preset: keep target chain only, preserve original numbering.
+    """rfdiffusion preset: keep target chain(s) only, preserve numbering.
 
     RFdiffusion's frame builder consumes the PDB directly and refers to
     residues by original PDB numbering throughout (hotspots, ppi.hotspot_res
     in the Hydra config). Renumbering would silently invalidate those refs.
+
+    ``target_chain`` may name several chains (``"A,B"``) for a multi-chain
+    fixed target; upstream expresses that as a ``/0 ``-separated contig,
+    e.g. ``contigmap.contigs=[A1-223/0 B1-223/0 50-70]``.
     """
     return normalize_for_pipeline(
         input_path, output_path,
@@ -558,13 +742,18 @@ def normalize_for_rfdiffusion(
 
 
 def normalize_for_rfantibody(
-    input_path: str, output_path: Optional[str], *, target_chain: str
+    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
-    """rfantibody preset: keep antigen chain only, preserve numbering.
+    """rfantibody preset: keep antigen chain(s) only, preserve numbering.
 
     rfantibody's epitope hotspots are written as ``A50,A51,A80`` strings
     referencing original chain+resnum. Renumbering would silently break
     them. Same logic as rfdiffusion preset.
+
+    Accepts a multi-chain selector for signature parity. rfantibody's
+    run_pipeline.py still passes a single id and its downstream framework
+    /HLT chain handling has not been audited for multi-chain antigens —
+    this preset does not by itself make rfantibody multi-chain-capable.
     """
     return normalize_for_pipeline(
         input_path, output_path,

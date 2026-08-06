@@ -12,6 +12,10 @@ num_designs (intermediate count) and budget (final filtered count).
 """
 
 from jobs.models import CandidateResult
+from pdb_utils.pipeline_normalize import (
+    group_hotspots_by_chain,
+    parse_target_chains,
+)
 from pipelines.base import ToolPipeline, merge_pilot_params
 
 
@@ -79,8 +83,12 @@ class BoltzGenPipeline(ToolPipeline):
             num_designs (int), budget (int).
         """
         params = job_spec.get("parameters", {})
-        chain = job_spec.get("target_chain", "A")
-        hotspots = job_spec.get("hotspot_residues", [])
+        # target_chain may name one chain ("A") or several ("A,B"):
+        # BoltzGen's include: and binding_types: are both per-chain lists.
+        chains = parse_target_chains(job_spec.get("target_chain", "A")) or ["A"]
+        hotspots_by_chain = group_hotspots_by_chain(
+            job_spec.get("hotspot_residues", []), chains
+        )
 
         # Binder length range from parameters.
         binder_length = params.get("binder_length", {"min": 50, "max": 100})
@@ -94,21 +102,31 @@ class BoltzGenPipeline(ToolPipeline):
         file_entity = {
             "file": {
                 "path": target_local_path,
-                "include": [{"chain": {"id": chain}}],
+                "include": [{"chain": {"id": c}} for c in chains],
             },
         }
 
-        # Add binding_types if hotspot residues are specified
-        if hotspots:
-            binding_str = ",".join(str(r) for r in sorted(hotspots))
-            file_entity["file"]["binding_types"] = [
-                {"chain": {"id": chain, "binding": binding_str}},
-            ]
+        # Add binding_types for each chain that carries hotspots
+        binding_entries = [
+            {"chain": {"id": c, "binding": ",".join(
+                str(r) for r in sorted(hotspots_by_chain[c])
+            )}}
+            for c in chains if hotspots_by_chain[c]
+        ]
+        if binding_entries:
+            file_entity["file"]["binding_types"] = binding_entries
 
-        # Protein entity for the binder (designable sequence)
+        # Protein entity for the binder (designable sequence). The id must
+        # not collide with a target chain — "B" is right for a single "A"
+        # target but clashes with the second protomer of an "A,B" target.
+        taken = {str(c).strip().upper() for c in chains}
+        binder_id = next(
+            (ltr for ltr in "BCDEFGHIJKLMNOPQRSTUVWXYZA" if ltr not in taken),
+            "B",
+        )
         binder_entity = {
             "protein": {
-                "id": "B",
+                "id": binder_id,
                 "sequence": f"{min_len}..{max_len}",
             },
         }

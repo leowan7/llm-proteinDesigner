@@ -8,6 +8,7 @@ Expected runtime: 10-30 minutes per batch on A100 80GB.
 """
 
 from jobs.models import CandidateResult
+from pdb_utils.pipeline_normalize import parse_hotspots, parse_target_chains
 from pipelines.base import ToolPipeline, merge_pilot_params
 
 
@@ -76,7 +77,7 @@ class RFdiffusionPipeline(ToolPipeline):
             Dict with keys: hydra_args (list[str]), num_designs (int), checkpoint (str).
         """
         params = job_spec.get("parameters", {})
-        chain = job_spec.get("target_chain", "A")
+        chains = parse_target_chains(job_spec.get("target_chain", "A")) or ["A"]
         hotspots = job_spec.get("hotspot_residues", [])
 
         # Binder length range from parameters (default 50-100 residues).
@@ -87,11 +88,22 @@ class RFdiffusionPipeline(ToolPipeline):
         num_designs = params.get("num_designs", 10)
 
         # Build contig string: [ChainResRange/0 BinderLenRange]
-        # The /0 gap means "break chain here" — target on left, binder on right.
+        # The "/0 " gap means "break chain here" — targets on the left, binder
+        # on the right. The trailing SPACE after /0 is required by upstream:
+        # it makes the model treat the segments as separate chains. Multiple
+        # target chains chain-break between each other too, e.g.
+        # [A1-999/0 B1-999/0 50-100].
         # Note: the container's run_pipeline.py overrides this with the actual
         # residue range from the PDB file. This placeholder is kept for config
         # serialization but is not used directly by RFdiffusion.
-        contig_str = f"[{chain}1-999/0 {binder_min}-{binder_max}]"
+        contig_str = (
+            "["
+            + "/0 ".join(
+                [f"{chain}1-999" for chain in chains]
+                + [f"{binder_min}-{binder_max}"]
+            )
+            + "]"
+        )
 
         hydra_args = [
             f"inference.input_pdb={target_local_path}",
@@ -100,9 +112,12 @@ class RFdiffusionPipeline(ToolPipeline):
             "inference.ckpt_override_path=Complex_base_ckpt.pt",
         ]
 
-        # Add hotspot residues if specified.
+        # Add hotspot residues if specified. Bare ints attach to the first
+        # target chain; "B264" names its chain explicitly and may span chains.
         if hotspots:
-            hotspot_str = "[" + ",".join(f"{chain}{res}" for res in hotspots) + "]"
+            hotspot_str = "[" + ",".join(
+                f"{c}{res}" for c, res in parse_hotspots(hotspots, chains)
+            ) + "]"
             hydra_args.append(f"ppi.hotspot_res={hotspot_str}")
 
         return {

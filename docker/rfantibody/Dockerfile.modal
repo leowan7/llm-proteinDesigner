@@ -30,8 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf --retry 5 --retry-delay 10 https://astral.sh/uv/install.sh | sh && \
     ln -sf /root/.local/bin/uv /usr/local/bin/uv
 
-# ---------- Clone RFantibody ----------
-RUN git clone --depth 1 https://github.com/RosettaCommons/RFantibody.git $RFANTIBODY_DIR
+# ---------- Clone RFantibody (PINNED 2026-08-05) ----------
+# Was `git clone --depth 1` with no ref, so the deployed image held whatever
+# `main` happened to be on its build date. Pinned to upstream main HEAD as
+# of 2026-08-05 ("Add JSON and TCR-MHC support", #89, 2026-03-05).
+#
+# Editing this file busts modal.Image.from_dockerfile's content-hash cache
+# and forces a rebuild, which is what MOVES RFantibody from its unknown
+# previous commit to this one. Re-pin only after a smoke run passes.
+ARG RFANTIBODY_SHA=8fe311415754e0276d1a39c87c57e69c88927a2d
+RUN git clone https://github.com/RosettaCommons/RFantibody.git $RFANTIBODY_DIR && \
+    cd $RFANTIBODY_DIR && git checkout $RFANTIBODY_SHA && \
+    echo "RFantibody pinned to $(git rev-parse HEAD)"
 
 # ---------- Install via uv sync (registers CLI entry points) ----------
 RUN cd $RFANTIBODY_DIR && \

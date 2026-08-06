@@ -530,6 +530,47 @@ def post_webhook(
 
 
 # ===========================================================================
+# Target chain / hotspot parsing
+# ===========================================================================
+
+def parse_target_chains(target_chain) -> list:
+    """Parse a ``job_spec["target_chain"]`` value into an ordered chain list.
+
+    Thin wrapper over ``pipeline_normalize.parse_target_chains`` so this
+    module has one import site and a guaranteed-non-empty result: PXDesign
+    always needs at least one named target chain (unlike the normalizer,
+    where ``None`` legitimately means "keep every protein chain").
+    """
+    from pipeline_normalize import parse_target_chains as _parse  # noqa: PLC0415
+
+    chains = _parse(target_chain)
+    if not chains:
+        raise ValueError(
+            f"target_chain must name at least one chain; got {target_chain!r}"
+        )
+    return chains
+
+
+def parse_hotspot_token(token, target_chains: list) -> tuple:
+    """Resolve one hotspot token into ``(chain_id, residue_number)``.
+
+    Delegates to ``pipeline_normalize`` so PXDesign, RFdiffusion and the
+    backend config layer all read ``"A296"`` / bare ``296`` identically.
+    See that module for the full contract.
+    """
+    from pipeline_normalize import parse_hotspot_token as _parse  # noqa: PLC0415
+
+    return _parse(token, target_chains)
+
+
+def parse_hotspots(raw_hotspots, target_chains: list) -> list:
+    """Resolve every hotspot token into ``(chain_id, residue_number)`` pairs."""
+    from pipeline_normalize import parse_hotspots as _parse  # noqa: PLC0415
+
+    return _parse(raw_hotspots, target_chains)
+
+
+# ===========================================================================
 # CIF conversion and re-indexing
 # ===========================================================================
 
@@ -538,39 +579,54 @@ def ensure_cif(
 ) -> tuple[str, dict]:
     """Convert the downloaded PDB into a PXDesign-ready mmCIF.
 
+    ``target_chain`` names one chain (``"A"``) or several (``"A,B"``).
+    PXDesign's ``target.chains`` is a per-chain map upstream, so a
+    multi-chain target is a first-class config there — the previous
+    single-chain filter here was the reason a correct multi-chain YAML
+    still did nothing: the CIF it pointed at no longer contained chain B.
+
     Returns a tuple ``(cif_path, renumber_map)``. The renumber_map is
     ``{(chain_id, original_resnum): new_resnum}`` produced by the
     Biopython normalizer, which residues are renumbered 1..N per chain.
     Callers (``build_yaml_spec``) use it to rewrite hotspot indices into
     the cleaned coordinate space — without this, user-supplied hotspots
     silently point at the wrong residues for any input whose chain A
-    doesn't start at residue 1.
+    doesn't start at residue 1. Hotspots MUST arrive here in original
+    author numbering; pre-converting them double-maps and quietly aims the
+    design at the wrong residues.
 
     Pipeline (Bug 9 fix, 2026-04-30):
       1. Sanitize with Biopython (``pipeline_normalize.normalize_for_pxdesign``):
          drop waters, HETATM, hydrogens, altlocs, multi-model, MSE->MET,
-         filter to ``target_chain`` only, renumber 1..N. Result is a clean
-         single-chain PDB on disk.
+         filter to the target chain(s), renumber 1..N per chain. Result is
+         a clean polymer-only PDB on disk.
       2. Read that cleaned PDB with gemmi for the custom CIF write below.
          ``setup_entities()`` is called defensively before any cleanup —
          a no-op on a polymer-only structure but protects against gemmi
          API drift.
       3. Write the custom mmCIF (label_asym_id == auth_asym_id ==
          chain_name) so PXDesign's CIF reader can find the chain by name.
+      4. Assert every requested chain is actually in the written CIF. Step
+         2's gemmi round-trip is the one place a chain could still vanish
+         after the normalizer approved it, and a missing protomer is
+         invisible in every downstream score.
     """
     from pipeline_normalize import normalize_for_pxdesign  # noqa: PLC0415
 
     import gemmi  # noqa: PLC0415
     from gemmi import cif  # noqa: PLC0415
 
+    target_chains = parse_target_chains(target_chain)
+
     # ---- Stage 1: Biopython sanitize + renumber ----
     cleaned_pdb = os.path.join(work_dir, "cleaned.pdb")
     norm_report = normalize_for_pxdesign(
-        input_path, cleaned_pdb, target_chain=target_chain,
+        input_path, cleaned_pdb, target_chain=target_chains,
     )
     logger.info(
-        "Normalize: chains_kept=%s chains_dropped=%s residues_kept=%s "
-        "residues_dropped=%s changes=%s",
+        "Normalize: chains_requested=%s chains_kept=%s chains_dropped=%s "
+        "residues_kept=%s residues_dropped=%s changes=%s",
+        target_chains,
         norm_report.chains_kept, norm_report.chains_dropped,
         norm_report.residues_kept_per_chain,
         norm_report.residues_dropped_per_chain,
@@ -721,10 +777,23 @@ def ensure_cif(
     cif_path = os.path.join(work_dir, "target.cif")
     doc.write_file(cif_path)
     logger.info(
-        "CIF written to %s (%d bytes, %d atoms, %d residues)",
+        "CIF written to %s (%d bytes, %d atoms, %d residues, chains=%s)",
         cif_path, os.path.getsize(cif_path), atom_id,
-        sum(kept_counts.values()),
+        sum(kept_counts.values()), chain_names,
     )
+
+    # Every requested chain must be in the file PXDesign will actually read.
+    # This is the failure that passes every other check: a two-chain job
+    # whose CIF quietly holds one protomer still produces designs, still
+    # scores them, and is only wrong at the bench.
+    missing_chains = [c for c in target_chains if c not in chains_data]
+    if missing_chains:
+        raise RuntimeError(
+            f"Target chain(s) {missing_chains} are missing from the generated "
+            f"CIF {cif_path}. Requested: {target_chains}; present: "
+            f"{sorted(chains_data)}"
+        )
+
     return cif_path, dict(norm_report.renumber_map)
 
 
@@ -752,19 +821,31 @@ def build_yaml_spec(
 ) -> dict:
     """Build PXDesign YAML task spec from job parameters.
 
-    Reads the target CIF to determine chain length for the crop range.
-    PXDesign requires crop as a list of string ranges, e.g. ["1-116"].
+    ``target.chains`` is a per-chain MAP upstream — each entry taking
+    ``crop`` / ``hotspots`` / ``msa``. This emits one entry per target
+    chain, so a two-protomer target (IgG1 Fc homodimer) is expressed as
+    the model already supports. Only the BINDER is single-chain in
+    PXDesign; the target is not.
+
+    Reads the target CIF to determine each chain's length for its crop
+    range. PXDesign requires crop as a list of string ranges, e.g.
+    ["1-116"].
 
     Hotspot remapping (Bug 9 fix): the CIF prep stage renumbers residues
     1..N per chain. User-supplied hotspots refer to original PDB
     numbering. ``renumber_map`` is ``{(chain, orig_resnum): new_resnum}``
     produced by ``ensure_cif()``. We use it to rewrite each hotspot into
-    the new coordinate space before handing it to PXDesign. Hotspots
-    that fall outside the kept range (e.g. on a residue that was dropped
-    as non-standard) are logged and skipped.
+    the new coordinate space before handing it to PXDesign. Hotspots must
+    therefore arrive here UNCONVERTED — pre-mapping them upstream would
+    double-map and silently aim the design at the wrong residues.
+
+    A hotspot that does not survive the map is a hard error. It used to be
+    logged and skipped, which on a per-chain map means one wrong chain key
+    yields ``hotspots: []`` — an untargeted design that still completes,
+    still scores, and still looks like a successful run.
     """
     params = job_spec.get("parameters", {})
-    chain = job_spec.get("target_chain", "A")
+    target_chains = parse_target_chains(job_spec.get("target_chain", "A"))
     raw_hotspots = list(job_spec.get("hotspot_residues", []) or [])
 
     if binder_length is None:
@@ -772,44 +853,57 @@ def build_yaml_spec(
     if num_designs is None:
         num_designs = params.get("num_designs", 100)
 
-    chain_length = get_chain_length(target_cif_path, chain)
-    logger.info("Target chain %s has %d residues", chain, chain_length)
+    # Bare-int hotspots attach to the first target chain (historical shape);
+    # "A296"/"B264" address a chain explicitly. Unparseable tokens raise.
+    parsed_hotspots = parse_hotspots(raw_hotspots, target_chains)
 
-    if renumber_map:
-        remapped: list = []
-        missing: list = []
-        for h in raw_hotspots:
-            try:
-                orig = int(h)
-            except (TypeError, ValueError):
-                missing.append(str(h))
-                continue
-            new = renumber_map.get((chain, orig))
+    hotspots_by_chain: dict[str, list] = {c: [] for c in target_chains}
+    unmapped: list = []
+    for chain_id, orig in parsed_hotspots:
+        if renumber_map:
+            new = renumber_map.get((chain_id, orig))
             if new is None:
-                missing.append(orig)
-            else:
-                remapped.append(new)
-        if missing:
-            logger.warning(
-                "build_yaml_spec: hotspot residues not found after cleanup "
-                "(skipped): %s. Original hotspots: %s. Chain %s has "
-                "renumber-map entries for residues: %s",
-                missing, raw_hotspots, chain,
-                sorted(r for c, r in renumber_map if c == chain)[:25],
-            )
-        hotspots = remapped
-    else:
-        hotspots = raw_hotspots
+                unmapped.append(f"{chain_id}{orig}")
+                continue
+        else:
+            new = orig
+        hotspots_by_chain[chain_id].append(new)
 
-    chain_spec = {
-        "crop": [f"1-{chain_length}"],
-        "hotspots": hotspots if hotspots else [],
-    }
+    if unmapped:
+        available = {
+            c: sorted(r for ch, r in renumber_map if ch == c)[:25]
+            for c in target_chains
+        }
+        raise ValueError(
+            f"Hotspot residue(s) {unmapped} are not present after structure "
+            f"cleanup, so they cannot be mapped into the renumbered "
+            f"coordinate space. Original hotspots: {raw_hotspots}. Target "
+            f"chains: {target_chains}. First 25 mappable residues per chain: "
+            f"{available}. Refusing to continue — dropping them would run an "
+            f"untargeted design that looks like a successful job."
+        )
+
+    if raw_hotspots and not any(hotspots_by_chain.values()):
+        raise ValueError(
+            f"All {len(raw_hotspots)} supplied hotspot(s) resolved to an "
+            f"empty per-chain map: {raw_hotspots} -> {hotspots_by_chain}. "
+            f"Refusing to run an untargeted design."
+        )
+
+    chains_spec: dict[str, dict] = {}
+    chain_lengths: dict[str, int] = {}
+    for chain_id in target_chains:
+        chain_length = get_chain_length(target_cif_path, chain_id)
+        chain_lengths[chain_id] = chain_length
+        chains_spec[chain_id] = {
+            "crop": [f"1-{chain_length}"],
+            "hotspots": hotspots_by_chain[chain_id],
+        }
 
     yaml_spec = {
         "target": {
             "file": target_cif_path,
-            "chains": {chain: chain_spec},
+            "chains": chains_spec,
         },
         "binder_length": binder_length,
         "preset": preset,
@@ -817,9 +911,9 @@ def build_yaml_spec(
     }
 
     logger.info(
-        "YAML spec: chain=%s, crop=[1-%d], hotspots(orig=%s, mapped=%s), "
+        "YAML spec: chains=%s, lengths=%s, hotspots(orig=%s, per_chain=%s), "
         "binder_length=%s, N_sample=%d, preset=%s",
-        chain, chain_length, raw_hotspots, hotspots,
+        target_chains, chain_lengths, raw_hotspots, hotspots_by_chain,
         binder_length, num_designs, preset,
     )
     return yaml_spec
