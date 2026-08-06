@@ -3,9 +3,9 @@
 Reads job configuration from the JOB_PAYLOAD environment variable.
 Supports three execution tiers (see docs/SMOKE-TEST-SPEC.md):
 
-  * tier == "smoke"       -> N=1 basic mode, no post-filter.
+  * tier == "smoke"       -> N=1 preview mode, no post-filter.
                               Writes results inline to /tmp/smoke_results.json.
-  * tier == "mini_pilot"  -> N=1 basic mode, full scoring (PXDesign-specific
+  * tier == "mini_pilot"  -> N=1 preview mode, full scoring (PXDesign-specific
                               exception; other tools use N=2). See
                               docs/SMOKE-TEST-SPEC.md "Per-tool exceptions".
                               Writes results inline to /tmp/smoke_results.json.
@@ -79,7 +79,9 @@ def smoke_preset() -> dict:
     """N=1, no-MSA (``preview``) mode, no post-filter.
 
     PXDesign CLI names the no-MSA mode ``preview`` (vs ``extended`` which
-    requires MSA). SMOKE-TEST-SPEC.md refers to this as "Basic" mode.
+    requires MSA). The Phase 4 planning docs called it "basic", which is not
+    a value upstream's click.Choice accepts — see .planning/phases/
+    04-pipeline-validation/04-01-PLAN.md.
     """
     return {
         "num_designs": 1,
@@ -814,6 +816,91 @@ def get_chain_length(cif_path: str, chain_id: str) -> int:
 # YAML spec generation
 # ===========================================================================
 
+def coerce_binder_length(value) -> int:
+    """Resolve ``binder_length`` to the scalar int PXDesign's YAML requires.
+
+    Upstream takes a single integer (``binder_length: 80``); there is no
+    range form. Every other binder tool in this repo (RFdiffusion, BoltzGen,
+    BindCraft) takes ``{"min": .., "max": ..}`` and guards with an
+    ``isinstance(.., dict)`` check, so PXDesign is the one tool where a
+    caller normalizing the binder params to a common shape would hand over
+    a dict that nothing downstream re-checks.
+
+    That matters on the pilot path: ``run_webhook_tier`` does not pass
+    ``binder_length``, so it falls through to ``parameters`` here and lands
+    in spec.yaml uninspected. (On smoke/mini_pilot the tier preset overwrites
+    any caller value with 80, so in practice this only ever fires for pilot.)
+
+    What this actually buys, precisely — upstream parses the field as
+    ``int(cfg["binder_length"])`` (pxdesign/utils/inputs.py), so:
+
+      * A dict or list raises TypeError there, and ``validate_input`` runs
+        ``pxdesign check-input`` before ``run_pxdesign`` on both paths, so
+        those shapes already failed before any design compute. For them this
+        guard only buys a clearer message and a shorter path — NOT GPU
+        savings. (The whole script is the container entrypoint under a
+        GPU-attached Modal function, so nothing here saves a container start.)
+      * ``True`` is the genuinely silent case: ``int(True)`` is 1, which is a
+        buildable 1-residue chain, so the job SUCCEEDS with a nonsense binder.
+      * ``False``/``0``/``-5`` do not fail at parse time either — they yield an
+        empty design chain that crashes upstream's featurizer well after model
+        load, inside the GPU stage, surfacing only as "produced no summary.csv".
+        Rejecting them here turns a late, opaque failure into an immediate,
+        legible one, and does save that GPU time.
+
+    Accepts an int, a digit string (an LLM- or YAML-authored ``parameters``
+    dict can carry ``"80"``), and an integral float (``parameters`` is an
+    untyped ``dict`` at every layer, so a JSON body can deliver ``80.0``,
+    which upstream's ``int()`` accepted before this guard existed — rejecting
+    it would be a regression). A fractional float is refused rather than
+    silently truncated the way ``int(80.7)`` would. Rejects bool explicitly —
+    ``isinstance(True, int)`` is True in Python, and ``binder_length: true``
+    is not a length.
+    """
+    if isinstance(value, bool):
+        raise ValueError(
+            f"binder_length must be a single integer, got the boolean "
+            f"{value!r}."
+        )
+    if isinstance(value, int):
+        length = value
+    elif isinstance(value, str):
+        try:
+            length = int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"binder_length must be a single integer for PXDesign, got "
+                f"the string {value!r}."
+            ) from None
+    elif isinstance(value, float):
+        # An untyped JSON parameters body can carry 80.0; upstream's int()
+        # accepted it, so refusing it would break a shape that worked.
+        if not value.is_integer():
+            raise ValueError(
+                f"binder_length must be a whole number of residues, got the "
+                f"fractional value {value!r}. Upstream would silently "
+                f"truncate it — say which length you mean."
+            )
+        length = int(value)
+    elif isinstance(value, dict):
+        raise ValueError(
+            f"binder_length must be a single integer for PXDesign, got the "
+            f"range {value!r}. PXDesign's YAML schema has no min/max form "
+            f"(unlike RFdiffusion/BoltzGen/BindCraft) — pick one length."
+        )
+    else:
+        raise ValueError(
+            f"binder_length must be a single integer for PXDesign, got "
+            f"{type(value).__name__} {value!r}."
+        )
+    if length < 1:
+        raise ValueError(
+            f"binder_length must be a positive number of residues, got "
+            f"{length}."
+        )
+    return length
+
+
 def build_yaml_spec(
     job_spec: dict, target_cif_path: str, preset: str = "preview",
     num_designs: int | None = None, binder_length=None,
@@ -830,6 +917,10 @@ def build_yaml_spec(
     Reads the target CIF to determine each chain's length for its crop
     range. PXDesign requires crop as a list of string ranges, e.g.
     ["1-116"].
+
+    ``binder_length`` is a scalar int upstream, never a {min, max} range —
+    see ``coerce_binder_length``, which enforces it here because no layer
+    between the caller and spec.yaml does.
 
     Hotspot remapping (Bug 9 fix): the CIF prep stage renumbers residues
     1..N per chain. User-supplied hotspots refer to original PDB
@@ -850,6 +941,12 @@ def build_yaml_spec(
 
     if binder_length is None:
         binder_length = params.get("binder_length", 80)
+    # Both callers pass through here, but only one can carry a bad value:
+    # run_smoke_or_mini_pilot hands over a tier preset that already overwrote
+    # any caller value with 80, while run_webhook_tier (pilot) passes nothing
+    # and falls through to untyped caller params. This is the last point
+    # before the value is written to spec.yaml.
+    binder_length = coerce_binder_length(binder_length)
     if num_designs is None:
         num_designs = params.get("num_designs", 100)
 
@@ -1333,7 +1430,9 @@ def run_smoke_or_mini_pilot(tier: str, job_payload: dict) -> None:
     input_url = job_payload.get("input_pdb_url", "") or ""
 
     preset_params = _resolve_preset_params(tier, job_spec)
-    preset = preset_params.get("preset", "basic")
+    # Unreachable today (_resolve_preset_params always supplies "preview" for
+    # both tiers), but "basic" is not a value upstream's CLI accepts at all.
+    preset = preset_params.get("preset", "preview")
     num_designs = int(preset_params.get("num_designs", 1))
     binder_length = preset_params.get("binder_length", 80)
 
