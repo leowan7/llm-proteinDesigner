@@ -22,6 +22,17 @@ Pipeline:
   4. Parse output CSV for ranked candidates
   5. Upload passing PDBs + metrics CSV via on-demand presigned URLs
   6. POST results to webhook
+
+Tiers:
+    Absent / anything else   the webhook pipeline above (production).
+    "smoke" / "mini_pilot"   bypass the webhook and upload entirely; write the
+                             results to /tmp/smoke_results.json, which
+                             infrastructure/modal/bindcraft_app.py returns
+                             inline as ``smoke_result``. This is the only way
+                             a caller invoking the Modal function directly
+                             (``modal.Function.from_name(...)``) gets anything
+                             back. See docs/SMOKE-TEST-SPEC.md and
+                             ``run_smoke_tier`` below.
 """
 
 import base64
@@ -57,6 +68,9 @@ BINDCRAFT_SCRIPT = f"{BINDCRAFT_DIR}/bindcraft.py"
 BINDCRAFT_FILTERS = f"{BINDCRAFT_DIR}/settings_filters/default_filters.json"
 BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/settings_advanced/default_4stage_multimer.json"
 
+BINDCRAFT_FILTERS_DIR = f"{BINDCRAFT_DIR}/settings_filters"
+BINDCRAFT_ADVANCED_DIR = f"{BINDCRAFT_DIR}/settings_advanced"
+
 # ---------------------------------------------------------------------------
 # Raw output capture — see archive_work_dir()
 # ---------------------------------------------------------------------------
@@ -66,10 +80,52 @@ BINDCRAFT_ADVANCED = f"{BINDCRAFT_DIR}/settings_advanced/default_4stage_multimer
 # the volume after we exit. Must be OUTSIDE any work_dir we archive.
 RAW_ARCHIVE_PATH = "/tmp/raw_archive.tgz"
 
+# ---------------------------------------------------------------------------
+# Smoke / mini_pilot tier — see docs/SMOKE-TEST-SPEC.md
+# ---------------------------------------------------------------------------
+# infrastructure/modal/bindcraft_app.py::run_tool reads this file after we exit
+# and returns its contents as ``smoke_result``. It has advertised that contract
+# since the tier work landed for the other four tools; BindCraft was the
+# reference implementation those four copied, was never in scope itself, and so
+# got the reader without ever getting the writer. Everything below is the
+# missing writer. The single hard rule: whatever happens, this file gets
+# written, because a tool that cannot report its own failure returns None and
+# tells the caller nothing.
+SMOKE_RESULTS_PATH = "/tmp/smoke_results.json"
+SMOKE_TIERS = ("smoke", "mini_pilot")
+
+# THE cost bound. BindCraft's own ``max_trajectories`` is not sufficient:
+# ``generic_utils.check_n_trajectories`` counts PDBs in ``Trajectory/Relaxed``,
+# and ``colabdesign_utils.binder_hallucination`` moves a trajectory to
+# ``Trajectory/Clashing`` or ``Trajectory/LowConfidence`` (CA clash, final
+# pLDDT < 0.7, or fewer than 3 interface contacts) *instead of* relaxing it —
+# so a terminated trajectory never increments the counter. On a hard epitope
+# where most trajectories terminate, ``max_trajectories`` alone lets the design
+# loop run until the 4 h session cap. A wall-clock cap on the subprocess is the
+# only bound that holds unconditionally, so it is the one the budget rests on.
+# On expiry we do NOT discard the run: BindCraft writes Accepted/*.pdb
+# incrementally, so partial output is parsed and returned.
+SMOKE_SUBPROCESS_TIMEOUT_S = 2400       # 40 min
+MINI_PILOT_SUBPROCESS_TIMEOUT_S = 6000  # 100 min
+
 
 # ===========================================================================
 # Startup diagnostics
 # ===========================================================================
+
+def _payload_tier() -> str:
+    """Read ``tier`` out of JOB_PAYLOAD without raising.
+
+    Called from ``startup_check`` before the payload is properly parsed, so it
+    must never be the thing that kills the run. An unreadable payload reports
+    the empty tier, which routes to the legacy webhook path and its existing
+    error handling.
+    """
+    try:
+        return str(json.loads(os.environ.get("JOB_PAYLOAD") or "{}").get("tier") or "")
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
 
 def startup_check():
     """Verify GPU, dependencies, and critical files at boot. Crash if GPU unavailable."""
@@ -108,10 +164,15 @@ def startup_check():
     logger.info("Startup diagnostics: %s", json.dumps(checks, indent=2))
 
     # --- Validate required env vars ---
-    missing = []
-    for var in ["JOB_PAYLOAD", "WEBHOOK_URL", "JOB_ID"]:
-        if not os.environ.get(var):
-            missing.append(var)
+    # WEBHOOK_URL and JOB_ID exist to POST results back to Kendrew. The smoke
+    # tier posts nothing — it returns inline through /tmp/smoke_results.json —
+    # so demanding a webhook URL there would reject the very call shape the
+    # tier is for. The legacy tier's required list is unchanged: _payload_tier()
+    # returns "" for every non-smoke payload, including a malformed one.
+    required = ["JOB_PAYLOAD"]
+    if _payload_tier() not in SMOKE_TIERS:
+        required += ["WEBHOOK_URL", "JOB_ID"]
+    missing = [var for var in required if not os.environ.get(var)]
     if missing:
         logger.error("Missing required environment variables: %s", missing)
         sys.exit(1)
@@ -536,6 +597,498 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
 
 
 # ===========================================================================
+# Smoke / mini_pilot tier — Layer 2 preflight + Layer 3 execution
+# See docs/SMOKE-TEST-SPEC.md. Reference implementation:
+# docker/rfdiffusion/run_pipeline.py::run_smoke_tier.
+# ===========================================================================
+
+def write_smoke_results(payload: dict) -> None:
+    """Write ``payload`` to SMOKE_RESULTS_PATH. Best-effort: never raises.
+
+    Every exit path in the smoke tier funnels through here. The wrapper opens
+    this file unconditionally after the subprocess exits, so an absent file is
+    indistinguishable from a crash — which is precisely the failure this tier
+    exists to eliminate.
+    """
+    try:
+        with open(SMOKE_RESULTS_PATH, "w") as fh:
+            json.dump(payload, fh)
+    except (OSError, TypeError, ValueError) as exc:
+        logger.error("Failed to write %s: %s", SMOKE_RESULTS_PATH, exc)
+
+
+def _smoke_failure(bucket: str, check: str, detail: str, tier: str = "") -> dict:
+    """Build a Layer 2 / Layer 3 structured failure dict."""
+    return {
+        "status": "FAILED",
+        "error": {"bucket": bucket, "check": check, "detail": str(detail)[:2000]},
+        "output": {"candidates": []},
+        "tier": tier,
+    }
+
+
+def _normalize_target_chains(value) -> str:
+    """Return a comma-joined chain selector from any accepted spelling.
+
+    ``docs/MULTI-CHAIN-TARGETS.md`` accepts ``"A,B"``, ``"A B"`` and
+    ``"A, B"`` interchangeably; BindCraft's own settings key wants the comma
+    form (``bindcraft.py`` prompts "Enter target chains (e.g., A or A,B)").
+    Order is significant and preserved; duplicates are dropped.
+
+    Deliberately NOT applied to ``write_bindcraft_settings``: that function is
+    on the legacy webhook path, which must stay byte-identical, and the comma
+    form it already receives passes through unchanged either way.
+    """
+    if isinstance(value, (list, tuple)):
+        tokens = [str(v) for v in value]
+    else:
+        tokens = re.split(r"[,\s]+", str(value if value is not None else ""))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        token = token.strip()
+        if token and token not in seen:
+            seen.add(token)
+            ordered.append(token)
+    return ",".join(ordered)
+
+
+def _build_smoke_job_spec(tier: str, overrides: dict | None = None) -> dict:
+    """Build the job_spec for a smoke/mini_pilot run.
+
+    Mirrors ``backend/pipelines/bindcraft.py::smoke_preset`` /
+    ``mini_pilot_preset``. Kept in sync by hand because this script ships
+    inside the Docker image and cannot import the backend package — the same
+    split the other four tools live with.
+
+    ``overrides`` is the caller's ``job_spec``. ``target_chain``,
+    ``hotspot_residues`` and ``parameters.binder_length`` are honoured so a
+    real multi-chain target can be smoked; everything else is pinned by the
+    preset, because the preset is what bounds the cost.
+    """
+    if tier == "smoke":
+        parameters = {
+            "num_designs": 1,
+            "max_trajectories": 2,
+            "binder_length": {"min": 55, "max": 65},
+            "filter_set": "no_filters.json",
+            "advanced_overrides": {
+                "max_trajectories": 2,
+                "soft_iterations": 40,
+                "temporary_iterations": 25,
+                "hard_iterations": 3,
+                "greedy_iterations": 5,
+                "num_seqs": 8,
+                "max_mpnn_sequences": 1,
+                "num_recycles_validation": 1,
+                "optimise_beta": False,
+                "save_design_animations": False,
+                "save_design_trajectory_plots": False,
+                "zip_animations": False,
+                "zip_plots": False,
+            },
+        }
+    elif tier == "mini_pilot":
+        parameters = {
+            "num_designs": 2,
+            "max_trajectories": 5,
+            "binder_length": {"min": 55, "max": 65},
+            "filter_set": "default_filters.json",
+            "advanced_overrides": {
+                "max_trajectories": 5,
+                "save_design_animations": False,
+                "save_design_trajectory_plots": False,
+                "zip_animations": False,
+                "zip_plots": False,
+            },
+        }
+    else:
+        raise ValueError(f"Unknown tier: {tier}")
+
+    overrides = overrides or {}
+    target_chain = _normalize_target_chains(overrides.get("target_chain") or "A")
+
+    # Chain-prefixed tokens ("A241") and bare ints (241) both pass straight
+    # through to BindCraft, whose documented hotspot format is exactly this
+    # ("A1,B20-25"). Only whitespace is stripped — residue numbers stay in the
+    # uploaded structure's author numbering, never pre-converted.
+    hotspots = [
+        str(res).strip()
+        for res in (overrides.get("hotspot_residues") or [])
+        if str(res).strip()
+    ]
+
+    caller_params = overrides.get("parameters") or {}
+    if caller_params.get("binder_length"):
+        parameters["binder_length"] = caller_params["binder_length"]
+
+    return {
+        "tool": "bindcraft",
+        "target_chain": target_chain,
+        "hotspot_residues": hotspots,
+        "parameters": parameters,
+    }
+
+
+def _resolve_filter_set(job_spec: dict) -> tuple[str, dict]:
+    """Resolve the preset's filter file inside the image, with a report.
+
+    FreeBindCraft is cloned unpinned at image build, so the set of files under
+    ``settings_filters/`` is not something this script can assume. A missing
+    file falls back to the baked default rather than crashing, and the report
+    says which happened — a silent fallback would turn "no filters, guaranteed
+    acceptance" into "production filters" and make a zero-design smoke run look
+    like a pipeline defect.
+    """
+    requested = job_spec.get("parameters", {}).get("filter_set") or "default_filters.json"
+    candidate = os.path.join(BINDCRAFT_FILTERS_DIR, os.path.basename(requested))
+    try:
+        available = sorted(os.listdir(BINDCRAFT_FILTERS_DIR))
+    except OSError:
+        available = []
+    if os.path.isfile(candidate):
+        return candidate, {"requested": requested, "resolved": candidate,
+                           "fallback": False, "available": available}
+    logger.error(
+        "Filter set %s not found in %s (have: %s) — falling back to %s",
+        requested, BINDCRAFT_FILTERS_DIR, available, BINDCRAFT_FILTERS,
+    )
+    return BINDCRAFT_FILTERS, {"requested": requested, "resolved": BINDCRAFT_FILTERS,
+                               "fallback": True, "available": available}
+
+
+def _write_smoke_advanced(work_dir: str, job_spec: dict) -> tuple[str, dict]:
+    """Copy the default advanced settings and JSON-patch the preset's overrides.
+
+    Same mechanism the pilot tier already uses for ``max_trajectories`` (see
+    main()) — never mutate the default file on disk, always patch a copy in
+    the work dir.
+
+    Only keys that already exist in the default are patched. FreeBindCraft is
+    cloned unpinned, so an upstream rename would otherwise turn a cost bound
+    into a no-op that nothing reports; ``unknown`` in the returned report is
+    the alarm for that, and ``preflight`` refuses to start if the key the
+    budget depends on is among them.
+    """
+    with open(BINDCRAFT_ADVANCED) as fh:
+        advanced_cfg = json.load(fh)
+
+    overrides = job_spec.get("parameters", {}).get("advanced_overrides") or {}
+    applied: dict = {}
+    unknown: dict = {}
+    for key, value in overrides.items():
+        if key in advanced_cfg:
+            applied[key] = {"from": advanced_cfg[key], "to": value}
+            advanced_cfg[key] = value
+        else:
+            unknown[key] = value
+
+    advanced_path = os.path.join(work_dir, "advanced_smoke.json")
+    with open(advanced_path, "w") as fh:
+        json.dump(advanced_cfg, fh, indent=2)
+
+    if unknown:
+        logger.error(
+            "Advanced-settings keys absent from %s and therefore NOT applied: %s",
+            BINDCRAFT_ADVANCED, sorted(unknown),
+        )
+    logger.info(
+        "Smoke tier: wrote patched advanced settings to %s (%d applied, %d unknown)",
+        advanced_path, len(applied), len(unknown),
+    )
+    return advanced_path, {"path": advanced_path, "applied": applied, "unknown": unknown}
+
+
+def _census_output_tree(output_dir: str) -> dict:
+    """Count what BindCraft actually produced, per directory.
+
+    A zero-candidate run is only interpretable next to this: 3 trajectories all
+    in ``Trajectory/Clashing`` is a target/hotspot problem, 3 in
+    ``Trajectory/Relaxed`` with an empty ``Accepted/`` is a filter problem, and
+    an empty tree is a tool-invocation problem. Without the census all three
+    look identical from outside.
+    """
+    census: dict = {}
+    for sub in ("", "Accepted", "Accepted/Ranked", "Trajectory", "Trajectory/Relaxed",
+                "Trajectory/LowConfidence", "Trajectory/Clashing", "MPNN", "MPNN/Relaxed"):
+        path = os.path.join(output_dir, sub) if sub else output_dir
+        if os.path.isdir(path):
+            census[sub or "."] = len(
+                [f for f in os.listdir(path) if f.endswith(".pdb")]
+            )
+    try:
+        census["csvs"] = sorted(
+            os.path.basename(p) for p in glob(os.path.join(output_dir, "*.csv"))
+        )
+    except OSError:
+        pass
+    return census
+
+
+def _best_effort_structure(output_dir: str) -> dict | None:
+    """Return the best available NON-accepted structure, base64-encoded.
+
+    A run that accepts nothing has still paid for a GPU and still produced
+    complexes; shipping the best of them inline is what makes a zero-design
+    result diagnosable (is the binder a real second chain? does it touch the
+    hotspots?) instead of merely disappointing. Deliberately kept OUT of
+    ``output.candidates`` — these did not pass BindCraft's filters and must
+    never be mistaken for designs that did.
+    """
+    for sub in ("MPNN/Relaxed", "MPNN", "Trajectory/Relaxed", "Trajectory",
+                "Trajectory/LowConfidence", "Trajectory/Clashing"):
+        hits = sorted(glob(os.path.join(output_dir, sub, "*.pdb")))
+        if hits:
+            try:
+                return {
+                    "source": sub,
+                    "pdb_key": os.path.basename(hits[0]),
+                    "pdb_content_b64": base64.b64encode(
+                        Path(hits[0]).read_bytes(),
+                    ).decode("ascii"),
+                    "siblings": len(hits),
+                }
+            except OSError as exc:
+                logger.warning("Could not read best-effort PDB %s: %s", hits[0], exc)
+    return None
+
+
+def preflight(payload: dict) -> None:
+    """Layer 2 fail-fast checks. Writes a structured failure and exits on any.
+
+    A no-op for the legacy webhook tier, exactly like the RFdiffusion
+    reference. See docs/SMOKE-TEST-SPEC.md "Layer 2".
+    """
+    tier = payload.get("tier", "")
+    if tier not in SMOKE_TIERS:
+        return
+
+    logger.info("=== Preflight (tier=%s) ===", tier)
+
+    # 1. A caller-supplied target. Unlike the other four tools this image bakes
+    #    NO /opt/smoke_target.pdb fixture, and adding one would mean editing
+    #    Dockerfile.modal — which reclones FreeBindCraft unpinned and would move
+    #    the upstream version underneath us. Requiring the URL is also simply
+    #    correct: falling back to a stand-in target while reporting COMPLETED is
+    #    the single worst failure this tier could have.
+    if not (payload.get("input_pdb_url") or payload.get("input_presigned_url")):
+        write_smoke_results(_smoke_failure(
+            "preflight", "input_url",
+            "no target supplied: set input_pdb_url or input_presigned_url. "
+            "This image bakes no smoke fixture, so there is nothing to fall back to.",
+            tier,
+        ))
+        sys.exit(1)
+
+    # 2. BindCraft's own files.
+    for check, path in (("bindcraft_script", BINDCRAFT_SCRIPT),
+                        ("bindcraft_advanced", BINDCRAFT_ADVANCED),
+                        ("bindcraft_filters_dir", BINDCRAFT_FILTERS_DIR)):
+        if not os.path.exists(path):
+            write_smoke_results(_smoke_failure(
+                "preflight", check, f"not found at {path}", tier))
+            sys.exit(1)
+
+    # 3. The cost bound must be real. ``max_trajectories`` is the key the whole
+    #    budget rests on; if an unpinned FreeBindCraft ever renames it, patching
+    #    it silently becomes a no-op and the run is unbounded. Refuse to start.
+    try:
+        with open(BINDCRAFT_ADVANCED) as fh:
+            advanced_cfg = json.load(fh)
+    except (OSError, ValueError) as exc:
+        write_smoke_results(_smoke_failure(
+            "preflight", "advanced_settings_parse", str(exc), tier))
+        sys.exit(1)
+    if "max_trajectories" not in advanced_cfg:
+        write_smoke_results(_smoke_failure(
+            "preflight", "max_trajectories",
+            f"key absent from {BINDCRAFT_ADVANCED}; the trajectory cap would "
+            f"be a silent no-op and the run unbounded. Keys: "
+            f"{sorted(advanced_cfg)[:40]}",
+            tier,
+        ))
+        sys.exit(1)
+
+    # 4. GPU. FreeBindCraft is JAX, not torch.
+    try:
+        import jax
+        if not jax.devices("gpu"):
+            write_smoke_results(_smoke_failure(
+                "preflight", "gpu", "jax.devices('gpu') is empty", tier))
+            sys.exit(1)
+        logger.info("GPU: %s", jax.devices("gpu")[0])
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any JAX failure is a hard stop
+        write_smoke_results(_smoke_failure("preflight", "jax_import", str(exc), tier))
+        sys.exit(1)
+
+    # 5. SMOKE_RESULTS_PATH is writable — checked last so the checks above can
+    #    still report through it.
+    try:
+        with open(SMOKE_RESULTS_PATH, "a"):
+            pass
+    except OSError as exc:
+        logger.error("Preflight: %s not writable: %s", SMOKE_RESULTS_PATH, exc)
+        sys.exit(1)
+
+    logger.info("Preflight: OK (tier=%s)", tier)
+
+
+def run_smoke_tier(
+    tier: str,
+    work_dir: str,
+    job_spec_override: dict | None = None,
+    input_url: str = "",
+) -> dict:
+    """Run BindCraft for smoke/mini_pilot and return a Layer 3 result dict.
+
+    Returns rather than raises on every foreseeable failure, because the return
+    value is the only channel this tier has — see docs/SMOKE-TEST-SPEC.md
+    Layer 3 "output shape".
+
+    BindCraft has no stage to stub: it hallucinates, redesigns with MPNN and
+    AF2-validates inside one subprocess. So unlike the RFdiffusion reference
+    there is no ``skip_af2`` here, and the tier differences are entirely about
+    how much work BindCraft is allowed to do before it must stop.
+    """
+    start = time.time()
+    diagnostics: dict = {}
+
+    def _finish(status: str, **extra) -> dict:
+        result = {
+            "status": status,
+            "output": {"candidates": []},
+            "tier": tier,
+            "gpu_seconds": int(time.time() - start),
+            "diagnostics": diagnostics,
+        }
+        result.update(extra)
+        return result
+
+    job_spec = _build_smoke_job_spec(tier, job_spec_override)
+    params = job_spec["parameters"]
+    num_designs = int(params.get("num_designs", 1))
+    diagnostics["job_spec"] = job_spec
+
+    # ----- Resolve the target -----
+    # Both key spellings are accepted: rfdiffusion and pxdesign read
+    # ``input_pdb_url`` on the smoke path, the legacy BindCraft path reads
+    # ``input_presigned_url``, and the wrapper forwards both. Accepting only
+    # one of them would reject half the callers already in the field.
+    target_pdb = os.path.join(work_dir, "target.pdb")
+    try:
+        download_input(input_url, target_pdb)
+    except Exception as exc:  # noqa: BLE001 — network/HTTP failure is a clean report
+        return _finish("FAILED", error={
+            "bucket": "preflight", "check": "target_download",
+            "detail": str(exc)[:2000]})
+    diagnostics["target_bytes"] = os.path.getsize(target_pdb)
+
+    # ----- Settings -----
+    # Reuses write_bindcraft_settings, the same function the pilot path uses,
+    # so the settings shape cannot drift between tiers. It passes ``chains``
+    # through verbatim and joins hotspots with "," — which is already exactly
+    # BindCraft's multi-chain contract, so chain-prefixed tokens survive.
+    output_dir = os.path.join(work_dir, "outputs")
+    settings_path = write_bindcraft_settings(job_spec, target_pdb, output_dir)
+    try:
+        with open(settings_path) as fh:
+            diagnostics["bindcraft_settings"] = json.load(fh)
+    except (OSError, ValueError):
+        pass
+
+    advanced_path, advanced_report = _write_smoke_advanced(work_dir, job_spec)
+    diagnostics["advanced"] = advanced_report
+    filters_path, filter_report = _resolve_filter_set(job_spec)
+    diagnostics["filters"] = filter_report
+
+    # ----- Run BindCraft -----
+    cmd = [
+        sys.executable, "-u", BINDCRAFT_SCRIPT,
+        "--settings", settings_path,
+        "--filters", filters_path,
+        "--advanced", advanced_path,
+        "--no-pyrosetta",
+        "--no-plots",
+        "--no-animations",
+    ]
+    timeout_s = (SMOKE_SUBPROCESS_TIMEOUT_S if tier == "smoke"
+                 else MINI_PILOT_SUBPROCESS_TIMEOUT_S)
+
+    webhook_url = os.environ.get("WEBHOOK_URL", "")
+    job_id = os.environ.get("JOB_ID", "unknown")
+    run_status, run_detail = "ok", ""
+    try:
+        if webhook_url:
+            # Only when a webhook exists. A direct modal.Function caller has no
+            # URL, and an unguarded heartbeat thread would POST to "" every 60 s.
+            with _HeartbeatThread(
+                webhook_url, job_id, stage=f"BindCraft ({tier})",
+                designs_completed=0, designs_total=num_designs,
+                interval_seconds=60,
+            ):
+                run_command(cmd, timeout=timeout_s, cwd=BINDCRAFT_DIR)
+        else:
+            run_command(cmd, timeout=timeout_s, cwd=BINDCRAFT_DIR)
+    except subprocess.TimeoutExpired as exc:
+        run_status, run_detail = "timeout", f"exceeded {timeout_s}s: {exc}"
+        logger.error("BindCraft hit the %ss wall-clock cap; parsing partial output",
+                     timeout_s)
+    except RuntimeError as exc:
+        run_status, run_detail = "nonzero_exit", str(exc)
+        logger.error("BindCraft exited non-zero; parsing whatever it wrote: %s", exc)
+    diagnostics["bindcraft_run"] = {
+        "status": run_status, "timeout_s": timeout_s, "detail": run_detail[:2000],
+    }
+
+    # ----- Parse -----
+    # Reached on EVERY path above, including the timeout and the crash, because
+    # BindCraft writes Accepted/*.pdb incrementally: a run that died at minute
+    # 39 may still have banked a design, and throwing it away would mean paying
+    # for the GPU twice.
+    diagnostics["output_tree"] = _census_output_tree(output_dir)
+    parsed = parse_bindcraft_results(output_dir)
+
+    candidates = []
+    for candidate in parsed[:num_designs]:
+        entry = {
+            "rank": candidate["rank"],
+            "pdb_key": f"design_{candidate['rank']:03d}.pdb",
+            "scores": candidate["scores"],
+            "bindcraft_design_name": candidate["pdb_name"],
+        }
+        try:
+            entry["pdb_content_b64"] = base64.b64encode(
+                Path(candidate["pdb_path"]).read_bytes(),
+            ).decode("ascii")
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", candidate["pdb_path"], exc)
+        candidates.append(entry)
+
+    if not candidates:
+        diagnostics["best_effort_structure"] = _best_effort_structure(output_dir)
+        bucket = "output-parse" if run_status == "ok" else "tool-invocation"
+        return _finish("FAILED", accepted_count=0, error={
+            "bucket": bucket,
+            "check": "zero_accepted",
+            "detail": (
+                f"BindCraft accepted 0 designs (subprocess status={run_status}). "
+                f"Output tree: {diagnostics['output_tree']}. "
+                f"{run_detail[:600]}"
+            ),
+        })
+
+    logger.info("Smoke tier %s: %d accepted design(s)", tier, len(candidates))
+    return _finish(
+        "COMPLETED",
+        output={"candidates": candidates},
+        accepted_count=len(candidates),
+        partial=(run_status != "ok"),
+    )
+
+
+# ===========================================================================
 # Raw output capture
 # ===========================================================================
 
@@ -612,6 +1165,27 @@ def archive_work_dir(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
 
 def main():
     """Run the full pipeline: diagnostics -> download -> BindCraft -> upload -> webhook."""
+    # Modal reuses warm containers, and the wrapper reads SMOKE_RESULTS_PATH
+    # unconditionally — so a file left by a previous call in this container
+    # would be returned as THIS call's smoke_result. It clears the raw archive
+    # for exactly this reason but not this path. Two lines here close it for
+    # every tier without touching the wrapper.
+    _tier_at_boot = _payload_tier()
+    try:
+        os.remove(SMOKE_RESULTS_PATH)
+    except OSError:
+        pass
+    if _tier_at_boot in SMOKE_TIERS:
+        # Placeholder written BEFORE startup_check, which sys.exit(1)s on a
+        # missing GPU. Anything that kills the process from here on still
+        # leaves the caller a well-formed explanation instead of a None.
+        write_smoke_results(_smoke_failure(
+            "startup", "did_not_complete",
+            "run_pipeline.py exited before the smoke tier produced a result; "
+            "see the Modal function logs for the failing stage.",
+            _tier_at_boot,
+        ))
+
     startup_check()
 
     # Read configuration from environment
@@ -641,6 +1215,42 @@ def main():
         except Exception:
             pass
         sys.exit(1)
+
+    # ---- Smoke / mini_pilot tier: bypass webhook + upload entirely and write
+    #      /tmp/smoke_results.json, which the Modal wrapper returns inline as
+    #      ``smoke_result``. See docs/SMOKE-TEST-SPEC.md. ----
+    tier = job_payload.get("tier", "")
+    if tier in SMOKE_TIERS:
+        preflight(job_payload)
+        smoke_work_dir = tempfile.mkdtemp(prefix="bindcraft_smoke_")
+        try:
+            result = run_smoke_tier(
+                tier, smoke_work_dir,
+                job_spec_override=job_payload.get("job_spec") or {},
+                # Both spellings, caller's choice — see run_smoke_tier.
+                input_url=(job_payload.get("input_pdb_url")
+                           or job_payload.get("input_presigned_url") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 — the report is the deliverable
+            logger.exception("Smoke tier raised")
+            result = _smoke_failure(
+                "tool-invocation", "unhandled_exception",
+                f"{type(exc).__name__}: {exc}", tier)
+        finally:
+            # Archive before the rmtree, same contract as the legacy path: the
+            # tree of a run that accepted nothing is the tree you most need.
+            archive_work_dir(smoke_work_dir)
+            shutil.rmtree(smoke_work_dir, ignore_errors=True)
+
+        write_smoke_results(result)
+        logger.info(
+            "Smoke tier %s: status=%s accepted=%s gpu_seconds=%s",
+            tier, result.get("status"), result.get("accepted_count"),
+            result.get("gpu_seconds"),
+        )
+        if result.get("status") != "COMPLETED":
+            sys.exit(1)
+        return
 
     job_spec = job_payload["job_spec"]
     input_url = job_payload["input_presigned_url"]
