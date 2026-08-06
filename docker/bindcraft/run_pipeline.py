@@ -799,6 +799,85 @@ def _write_smoke_advanced(work_dir: str, job_spec: dict) -> tuple[str, dict]:
     return advanced_path, {"path": advanced_path, "applied": applied, "unknown": unknown}
 
 
+def _freebindcraft_version() -> dict:
+    """Record which FreeBindCraft the image actually contains.
+
+    Dockerfile.modal clones FreeBindCraft unpinned (``git clone --depth 1``),
+    so the upstream version moves whenever Modal's image cache misses and the
+    image is rebuilt — silently, and with no record of what changed. Stamping
+    the commit into every smoke result makes "the tool started behaving
+    differently" a diffable fact rather than a hypothesis. Best-effort: a
+    missing .git must never fail a run.
+    """
+    info: dict = {"dir": BINDCRAFT_DIR}
+    try:
+        proc = subprocess.run(
+            ["git", "-C", BINDCRAFT_DIR, "log", "-1", "--format=%H %cI"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode == 0:
+            info["commit"], _, info["committed_at"] = proc.stdout.strip().partition(" ")
+        else:
+            info["error"] = (proc.stderr or "").strip()[:200]
+    except (OSError, subprocess.SubprocessError) as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"
+    return info
+
+
+def _interface_census(pdb_path: str, cutoff: float = 5.0) -> dict:
+    """Is the returned complex actually in contact, or has the binder floated off?
+
+    Observed on the first real multi-chain smoke run and the reason this exists:
+    BindCraft picks which AF2 model to accept by highest binder pLDDT
+    (``bindcraft.py``, ``highest_plddt_key = max(plddt_values, ...)``). A
+    dissociated pose scores *higher* pLDDT than a bound one — nothing is
+    strained — so with no_filters the accepted structure was model2 at
+    10.2 A from the target, while model1 of the same sequence was bound at
+    1.7 A. The i_pTM (0.13 vs 0.17) and the empty InterfaceResidues column
+    both said so, but only in a CSV that dies with the container.
+
+    Production filters reject this outright, so the pilot path never had the
+    problem; the smoke tier disables filters on purpose and therefore has to
+    report the consequence itself. Best-effort — never raises.
+    """
+    try:
+        import numpy as np
+        by_chain: dict[str, list] = {}
+        with open(pdb_path) as fh:
+            for line in fh:
+                if line.startswith("ATOM"):
+                    by_chain.setdefault(line[21], []).append(
+                        (float(line[30:38]), float(line[38:46]), float(line[46:54])),
+                    )
+        if len(by_chain) < 2:
+            return {"chains": {c: len(v) for c, v in by_chain.items()},
+                    "note": "single chain; no interface to measure"}
+        coords = {c: np.asarray(v, dtype=np.float32) for c, v in by_chain.items()}
+        # ColabDesign merges every target chain into the first chain and appends
+        # the hallucinated binder, so the binder is the smallest chain. Chosen by
+        # size rather than by id so this holds however upstream labels them.
+        binder = min(coords, key=lambda c: len(coords[c]))
+        target = np.concatenate([v for c, v in coords.items() if c != binder])
+        best, pairs = float("inf"), 0
+        for i in range(0, len(target), 2048):
+            d = np.linalg.norm(
+                target[i:i + 2048, None, :] - coords[binder][None, :, :], axis=-1,
+            )
+            best = min(best, float(d.min()))
+            pairs += int((d < cutoff).sum())
+        return {
+            "chains": {c: len(v) for c, v in coords.items()},
+            "binder_chain": binder,
+            "binder_atoms": len(coords[binder]),
+            "min_distance_angstrom": round(best, 2),
+            "atom_pairs_within_cutoff": pairs,
+            "cutoff_angstrom": cutoff,
+            "in_contact": pairs > 0,
+        }
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not fail a run
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def _census_output_tree(output_dir: str) -> dict:
     """Count what BindCraft actually produced, per directory.
 
@@ -970,6 +1049,7 @@ def run_smoke_tier(
     params = job_spec["parameters"]
     num_designs = int(params.get("num_designs", 1))
     diagnostics["job_spec"] = job_spec
+    diagnostics["freebindcraft"] = _freebindcraft_version()
 
     # ----- Resolve the target -----
     # Both key spellings are accepted: rfdiffusion and pxdesign read
@@ -1057,6 +1137,10 @@ def run_smoke_tier(
             "pdb_key": f"design_{candidate['rank']:03d}.pdb",
             "scores": candidate["scores"],
             "bindcraft_design_name": candidate["pdb_name"],
+            # Whether this pose is actually touching the target. Only meaningful
+            # to state because smoke can run with filters off — see
+            # _interface_census.
+            "interface": _interface_census(candidate["pdb_path"]),
         }
         try:
             entry["pdb_content_b64"] = base64.b64encode(
