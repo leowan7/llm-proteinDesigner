@@ -21,9 +21,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned, not `latest`. The CLI version determines the local Postgres
+      # image and its default grants, so `latest` lets an upstream release
+      # change this job's database out from under it. See the e2e job below,
+      # where exactly that silently broke the seed step. Bump deliberately.
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.111.0
 
       - name: Start Supabase
         run: supabase start
@@ -41,6 +45,17 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      # gemmi is a CONTAINER dependency, not a backend runtime one, so it is
+      # deliberately absent from requirements.txt. But tests/pdb/ exercises the
+      # container-side CIF handling and guards those modules with
+      # `pytest.importorskip("gemmi")`. Without it installed here, those
+      # modules skip SILENTLY: the suite still reports green while ~39 tests
+      # never run, and because --cov=. counts the skipped test files' own
+      # statements in the denominator, it also drags total coverage under the
+      # 80% gate. Installed as a test-only dep so the tests actually execute.
+      - name: Install test-only dependencies
+        run: pip install gemmi
 
       - name: Run tests with coverage
         run: python -m pytest tests/ --ignore=tests/integration --cov=. --cov-fail-under=80 --cov-report=xml --cov-report=term-missing
@@ -111,12 +126,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned -- see the note in the backend-tests job. `latest` is what let
+      # the seed step below start 403-ing without a single repo change.
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.111.0
 
       - name: Start Supabase
         run: supabase start
+
+      # public.users is created by 20260318000000_init.sql, which grants nothing
+      # to service_role (only audit_log ever got an explicit grant). That used to
+      # be survivable because the local stack handed service_role table access by
+      # default; a newer CLI stopped doing so, the seed below began failing with
+      # 42501, and tos_version was never written -- so every app test drowned
+      # under the ReAcceptanceModal overlay.
+      #
+      # Granting here rather than in a migration is deliberate: production never
+      # needs it. The backend reaches Postgres directly through asyncpg and only
+      # uses the service_role key for GoTrue auth-admin calls, never PostgREST
+      # against public.users. This is test-fixture setup, so it belongs to the
+      # test fixture.
+      - name: Grant service_role access to public.users (E2E seed fixture)
+        run: |
+          set -euo pipefail
+          psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" \
+            -v ON_ERROR_STOP=1 \
+            -c "GRANT SELECT, INSERT, UPDATE ON public.users TO service_role;"
 
       - name: Capture local Supabase keys
         # `supabase status -o env` prints KEY=value lines; pipe to $GITHUB_ENV so
@@ -243,7 +279,25 @@ jobs:
               with urllib.request.urlopen(r) as resp:
                   print(f"upsert_users: HTTP {resp.status} {resp.read().decode()[:300]}")
           except urllib.error.HTTPError as e:
-              print(f"upsert_users: HTTP {e.code} {e.read().decode()[:300]}")
+              # Fail the job HERE. This used to print and carry on, so a broken
+              # fixture surfaced ~6 minutes later as three unrelated-looking
+              # Playwright click timeouts instead of one obvious seed error.
+              raise SystemExit(
+                  f"seed failed: upsert public.users -> HTTP {e.code} "
+                  f"{e.read().decode()[:300]}"
+              ) from e
+
+          # Read back rather than trusting the write: the modal is driven by
+          # tos_version specifically, and a silently-partial upsert would put us
+          # right back where we started.
+          code, body = req("GET", f"{base}/rest/v1/users?id=eq.{uid}&select=tos_version")
+          got = (body[0].get("tos_version") if isinstance(body, list) and body else None)
+          if got != tos:
+              raise SystemExit(
+                  f"seed verify failed: tos_version={got!r}, expected {tos!r}. "
+                  "The ReAcceptanceModal would block every app test."
+              )
+          print(f"seed verified: tos_version={got}")
           PY
         env:
           SUPABASE_URL: http://127.0.0.1:54321
@@ -272,7 +326,18 @@ jobs:
           python-version: "3.11"
 
       - name: Install ruff
-        run: pip install ruff
+        # PINNED. Unpinned, this job lints every PR with whatever ruff
+        # released most recently, so a ruff release turns previously-green
+        # code red with no commit having touched it. That is exactly what
+        # happened here: master last passed this job on 2026-07-17 with
+        # ruff 0.15.22, and by 2026-08-05 pip resolved 0.16.1, which reports
+        # 232 errors against that same unmodified master tree (new rules —
+        # UP007, UP035, SIM115, FLY002 — not new violations).
+        #
+        # Bumping is fine and probably overdue, but it is a deliberate act
+        # that owns the resulting cleanup, not something a PR should absorb
+        # by surprise. Raise this pin in its own change.
+        run: pip install ruff==0.15.22
 
       - name: Lint Python
         run: ruff check backend/
