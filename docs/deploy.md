@@ -64,15 +64,36 @@ staging follows the same steps against its own Railway service.
    ```
    openssl rand -hex 32
    ```
-2. In Railway -> kendrew-backend-prod -> Variables:
+2. In Railway -> project `bindwave` -> environment `production` -> service
+   `backend` -> Variables (staging is the same service under the `staging`
+   environment):
    - Set `WEBHOOK_HMAC_SECRET_PREV` equal to the CURRENT value of `WEBHOOK_HMAC_SECRET`.
    - Set `WEBHOOK_HMAC_SECRET` equal to the new value from step 1.
    - Save. Railway restarts the backend service automatically.
-3. Update Modal secret in both environments:
+3. Update the Modal secret in both environments:
    ```
-   modal secret create --env main kendrew-webhook WEBHOOK_SECRET=<new value>
-   modal deploy --env main infrastructure/modal/<each app>_app.py
+   modal secret create --force --env main    ranomics-webhook WEBHOOK_HMAC_SECRET=<new value>
+   modal secret create --force --env staging ranomics-webhook WEBHOOK_HMAC_SECRET=<new value>
+   modal deploy --env main    infrastructure/modal/rfdiffusion_app.py
+   modal deploy --env staging infrastructure/modal/rfdiffusion_app.py
    ```
+   Three details this command is easy to get wrong, each failing silently or late:
+   - The secret is named **`ranomics-webhook`**, not `kendrew-webhook` — it
+     predates the Ranomics -> Kendrew rename and
+     `infrastructure/modal/rfdiffusion_app.py` still looks it up under the old
+     name. Renaming it means changing that line first.
+   - The key inside it must be **`WEBHOOK_HMAC_SECRET`**. The container reads
+     `os.environ.get("WEBHOOK_HMAC_SECRET", "")`
+     (docker/rfdiffusion/run_pipeline.py). Any other key name reads empty, the
+     body goes out unsigned, and the backend 401s AFTER the GPU time is spent.
+   - `--force` is required. Without it `modal secret create` refuses to
+     overwrite an existing secret, which during a rotation is always the case.
+
+   Only `rfdiffusion_app.py` mounts this secret, so it is the only app that
+   needs redeploying. NOTE: the other four tools call `post_webhook` too but
+   reference `WEBHOOK_HMAC_SECRET` nowhere and declare no Modal secrets, so
+   their completions are posted unsigned. That asymmetry is not intentional as
+   far as this runbook knows; it wants resolving separately.
 4. Wait 60 minutes AND observe Sentry for "Webhook signed with PREV secret" warnings.
    - Warnings expected: in-flight jobs using pre-rotation secret. Count should drop to 0 within 60 min.
    - If warnings persist past 60 min: some Modal function has not restarted with the new secret. Force redeploy that app.
@@ -99,11 +120,12 @@ bash scripts/rollback_drill.sh              # interactive - will prompt before d
 
 Manual steps (what the script does):
 1. Identify current prod deploy SHAs:
-   - `railway deployments --service kendrew-backend-prod --limit 2`
+   - `railway deployments --service backend --limit 2`
    - `vercel ls kendrew --limit 2`
 2. Railway rollback:
-   - Railway dashboard -> kendrew-backend-prod -> Deployments -> previous deploy -> "Redeploy"
-   - OR CLI: `railway rollback --service kendrew-backend-prod`
+   - Railway dashboard -> project `bindwave` -> environment `production` ->
+     service `backend` -> Deployments -> previous deploy -> "Redeploy"
+   - OR CLI: `railway rollback --service backend`
 3. Vercel rollback:
    - Vercel dashboard -> kendrew project -> Deployments -> previous deploy -> three dots -> "Promote to Production"
    - OR CLI: `vercel rollback https://bindwave.com`
@@ -174,7 +196,7 @@ post-Phase-11 sweep:
 1. PR opened targeting `main`. GitHub Actions `test.yml` runs 4 gates (backend, frontend, E2E, lint+typecheck+coverage) plus a frontend-bundle secret-leak grep (Phase 11 SC 7). Branch protection blocks merge on any failure.
 2. PR touching `infrastructure/modal/**`, `docker/**`, or `backend/pipelines/**` also triggers `deploy-modal.yml` against Modal `staging` env.
 3. On merge to `main`:
-   - Railway auto-deploys kendrew-backend-prod + kendrew-worker-prod. `railway.toml` runs `supabase db push` as preDeployCommand; failure aborts the deploy.
+   - Railway auto-deploys the `backend` + `worker` services in project `bindwave`. `railway.toml` runs `supabase db push` as preDeployCommand; failure aborts the deploy.
    - Vercel auto-deploys the frontend to https://bindwave.com.
    - `deploy-modal.yml` deploys all 5 Modal apps to `main` env (if PR touched Modal paths).
    - `smoke.yml` runs after deploy completes (informational - D-08). Failures post to Sentry + #kendrew-alerts. Human decides rollback.

@@ -157,10 +157,18 @@ def _park_raw_archive(job_id: str) -> dict:
     # Inject WEBHOOK_HMAC_SECRET so run_pipeline.py:post_webhook can sign
     # completion notifications. Without this, the backend's
     # validate_webhook_signature returns 401 and the completion never lands
-    # (discovered live during 2026-06-03 Phase 11 SC 6 close-out). The
-    # Modal Secret 'ranomics-webhook' must hold the same value as Railway's
-    # WEBHOOK_HMAC_SECRET env var (PROVISIONING.md "Locally-generated
-    # secrets" section).
+    # (discovered live during 2026-06-03 Phase 11 SC 6 close-out).
+    #
+    # The Modal Secret is named 'ranomics-webhook' -- it predates the
+    # Ranomics -> Kendrew rename; renaming it means changing this line first.
+    # The KEY inside it must be WEBHOOK_HMAC_SECRET, because that is what
+    # run_pipeline.py reads, and it must hold the same value as the Railway
+    # `backend` service's WEBHOOK_HMAC_SECRET variable (project `bindwave`,
+    # per environment). Rotation procedure: docs/deploy.md "Secret Rotation
+    # Runbook". Provisioned values live in
+    # .planning/phases/11-deployment/11-02-PROVISIONING.md, which is
+    # gitignored (it holds real secrets) -- so it exists only on the machine
+    # that did the provisioning, not in a clone.
     secrets=[modal.Secret.from_name("ranomics-webhook")],
 )
 def run_tool(payload: dict) -> dict:
