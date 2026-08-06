@@ -7,7 +7,7 @@ Covers:
 Implementation target: Plan 03-03.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 

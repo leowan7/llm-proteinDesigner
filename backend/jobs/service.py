@@ -14,10 +14,9 @@ import json
 import logging
 
 import asyncpg
-from fastapi import HTTPException
-
 from billing.stripe_client import record_gpu_usage
 from config import settings
+from fastapi import HTTPException
 from gpu import endpoint_for_tool, get_provider
 
 # Legacy tool→RunPod image map. Retained for backward compatibility with admin
@@ -87,7 +86,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # Calculate partial GPU seconds from started_at.
     gpu_seconds = 0
     if row["started_at"]:
-        elapsed = datetime.datetime.now(datetime.timezone.utc) - row["started_at"]
+        elapsed = datetime.datetime.now(datetime.UTC) - row["started_at"]
         gpu_seconds = int(elapsed.total_seconds())
 
     gpu_cost_usd = round(

@@ -14,7 +14,6 @@ retries them.
 import logging
 
 import sentry_sdk
-
 from db.connection import get_db_pool
 from user.deletion import GRACE_PERIOD_DAYS, execute_hard_delete
 

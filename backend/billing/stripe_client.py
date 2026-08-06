@@ -12,9 +12,8 @@ Key design decisions:
   which is set when a customer completes a Checkout setup session.
 """
 
-import stripe
 import asyncpg
-
+import stripe
 from config import settings
 
 # Configure stripe at module import using the settings value.

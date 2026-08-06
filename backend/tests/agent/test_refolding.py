@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -65,8 +64,8 @@ def _make_mock_pool(job_row, execute_raises=False):
 @pytest.mark.asyncio
 async def test_submit_refolding_job_creates_draft_job():
     """handle_submit_refolding_job creates a job row with status 'draft'."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)
@@ -105,8 +104,8 @@ async def test_submit_refolding_job_creates_draft_job():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_uses_boltzgen_tool():
     """handle_submit_refolding_job defaults to boltzgen refolding tool."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)
@@ -156,8 +155,8 @@ async def test_submit_refolding_job_uses_boltzgen_tool():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_fetches_target_pdb_from_parent_spec():
     """handle_submit_refolding_job uses the target PDB accession from parent job_spec."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)
@@ -202,8 +201,8 @@ async def test_submit_refolding_job_fetches_target_pdb_from_parent_spec():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_error_if_rank_not_in_cache():
     """handle_submit_refolding_job returns error if candidate rank not found in cache."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)  # ranks 1-5
@@ -234,8 +233,8 @@ async def test_submit_refolding_job_error_if_rank_not_in_cache():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_error_if_parent_not_found():
     """handle_submit_refolding_job returns error if parent job not found or not owned by user."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)
@@ -262,8 +261,8 @@ async def test_submit_refolding_job_error_if_parent_not_found():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_spec_contains_binder_pdb_key():
     """handle_submit_refolding_job job_spec contains binder_pdb_key from candidate."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)
@@ -308,8 +307,8 @@ async def test_submit_refolding_job_spec_contains_binder_pdb_key():
 @pytest.mark.asyncio
 async def test_submit_refolding_job_invalid_tool_rejected():
     """handle_submit_refolding_job rejects unknown refolding tools."""
+    from agent.analysis.cache import clear_cache, set_cached
     from agent.analysis.refolding import handle_submit_refolding_job
-    from agent.analysis.cache import set_cached, clear_cache
 
     clear_cache()
     set_cached(FAKE_PARENT_JOB_ID, FAKE_CANDIDATES)

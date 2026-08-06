@@ -34,10 +34,8 @@ from typing import Any
 
 import httpx
 import jwt
-from jwt.algorithms import ECAlgorithm
-
 from config import settings
-
+from jwt.algorithms import ECAlgorithm
 
 logger = logging.getLogger(__name__)
 

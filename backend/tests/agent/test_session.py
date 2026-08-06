@@ -2,7 +2,6 @@
 import json
 
 import pytest
-
 from agent.session import SessionManager
 
 

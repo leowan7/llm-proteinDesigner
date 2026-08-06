@@ -22,7 +22,7 @@ the calling tool — never accepts raw user input (T-08-04).
 
 import logging
 
-from Bio.PDB import PDBParser, NeighborSearch
+from Bio.PDB import NeighborSearch, PDBParser
 from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.SASA import ShrakeRupley
 

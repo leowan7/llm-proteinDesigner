@@ -12,24 +12,25 @@ Covers:
 - execute_hard_delete — race guard aborts when deletion_requested_at is NULL (T-10.04-04)
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 
 USER_ID = "test-user-uuid"
-NOW = datetime.datetime(2026, 4, 23, 12, 0, 0, tzinfo=datetime.timezone.utc)
+NOW = datetime.datetime(2026, 4, 23, 12, 0, 0, tzinfo=datetime.UTC)
 
 
 async def _mock_user():

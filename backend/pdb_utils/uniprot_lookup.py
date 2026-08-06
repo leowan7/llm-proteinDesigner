@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
-
 
 # AlphaFold-DB REST endpoint that returns the latest model URL for a
 # given UniProt accession. We hit ``/api/prediction/{accession}`` and
@@ -42,8 +40,8 @@ class ChainUniProtMap:
     pdb_res_begin: int
     pdb_res_end: int
     uniprot_accession: str
-    uniprot_res_begin: Optional[int] = None
-    uniprot_res_end: Optional[int] = None
+    uniprot_res_begin: int | None = None
+    uniprot_res_end: int | None = None
 
 
 def extract_uniprot_map(data: bytes) -> dict[str, ChainUniProtMap]:
@@ -90,8 +88,8 @@ def extract_uniprot_map(data: bytes) -> dict[str, ChainUniProtMap]:
         except (ValueError, IndexError):
             continue
         # UniProt residue range is optional in our reader.
-        uni_begin: Optional[int] = None
-        uni_end: Optional[int] = None
+        uni_begin: int | None = None
+        uni_end: int | None = None
         try:
             uni_begin = int(line[55:60].strip())
             uni_end = int(line[62:67].strip())
@@ -112,7 +110,7 @@ def extract_uniprot_map(data: bytes) -> dict[str, ChainUniProtMap]:
     return out
 
 
-def lookup_uniprot_for_chain(data: bytes, target_chain: str) -> Optional[str]:
+def lookup_uniprot_for_chain(data: bytes, target_chain: str) -> str | None:
     """Convenience: return the UniProt accession for the named chain, or None."""
     m = extract_uniprot_map(data)
     rec = m.get(target_chain)

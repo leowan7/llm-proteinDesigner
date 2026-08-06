@@ -2,9 +2,7 @@
 import httpx
 import pytest
 import respx
-
-from pdb_utils.fetch import fetch_pdb_file, search_uniprot, resolve_pdb_for_uniprot
-
+from pdb_utils.fetch import fetch_pdb_file, resolve_pdb_for_uniprot, search_uniprot
 
 # ---------------------------------------------------------------------------
 # Fake response payloads (shaped from real API responses per RESEARCH.md)

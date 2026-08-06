@@ -13,7 +13,6 @@ import zipfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from auth.dependencies import get_current_user
 from main import app
 
@@ -69,7 +68,7 @@ class TestResultDownload:
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
                 patch("jobs.router.get_s3_client", return_value=s3_mock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.get(
@@ -100,7 +99,7 @@ class TestResultDownload:
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
                 patch("jobs.router.get_s3_client", return_value=s3_mock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.get(
@@ -131,7 +130,7 @@ class TestResultDownload:
                 patch("jobs.router.get_db_pool", return_value=pool_mock),
                 patch("jobs.router.get_s3_client", return_value=s3_mock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.get(

@@ -44,7 +44,6 @@ import datetime
 import logging
 
 import sentry_sdk
-
 from db.connection import get_db_pool
 from jobs.notifications import send_retention_warning_email
 from storage.client import delete_job_objects

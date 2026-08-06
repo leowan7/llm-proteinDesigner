@@ -8,7 +8,6 @@ All functions accept an httpx.AsyncClient instance so callers can share
 a single connection pool (e.g., in FastAPI endpoint handlers).
 """
 import httpx
-
 from config import settings
 
 

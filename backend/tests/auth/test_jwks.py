@@ -36,12 +36,10 @@ import httpx
 import jwt
 import pytest
 import respx
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization
-from jwt.algorithms import ECAlgorithm
-
 from auth.jwks import SupabaseJWKSVerifier
-
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from jwt.algorithms import ECAlgorithm
 
 # ---------------------------------------------------------------------------
 # Test constants

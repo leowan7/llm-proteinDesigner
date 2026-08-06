@@ -12,7 +12,6 @@ Mitigation: statement_cache_size=0 + max_inactive_connection_lifetime=0.
 import asyncpg
 from config import settings
 
-
 _pool: asyncpg.Pool | None = None
 
 

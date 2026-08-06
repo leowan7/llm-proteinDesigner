@@ -16,11 +16,11 @@ Endpoints:
 import asyncio
 
 import anthropic
+from auth.dependencies import get_current_user
+from config import settings
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
-from auth.dependencies import get_current_user
-from config import settings
 from sessions.queries import (
     create_session,
     delete_session,

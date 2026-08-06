@@ -16,11 +16,11 @@ import datetime
 import logging
 
 import sentry_sdk
-
 from config import settings
 from db.connection import get_db_pool
 from gpu import get_provider
 from jobs.notifications import send_failure_email
+
 from worker.tasks import publish_status
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ LIFETIME_HEADROOM_SECONDS = 3600  # 1 hr slack on top of the declared budget
 # Legacy constant — retained as the SAFETY FLOOR for jobs missing a
 # total_budget_hours column (older rows before the migration). Any job older
 # than this without a declared budget is still considered orphaned.
-MAX_POD_LIFETIME_SECONDS = 7200  # noqa: F841  -- retained for compat
+MAX_POD_LIFETIME_SECONDS = 7200
 
 # Jobs with no heartbeat for this duration (seconds) are considered stale.
 #
@@ -136,7 +136,7 @@ async def cleanup_orphan_pods(ctx: dict | None = None) -> int:
 
         elif row and row["started_at"]:
             import datetime
-            elapsed = datetime.datetime.now(datetime.timezone.utc) - row["started_at"]
+            elapsed = datetime.datetime.now(datetime.UTC) - row["started_at"]
             budget_seconds = _effective_lifetime_seconds(row["total_budget_hours"])
             if elapsed.total_seconds() > budget_seconds:
                 should_terminate = True

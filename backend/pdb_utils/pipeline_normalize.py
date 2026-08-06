@@ -29,16 +29,32 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Union
+from typing import Union
 
-from Bio.PDB import PDBParser, MMCIFParser, PDBIO, Select
-
+from Bio.PDB import PDBIO, MMCIFParser, PDBParser, Select
 
 # A target-chain selector: ``None`` (keep every protein chain), a single
 # chain id ``"A"``, a comma string ``"A,B"``, or an explicit sequence
 # ``["A", "B"]``.
-TargetChainSpec = Union[str, Sequence[str], None]
+#
+# Deliberately NOT rewritten to ``str | Sequence[str] | None``. This is a
+# module-level assignment, so it is evaluated at RUNTIME -- the
+# ``from __future__ import annotations`` above defers annotations, not this --
+# and PEP 604 at runtime needs >= 3.10.
+#
+# This module is imported by four container entrypoints (boltzgen, pxdesign,
+# rfantibody, rfdiffusion), and Modal builds those images with
+# ``add_python=None``, so each runs its OWN interpreter rather than one Modal
+# injects. Three are known good: boltzgen installs 3.11 explicitly, pxdesign
+# and rfantibody are ubuntu22.04 (3.10). The fourth, rfdiffusion, is
+# ``runpod/base:0.6.2-cuda11.8.0``, whose Python is not pinned anywhere in
+# this repo. ruff's target-version describes the backend, not these images.
+#
+# The rewrite is cosmetic and the downside is an ImportError inside a paid GPU
+# run. Left on Union until that last image's interpreter is actually pinned.
+TargetChainSpec = Union[str, Sequence[str], None]  # noqa: UP007
 
 
 # -- Constants ----------------------------------------------------------------
@@ -206,7 +222,7 @@ def _pick_altloc_per_residue(residue) -> tuple[dict, int]:
 
 # -- Target-chain parsing -----------------------------------------------------
 
-def parse_target_chains(target_chain: TargetChainSpec) -> Optional[list]:
+def parse_target_chains(target_chain: TargetChainSpec) -> list | None:
     """Normalize a target-chain selector into an ordered list of chain ids.
 
     Accepts the historical scalar form (``"A"``), the multi-chain comma
@@ -335,11 +351,11 @@ def group_hotspots_by_chain(raw_hotspots, target_chains: Sequence[str]) -> dict:
 
 def normalize_for_pipeline(
     input_path: str,
-    output_path: Optional[str] = None,
+    output_path: str | None = None,
     *,
     target_chain: TargetChainSpec = None,
     keep_hetatm: bool = False,
-    hetatm_whitelist: Optional[set] = None,
+    hetatm_whitelist: set | None = None,
     keep_waters: bool = False,
     keep_hydrogens: bool = False,
     drop_zero_backbone: bool = True,
@@ -682,7 +698,7 @@ def _blank_altloc_column(path: str) -> None:
 # -- Per-tool presets ---------------------------------------------------------
 
 def normalize_for_pxdesign(
-    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
+    input_path: str, output_path: str | None, *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
     """pxdesign preset: strip everything non-polymer, renumber 1..N per chain.
 
@@ -702,7 +718,7 @@ def normalize_for_pxdesign(
 
 
 def normalize_for_boltzgen(
-    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
+    input_path: str, output_path: str | None, *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
     """boltzgen preset: same as pxdesign — renumbered 1..N per chain.
 
@@ -720,7 +736,7 @@ def normalize_for_boltzgen(
 
 
 def normalize_for_rfdiffusion(
-    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
+    input_path: str, output_path: str | None, *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
     """rfdiffusion preset: keep target chain(s) only, preserve numbering.
 
@@ -742,7 +758,7 @@ def normalize_for_rfdiffusion(
 
 
 def normalize_for_rfantibody(
-    input_path: str, output_path: Optional[str], *, target_chain: TargetChainSpec
+    input_path: str, output_path: str | None, *, target_chain: TargetChainSpec
 ) -> PipelineNormalizationReport:
     """rfantibody preset: keep antigen chain(s) only, preserve numbering.
 
@@ -765,7 +781,7 @@ def normalize_for_rfantibody(
 
 
 def normalize_for_bindcraft(
-    input_path: str, output_path: Optional[str], *, target_chain: str
+    input_path: str, output_path: str | None, *, target_chain: str
 ) -> PipelineNormalizationReport:
     """bindcraft preset: keep target chain only, preserve numbering.
 

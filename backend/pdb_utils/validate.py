@@ -10,12 +10,12 @@ run_preflight_checks_async is provided for use inside FastAPI endpoints.
 """
 import asyncio
 
+from agent.jobspec import ValidationResult
 from Bio.PDB import PDBParser
-from Bio.PDB.SASA import ShrakeRupley
 from Bio.PDB.Polypeptide import is_aa
+from Bio.PDB.SASA import ShrakeRupley
 
 from pdb_utils.models import HotspotCheck, StructureSummary
-from agent.jobspec import ValidationResult
 
 
 def _clean_structure_for_sasa(structure):

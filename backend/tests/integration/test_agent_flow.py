@@ -14,6 +14,7 @@ The agent conversation flow under test:
 Tests parse the SSE response line-by-line to assert the correct event sequence.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import json
@@ -21,13 +22,13 @@ import socket
 from unittest.mock import MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 # ---------------------------------------------------------------------------

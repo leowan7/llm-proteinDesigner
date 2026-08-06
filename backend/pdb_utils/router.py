@@ -14,13 +14,13 @@ import os
 import tempfile
 
 import httpx
+from auth.dependencies import get_current_user
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from auth.dependencies import get_current_user
 from pdb_utils.fetch import fetch_pdb_file, resolve_pdb_for_uniprot, search_uniprot
-from pdb_utils.normalize import normalize_structure
 from pdb_utils.metadata import extract_structure_metadata
+from pdb_utils.normalize import normalize_structure
 
 router = APIRouter(prefix="/pdb", tags=["pdb"])
 

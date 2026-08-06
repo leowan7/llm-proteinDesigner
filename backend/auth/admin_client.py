@@ -10,9 +10,9 @@ from within the daily ``worker/deletion_cron.py`` cron. No request path
 should ever reach this module directly.
 """
 
-from supabase import create_client, Client
-
 from config import settings
+
+from supabase import Client, create_client
 
 
 def get_admin_supabase() -> Client:

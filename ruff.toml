@@ -1,0 +1,40 @@
+# Ruff configuration.
+#
+# WHY THIS FILE EXISTS: CI previously ran an unpinned `pip install ruff` against
+# no config at all, so the active rule set was whatever that ruff release
+# happened to default to. Ruff 0.16 widened those defaults and the Lint job went
+# red on 2026-07-17 with ZERO code changes -- ruff 0.15.22 reports "All checks
+# passed" on the exact commit that 0.16.1 reports 232 errors on. Declaring the
+# rule set here, and pinning the version in test.yml, makes lint scope a
+# decision this repo makes rather than one a release note makes for it.
+
+target-version = "py311"
+
+[lint]
+select = [
+    "E4", "E7", "E9",  # pycodestyle: the subset ruff shipped as default pre-0.16
+    "F",               # pyflakes
+    "I",               # isort -- import ordering, fully autofixable
+    "UP",              # pyupgrade -- modern syntax for the pinned target-version
+    "RUF100",          # flag noqa comments that no longer suppress anything
+]
+
+ignore = [
+    # UP042 wants `class JobStatus(str, Enum)` -> `class JobStatus(StrEnum)` in
+    # jobs/models.py. That is not a formatting change: StrEnum alters __str__
+    # and __format__, so members that currently render as "JobStatus.RUNNING"
+    # would start rendering as "running". JobStatus and JobStage are serialized
+    # into API responses, persisted job rows and outbound webhooks, so the
+    # rename is only safe after auditing every consumer -- out of scope for a
+    # commit whose entire purpose is that lint stops lying.
+    "UP042",
+]
+
+# Deliberately NOT selected: BLE001, S110/S112, SIM1xx, ASYNC230, RUF012,
+# RUF059, B008, B018, PYI063, RUF007, RUF013, TRY203. Ruff 0.16 raises 79 of
+# these across backend/, and they are judgment calls about error handling and
+# control flow rather than formatting -- several are deliberate (e.g. the
+# best-effort `except Exception` in the raw-capture path, documented as such at
+# its definition). Silencing them wholesale would be dishonest, and fixing them
+# blind would be a behavior-changing refactor smuggled into a lint commit. Left
+# for a follow-up that can weigh each on its merits.

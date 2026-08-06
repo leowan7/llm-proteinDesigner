@@ -11,15 +11,14 @@ storage.client.generate_presigned_get_url, and redis.asyncio at the
 worker.tasks module import level.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-
 # Import the functions under test AFTER setting TESTING env
 from worker.tasks import publish_status
-
 
 # ---------------------------------------------------------------------------
 # Helpers

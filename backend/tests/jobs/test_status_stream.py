@@ -12,7 +12,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from auth.dependencies import get_current_user
 from main import app
 
@@ -52,7 +51,7 @@ class TestStatusPublish:
         """Verify GET /jobs/{job_id}/status returns text/event-stream with
         SSE-formatted data containing JobStatusEvent JSON.
         """
-        from httpx import AsyncClient, ASGITransport
+        from httpx import ASGITransport, AsyncClient
 
         # Mock DB pool returning a running job
         mock_conn = AsyncMock()

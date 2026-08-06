@@ -26,11 +26,10 @@ import json
 import logging
 
 import sentry_sdk
-from fastapi import APIRouter, HTTPException, Request
-
 from billing.stripe_client import record_gpu_usage
 from config import settings
 from db.connection import get_db_pool
+from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
 from worker.tasks import publish_status, update_job_status
@@ -162,7 +161,7 @@ async def runpod_webhook(request: Request):
     if payload_timestamp:
         try:
             sent_at = datetime.datetime.fromisoformat(payload_timestamp)
-            age = datetime.datetime.now(datetime.timezone.utc) - sent_at
+            age = datetime.datetime.now(datetime.UTC) - sent_at
             if age.total_seconds() > 300:  # 5 minutes
                 logger.warning("Rejected stale webhook: job_id=%s age=%.0fs", job_id, age.total_seconds())
                 return {"received": True}
@@ -210,7 +209,7 @@ async def runpod_webhook(request: Request):
     # Calculate GPU seconds consumed since the job started running.
     gpu_seconds = 0
     if row["started_at"]:
-        elapsed = datetime.datetime.now(datetime.timezone.utc) - row["started_at"]
+        elapsed = datetime.datetime.now(datetime.UTC) - row["started_at"]
         gpu_seconds = int(elapsed.total_seconds())
 
     gpu_cost_usd = round(

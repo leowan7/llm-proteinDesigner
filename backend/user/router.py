@@ -16,15 +16,18 @@ import datetime
 import json
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from pydantic import BaseModel
-
 from auth.dependencies import get_current_user
 from config import settings
 from db.connection import get_db_pool
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from jobs.notifications import send_deletion_scheduled_email
-from middleware.rate_limit import limiter, get_rate_limit_key  # T-10.04-06: slowapi limiter
+from middleware.rate_limit import (  # T-10.04-06: slowapi limiter
+    get_rate_limit_key,
+    limiter,
+)
+from pydantic import BaseModel
 from storage.client import generate_presigned_get_url
+
 from user.export import EXPORT_URL_TTL_SECONDS, build_and_deliver_export
 
 router = APIRouter(prefix="/user", tags=["user"])
@@ -379,7 +382,7 @@ async def get_data_export_status(user_id: str = Depends(get_current_user)):
         )
     if row["last_export_requested_at"] is None:
         return {"status": "none"}
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     if row["last_export_expires_at"] and row["last_export_expires_at"] > now:
         # CR-02: re-presign on each authenticated GET — never read URL from DB.
         remaining = int((row["last_export_expires_at"] - now).total_seconds())

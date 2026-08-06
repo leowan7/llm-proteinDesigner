@@ -15,16 +15,16 @@ Security (T-08-07, T-08-08):
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
+from config import settings
 from fpdf import FPDF
+from storage.client import generate_presigned_get_url, get_s3_client
 
 from agent.analysis.cache import get_cached
 from agent.analysis.ranking import compute_distribution_stats
 from agent.analysis.tools import handle_flag_red_flags
-from config import settings
-from storage.client import generate_presigned_get_url, get_s3_client
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +251,7 @@ def generate_pdf_report(
             "Trim your shortlist and try again."
         )
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     pdf = KendrewReport(job_id=job_id, tool=tool)
     pdf.add_page()
 
@@ -427,7 +427,7 @@ def generate_markdown_report(
     Returns:
         Markdown string.
     """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
     lines: list[str] = []
 
     lines.append("# Kendrew Design Analysis Report")

@@ -13,20 +13,21 @@ Uses FastAPI dependency_overrides to bypass get_current_admin auth.
 Patches get_db_pool at the router level so no real DB is required.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
-
 from admin.dependencies import get_current_admin
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting for all admin router tests — the slowapi middleware
 # connects to Redis on every request; there is no Redis in the test environment.
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def admin_client():
 
 async def test_list_users(admin_client):
     """GET /admin/users returns 200 with 'users' list and 'has_more' flag."""
-    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     user_rows = [
         {
             "id": "uid-1",
@@ -165,7 +166,7 @@ async def test_list_users_email_filter(admin_client):
 
 async def test_list_jobs(admin_client):
     """GET /admin/jobs returns 200 with 'jobs' key."""
-    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     job_rows = [
         {
             "id": "job-1",
@@ -342,7 +343,7 @@ async def test_get_system_health(admin_client):
 
 async def test_get_audit_log(admin_client):
     """GET /admin/audit returns 200 with 'entries' key."""
-    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    now = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
     audit_rows = [
         {
             "id": "aud-1",

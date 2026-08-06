@@ -9,6 +9,7 @@ BindCraft may return zero passing candidates — this is expected behavior, not 
 """
 
 from jobs.models import CandidateResult
+
 from pipelines.base import ToolPipeline, merge_pilot_params
 
 

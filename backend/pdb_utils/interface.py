@@ -9,7 +9,7 @@ Uses Biopython's NeighborSearch for efficient spatial queries.
 
 from dataclasses import dataclass
 
-from Bio.PDB import PDBParser, NeighborSearch
+from Bio.PDB import NeighborSearch, PDBParser
 from Bio.PDB.Polypeptide import is_aa
 
 

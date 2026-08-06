@@ -18,12 +18,11 @@ Usage:
 """
 
 import jwt
+from config import settings
 from fastapi import Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-
-from config import settings
 
 
 def get_rate_limit_key(request: Request) -> str:

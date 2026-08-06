@@ -13,7 +13,6 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from auth.dependencies import get_current_user
 from main import app
 
@@ -85,7 +84,7 @@ class TestJobCancellation:
     @pytest.mark.anyio
     async def test_cancel_updates_db_status(self):
         """Verify that cancelling a job sets status='cancelled' in the jobs table."""
-        started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=30)
+        started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=30)
         job_row = {
             "runpod_job_id": "rp-job-001",
             "job_spec": json.dumps({"tool": "bindcraft"}),
@@ -106,7 +105,7 @@ class TestJobCancellation:
                 patch("worker.tasks.update_job_status", new_callable=AsyncMock),
                 patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(
@@ -123,7 +122,7 @@ class TestJobCancellation:
     @pytest.mark.anyio
     async def test_cancel_calls_provider_cancel(self):
         """Verify provider.cancel_job is called with the job's runpod_job_id."""
-        started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)
+        started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
         job_row = {
             "runpod_job_id": "rp-job-xyz",
             "job_spec": json.dumps({"tool": "bindcraft"}),
@@ -144,7 +143,7 @@ class TestJobCancellation:
                 patch("worker.tasks.update_job_status", new_callable=AsyncMock),
                 patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     await client.post(
@@ -164,7 +163,7 @@ class TestJobCancellation:
         """Verify record_gpu_usage is called with (customer_id, job_id, gpu_seconds)
         for the partial GPU time consumed before cancellation.
         """
-        started_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=120)
+        started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=120)
         job_row = {
             "runpod_job_id": "rp-job-partial",
             "job_spec": json.dumps({"tool": "bindcraft"}),
@@ -186,7 +185,7 @@ class TestJobCancellation:
                 patch("worker.tasks.update_job_status", new_callable=AsyncMock),
                 patch("worker.tasks.publish_status", new_callable=AsyncMock),
             ):
-                from httpx import AsyncClient, ASGITransport
+                from httpx import ASGITransport, AsyncClient
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
                     response = await client.post(

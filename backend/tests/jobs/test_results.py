@@ -10,7 +10,6 @@ Implementation target: Plan 03-03.
 import json
 
 
-
 class TestJobResults:
     """RESULT-03: Results include next_steps guidance and zero-output detection."""
 

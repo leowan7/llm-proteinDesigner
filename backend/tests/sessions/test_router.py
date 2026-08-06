@@ -13,19 +13,20 @@ the sessions.queries functions since sessions router delegates to those function
 rather than using get_db_pool directly.
 """
 import os
+
 os.environ.setdefault("TESTING", "true")
 
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import AsyncClient, ASGITransport
-
 from auth.dependencies import get_current_user
+from httpx import ASGITransport, AsyncClient
 from main import app
 
 # Disable rate limiting — no Redis in test environment
 from middleware.rate_limit import limiter as _limiter
+
 _limiter.enabled = False
 
 # ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ _limiter.enabled = False
 
 USER_ID = "test-user-uuid"
 SESSION_ID = "sess-1111-2222-3333"
-NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
 
 
 # ---------------------------------------------------------------------------

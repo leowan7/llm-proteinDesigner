@@ -15,6 +15,7 @@ config change.
 """
 
 from config import settings
+
 from gpu.provider import GPUJobStatus, GPUJobSubmission, GPUProvider
 
 __all__ = ["GPUProvider", "GPUJobSubmission", "GPUJobStatus", "get_provider"]

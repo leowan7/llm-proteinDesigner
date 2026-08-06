@@ -9,6 +9,7 @@ Expected runtime: 10-30 minutes per batch on A100 80GB.
 
 from jobs.models import CandidateResult
 from pdb_utils.pipeline_normalize import parse_hotspots, parse_target_chains
+
 from pipelines.base import ToolPipeline, merge_pilot_params
 
 

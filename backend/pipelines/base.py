@@ -15,7 +15,6 @@ from abc import ABC, abstractmethod
 
 from jobs.models import CandidateResult
 
-
 # ---- Pilot-tier default pricing ---------------------------------------------
 #
 # These are cheap, fast runs chosen to prove a tool's infra + the user's target
