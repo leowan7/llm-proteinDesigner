@@ -4,6 +4,22 @@
 
 You are one of four agents (RFdiffusion, RFantibody, BoltzGen, or PXDesign) assigned to fix your tool's Modal pipeline. BindCraft already works on Modal. Your tool does not. Every run produces a different error.
 
+> **Correction, 2026-08-06.** "BindCraft already works" was true of its
+> *webhook* path and only that. Because BindCraft was the reference the four
+> agents copied, it was never itself in scope here — so it received the uniform
+> wrapper-side reader (`infrastructure/modal/bindcraft_app.py` opens
+> `/tmp/smoke_results.json` and returns it as `smoke_result`) and never
+> received the pipeline-side writer. `smoke` and `mini_pilot` appeared zero
+> times in `docker/bindcraft/run_pipeline.py`, so `smoke_result` was `None` on
+> every tier and a caller invoking the Modal function directly got nothing
+> back. Fixed on `feat/bindcraft-smoke-tier`; BindCraft now implements Layer 2
+> and Layer 3 below like the other four. Two BindCraft-specific deviations are
+> documented there: it bakes no `/opt/smoke_target.pdb` fixture, so a
+> caller-supplied `input_pdb_url` / `input_presigned_url` is mandatory rather
+> than optional; and it has no stage to stub, so its tiers differ by cost
+> bounds (`max_trajectories`, a wall-clock cap, and the filter set) instead of
+> by a `skip_af2` flag.
+
 Your job: add fail-fast checks at three layers and iterate until your tool returns two real binders in mini-pilot mode.
 
 This file is the **contract** every agent follows. Read it end-to-end before editing.
