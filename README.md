@@ -45,11 +45,17 @@ contracts/             Vendored RPC contract (see above)
 
 ## Deploy
 
-Modal deploys are CI-driven. Pushes to `main` that touch
+Modal deploys are CI-driven. Pushes to the trunk branch `master` that touch
 `infrastructure/modal/**`, `docker/**`, `backend/pipelines/**`, or the
 deploy workflow itself trigger `.github/workflows/deploy-modal.yml`,
 which deploys all five apps to the `main` Modal environment in a
 matrix job.
+
+Note the two senses of "main": the git trunk is `master`
+(`deploy-modal.yml` triggers on `branches: [master]`), while `main` is the
+name of the production **Modal environment** it deploys into. This paragraph
+said "pushes to `main`" until 2026-08-07, which read as a branch that does not
+exist and understated the blast radius of a merge.
 
 Never run `modal deploy` from a workstation as part of a release path.
 The repo-secret-backed CI deploy is the single source of truth for
