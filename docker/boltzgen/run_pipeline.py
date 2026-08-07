@@ -1339,7 +1339,30 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
     # designs ship at all, not merely their order — and it is the
     # IPTM_THRESHOLD comparison that sets filter_status.
     # Pinned by backend/tests/pdb/test_boltzgen_metrics_csv.py.
+    #
+    # `design_to_target_iptm` is preferred over `design_iptm` where present.
+    # Upstream computes three ipTM variants differing ONLY in the token-pair
+    # mask (boltzgen/model/layers/confidence_utils.py::compute_ptms):
+    #
+    #   iptm                   every pair with asym_id[i] != asym_id[j]
+    #   design_iptm            is_chain_design_token (x) is_target_token
+    #   design_to_target_iptm  is_design_token       (x) is_target_token
+    #
+    # On a binder plus a SINGLE-chain target the first two select the same
+    # set — every cross-chain pair IS a binder-target pair — which is why
+    # this reordering is a no-op on single-chain runs and why IPTM_THRESHOLD
+    # stays calibrated. They diverge only once the target has more than one
+    # chain. The last two diverge for a different reason: `design_iptm`
+    # scores the whole design CHAIN against the target, so a FIXED scaffold
+    # residue in the binder is averaged into the interface number, while
+    # `design_to_target_iptm` scores only the tokens actually being designed.
+    # Identical for the fully de-novo binders this wrapper builds today;
+    # correct in advance of partial design. Upstream ranks on it itself
+    # (analyze_utils.get_best_folding_sample: 0.8 * design_to_target_iptm +
+    # 0.2 * design_ptm). If the column is absent the loop falls through, so
+    # the extra key costs nothing where it does not apply.
     IPTM_KEYS = [
+        "design_to_target_iptm",
         "design_iptm",
         "iptm", "ipTM", "iPTM", "protein_iptm",
         "interface_ptm", "iptm_score",

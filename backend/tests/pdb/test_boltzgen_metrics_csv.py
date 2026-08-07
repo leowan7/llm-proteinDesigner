@@ -28,8 +28,6 @@ import importlib.util
 import os
 import sys
 
-import pytest
-
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
@@ -57,6 +55,9 @@ bg = _load_pipeline()
 # 0.41 is the binder that dimer is carrying.
 COMPLEX_IPTM = 0.93
 DESIGN_IPTM = 0.41
+# Distinct from both, so a test can tell "narrowest mask wins" from "the
+# design_iptm reorder happened to be enough".
+DESIGN_TO_TARGET_IPTM = 0.27
 
 _HEADER = "file_name,designed_sequence,iptm,design_iptm,complex_plddt,bb_rmsd"
 
@@ -75,6 +76,47 @@ def _scores(tmp_path, header: str, row: str) -> dict:
 
 def test_design_iptm_wins_over_complex_iptm(tmp_path):
     """THE regression. Before the key reorder this returned 0.93."""
+    scores = _scores(
+        tmp_path, _HEADER, f"d0.cif,AAAA,{COMPLEX_IPTM},{DESIGN_IPTM},0.88,1.2"
+    )
+    assert scores["ipTM"] == DESIGN_IPTM
+
+
+def test_design_to_target_iptm_wins_over_design_iptm(tmp_path):
+    """The three upstream ipTM variants differ only in their token-pair mask
+    (boltzgen/model/layers/confidence_utils.py::compute_ptms), and we want the
+    narrowest one available:
+
+        iptm                   any pair across an asym_id boundary
+        design_iptm            the whole design CHAIN vs the target
+        design_to_target_iptm  only the DESIGNED TOKENS vs the target
+
+    They coincide for a fully de-novo binder, which is all this wrapper builds
+    today — so this test is the only thing standing between us and a silent
+    regression the day partial design lands, when `design_iptm` starts
+    averaging fixed-scaffold-vs-target pairs into the interface score.
+
+    All three columns are present at three DIFFERENT values, which is the only
+    arrangement that can tell the intended order from any other.
+    """
+    header = (
+        "file_name,designed_sequence,iptm,design_iptm,"
+        "design_to_target_iptm,complex_plddt,bb_rmsd"
+    )
+    scores = _scores(
+        tmp_path, header,
+        f"d0.cif,AAAA,{COMPLEX_IPTM},{DESIGN_IPTM},{DESIGN_TO_TARGET_IPTM},"
+        f"0.88,1.2",
+    )
+    assert scores["ipTM"] == DESIGN_TO_TARGET_IPTM
+
+
+def test_design_iptm_is_used_when_design_to_target_iptm_is_absent(tmp_path):
+    """The wrapper must keep working against the BoltzGen build deployed today,
+    whose CSV this repo has never captured as a fixture. Adding a preferred key
+    that the deployed container may not emit is only safe if its absence falls
+    straight through — so this pins that it does, and it is what makes the
+    added key cost nothing rather than score every design 0.0."""
     scores = _scores(
         tmp_path, _HEADER, f"d0.cif,AAAA,{COMPLEX_IPTM},{DESIGN_IPTM},0.88,1.2"
     )

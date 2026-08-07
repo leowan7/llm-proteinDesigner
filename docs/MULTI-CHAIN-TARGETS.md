@@ -129,7 +129,8 @@ Each of these previously produced output that looked like a successful run.
 
 ## Known limitations
 
-- **`ipTM` is still the complex-wide value, not the binder-target pair.**
+- **`ipTM` on a multi-chain target is not the binder-target pair.** Fixed for
+  BoltzGen; still open for RFdiffusion and PXDesign. Both halves are below.
   This was harmless while every target was single-chain, because the two
   coincide for a 2-chain complex. On a multi-chain target they do not: the
   target-target interface of a real crystal dimer scores ~0.9 and, since
