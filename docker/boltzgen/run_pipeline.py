@@ -1299,9 +1299,11 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
       native_rmsd, native_rmsd_bb, native_rmsd_refolded, native_rmsd_bb_refolded,
       designfolding-bb_rmsd, bb_rmsd, iptm, ptm, design_iptm, complex_plddt, ...
 
-    We pick iptm for ipTM, complex_plddt for pLDDT, and prefer the refolded
-    backbone RMSD for refolding_rmsd. Multiplies pLDDT by 100 if it looks
-    normalized (BoltzGen emits complex_plddt in [0,1]).
+    We pick design_iptm for ipTM — the binder-to-target interface, NOT the
+    complex-wide `iptm`, which coincides with it only while the target is a
+    single chain — complex_plddt for pLDDT, and prefer the refolded backbone
+    RMSD for refolding_rmsd. Multiplies pLDDT by 100 if it looks normalized
+    (BoltzGen emits complex_plddt in [0,1]).
 
     Returns:
         List of dicts with design_name and scores.
@@ -1320,8 +1322,49 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
         "native_rmsd_bb", "native_rmsd",
         "rmsd", "RMSD", "design_rmsd", "ca_rmsd",
     ]
+    # IMPORTANT: `design_iptm` FIRST. It is the binder-to-target interface;
+    # bare `iptm` is the complex-wide value, and the two stop being the same
+    # number as soon as the target has more than one chain. ipTM is a max over
+    # residues, so a real crystal dimer's own chain-chain interface (~0.9)
+    # dominates the complex-wide value almost independently of binder quality
+    # — docs/MULTI-CHAIN-TARGETS.md, "Known limitations". `design_iptm` sat
+    # FOURTH here, so `iptm` always won and the per-pair value was never read
+    # on any run. Sibling wrappers already carry the warning without the fix:
+    # docker/pxdesign/run_pipeline.py calls it "~2x high on a dimeric target",
+    # and tools-hub's tools/*/run_pipeline.py comments record it as "lost on
+    # 460 BoltzGen designs".
+    #
+    # Not cosmetic. The parsed value is the RANKING key at :509 — where the
+    # sort runs BEFORE the [:num_designs] truncation, so it decides which
+    # designs ship at all, not merely their order — and it is the
+    # IPTM_THRESHOLD comparison that sets filter_status.
+    # Pinned by backend/tests/pdb/test_boltzgen_metrics_csv.py.
+    #
+    # `design_to_target_iptm` is preferred over `design_iptm` where present.
+    # Upstream computes three ipTM variants differing ONLY in the token-pair
+    # mask (boltzgen/model/layers/confidence_utils.py::compute_ptms):
+    #
+    #   iptm                   every pair with asym_id[i] != asym_id[j]
+    #   design_iptm            is_chain_design_token (x) is_target_token
+    #   design_to_target_iptm  is_design_token       (x) is_target_token
+    #
+    # On a binder plus a SINGLE-chain target the first two select the same
+    # set — every cross-chain pair IS a binder-target pair — which is why
+    # this reordering is a no-op on single-chain runs and why IPTM_THRESHOLD
+    # stays calibrated. They diverge only once the target has more than one
+    # chain. The last two diverge for a different reason: `design_iptm`
+    # scores the whole design CHAIN against the target, so a FIXED scaffold
+    # residue in the binder is averaged into the interface number, while
+    # `design_to_target_iptm` scores only the tokens actually being designed.
+    # Identical for the fully de-novo binders this wrapper builds today;
+    # correct in advance of partial design. Upstream ranks on it itself
+    # (analyze_utils.get_best_folding_sample: 0.8 * design_to_target_iptm +
+    # 0.2 * design_ptm). If the column is absent the loop falls through, so
+    # the extra key costs nothing where it does not apply.
     IPTM_KEYS = [
-        "iptm", "ipTM", "iPTM", "design_iptm", "protein_iptm",
+        "design_to_target_iptm",
+        "design_iptm",
+        "iptm", "ipTM", "iPTM", "protein_iptm",
         "interface_ptm", "iptm_score",
     ]
     PLDDT_KEYS = [

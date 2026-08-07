@@ -1,7 +1,10 @@
 # Multi-chain targets — the job_spec contract
 
-Landed 2026-08-05. Applies to **PXDesign** and **RFdiffusion**; BindCraft
-already worked and its form layer was unblocked in the same pass.
+Landed 2026-08-05. Applies to **PXDesign**, **RFdiffusion** and **BoltzGen**
+(BoltzGen's wrapper landed in the same pass and was GPU-verified the same day —
+4ZQK, `{A:115, B:106, C:55}`, 430 s — but this file said otherwise until
+2026-08-07); BindCraft already worked and its form layer was unblocked
+alongside them.
 
 ## Why this exists
 
@@ -12,6 +15,12 @@ designs, binders grip both protomers near-symmetrically — 697 Å² on A, 706 �
 on B, with 85% putting ≥30% of the interface on the second chain. Designing
 against one chain aims at half the epitope, and still returns plausible
 designs.
+
+**Read those numbers for what they are.** They are an analysis of prior
+**single-chain** runs — binders designed against chain A alone, then measured
+against the assembled dimer. That is what makes them an argument FOR
+multi-chain support rather than a result OF it. As of 2026-08-07 no
+multi-chain run against the Fc dimer has been done.
 
 **Never read a wrapper's input surface as a measure of the engine's
 capability.** Answering "can this tool take two chains?" needs three hops —
@@ -120,24 +129,29 @@ Each of these previously produced output that looked like a successful run.
 
 ## Known limitations
 
-- **`ipTM` is still the complex-wide value, not the binder-target pair.**
+- **`ipTM` on a multi-chain target is not the binder-target pair.** Fixed for
+  BoltzGen; still open for RFdiffusion and PXDesign. Both halves are below.
   This was harmless while every target was single-chain, because the two
   coincide for a 2-chain complex. On a multi-chain target they do not: the
   target-target interface of a real crystal dimer scores ~0.9 and, since
   `ipTM` is a max over residues rather than a mean, dominates almost
   independently of binder quality. It is both the ranking key and the
   `IPTM_THRESHOLD` gate, so a mediocre binder can rank first with a
-  plausible-looking number. BoltzGen exposes `design_iptm` in
-  `aggregate_metrics_analyze.csv` and could be fixed by reordering
-  `IPTM_KEYS`; RFdiffusion and PXDesign need a per-pair value derived from
-  the chain layout. **Not fixed — treat multi-chain `ipTM` as unreliable.**
+  plausible-looking number. **Fixed for BoltzGen** (2026-08-07): `design_iptm`
+  is now first in `IPTM_KEYS`, so the value carried into ranking and the
+  `IPTM_THRESHOLD` label is the binder-to-target pair. RFdiffusion and
+  PXDesign still need a per-pair value derived from the chain layout —
+  **not fixed there, treat their multi-chain `ipTM` as unreliable.** tools-hub
+  marks it as such in the results UI rather than letting the number stand.
 - **PXDesign's binder is single-chain** upstream. Only the target is
   multi-chain.
-- **BoltzGen and RFantibody are NOT multi-chain.** `pipeline_normalize`
-  accepts a multi-chain selector for all four presets, but those two
-  pipelines still pass a single chain id and their downstream handling has
-  not been audited. RFantibody in particular has the same class of bug in
-  its own wrapper — flagged, not fixed.
+- **RFantibody is NOT multi-chain**, and this is an upstream limit rather
+  than a wrapper gap: it builds a VHH against one chain
+  (`multi_chain_supported=False` in tools-hub `shared/pdb_preflight_rules.py`).
+  Its wrapper also has the same class of bug —
+  `docker/rfantibody/run_pipeline.py:1391` prepends the target chain blindly,
+  so a chain-qualified token `"A25"` becomes `--hotspots AA25`. Flagged, not
+  fixed; the tools-hub form deliberately does not offer the prefixed form.
 - **Proteina** was owned by a concurrent session and is not covered here.
 
 ## Verification (no GPU)
@@ -154,8 +168,9 @@ loaded from git, rather than eyeballing output:
 
 Test suites: `backend/tests/pdb/test_pipeline_normalize.py` (multi-chain
 cases alongside the original 22, all unchanged),
-`test_pxdesign_multichain.py`, `test_rfdiffusion_multichain.py`, and
-tools-hub `tests/test_multichain_targets.py`.
+`test_pxdesign_multichain.py`, `test_rfdiffusion_multichain.py`,
+`test_boltzgen_multichain.py`, `test_boltzgen_metrics_csv.py`, and tools-hub
+`tests/test_multichain_targets.py`, `tests/test_hotspot_chain_prefix_gates.py`.
 
 ## Upstream references
 

@@ -722,9 +722,11 @@ def normalize_for_boltzgen(
 ) -> PipelineNormalizationReport:
     """boltzgen preset: same as pxdesign — renumbered 1..N per chain.
 
-    Accepts a multi-chain selector for signature parity with the other
-    presets. boltzgen's own run_pipeline.py still passes a single id; this
-    preset does not by itself make boltzgen multi-chain-capable.
+    Accepts a multi-chain selector, and boltzgen's own run_pipeline.py now
+    passes one: it parses ``job_spec["target_chain"]`` through
+    ``parse_target_chains`` and hands the resulting LIST straight here
+    (docker/boltzgen/run_pipeline.py, ``_prepare_target``). This preset is on
+    the live multi-chain path, not merely signature-compatible with it.
     """
     return normalize_for_pipeline(
         input_path, output_path,
