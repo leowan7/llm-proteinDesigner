@@ -37,10 +37,10 @@ Work through these questions in order when a user presents a design task.
 | VHH / nanobody | **RFantibody**, **BoltzGen** (`nanobody-anything`) | RFantibody best paired with YSD screening; BoltzGen for end-to-end without YSD |
 | scFv (single-chain variable fragment) | **RFantibody** | CDR-loop-mediated interface required |
 | Full-length IgG / mAb | **Not available on this platform** | Chai-2 (closed-source) and IgGM (PyRosetta dependency) are not deployable; inform user that full-length IgG de novo design is not currently supported |
-| Cyclic peptide | **BoltzGen** (`peptide-anything` protocol) | Only tool on this platform with validated cyclic peptide design |
-| Disulfide-bonded peptide | **BoltzGen** | Covalent bond constraints supported natively |
+| Cyclic peptide | **Not available on this platform** | BoltzGen's `peptide-anything` protocol runs, but the platform emits no `constraints: bond:` block, so it produces **linear** peptides only. Head-to-tail cyclisation has been demonstrated off-platform (bespoke Modal app, hand-written spec YAML) at a low closure rate. Offer a linear peptide binder, or route the request to a bespoke run. |
+| Disulfide-bonded peptide | **Not available on this platform** | Same gap as cyclic peptides: BoltzGen accepts covalent bond constraints upstream, but the platform never generates them. Off-platform only. |
 | Protein binder to a small molecule | **BoltzGen** (`protein-small_molecule` protocol) | Unique capability among the available tools |
-| Symmetric oligomer / nanoparticle | **RFdiffusion** (symmetry mode) | Unique to RFdiffusion |
+| Symmetric oligomer / nanoparticle | **Not available on this platform** | RFdiffusion supports symmetry upstream, but the platform never passes `inference.symmetry` and only builds fixed-target-plus-binder contigs. Do not offer it, even though `symmetric_assembly` appears in the intent classifier. |
 | Enzyme active site scaffold | **RFdiffusion** (motif scaffolding mode) | Well-validated use case |
 
 ---
@@ -158,7 +158,7 @@ The target is held rigid throughout diffusion. The binder is designed around the
 
 - CDR-loop antibody interfaces — **RFantibody**
 - Small molecule binder proteins — **BoltzGen**
-- Cyclic or disulfide-bonded peptides — **BoltzGen**
+- Cyclic or disulfide-bonded peptides — not available on this platform (see Step 1)
 - Induced-fit interfaces — **BindCraft**
 
 #### Advantages
@@ -170,7 +170,7 @@ The target is held rigid throughout diffusion. The binder is designed around the
 
 #### Limitations
 
-- Heavily biased toward helical binders by default; beta topologies need `beta_ckpt.pt` (less validated)
+- Heavily biased toward helical binders by default. Upstream offers `beta_ckpt.pt` for beta topologies, but **that checkpoint is not in the platform image and cannot be selected** — the platform always runs `Complex_base_ckpt.pt`. Helical bias is not tunable here.
 - Low in silico pass rate (~1–5%); thousands to tens of thousands of designs required
 - Outputs backbone only — sequence design is a separate step
 - Target held rigid; cannot model induced-fit interfaces
@@ -200,7 +200,8 @@ Key distinction from RFdiffusion and PXDesign: the interface is **re-evaluated a
 #### What It Designs Best
 
 - Miniprotein binders, especially where flexible or concave binding surfaces require induced-fit
-- Helical peptide binders (dedicated `Peptide` protocol)
+
+Upstream FreeBindCraft ships peptide-oriented advanced-settings presets, but the platform hardwires `default_4stage_multimer.json` and exposes no binder-length control for BindCraft — every run is a 50–100 aa miniprotein. **Do not offer BindCraft for peptides.**
 
 #### What It Cannot Design
 
@@ -272,13 +273,15 @@ Built-in design protocols:
 - `protein-anything`: de novo protein binders (minibinders)
 - `nanobody-anything`: VHH/nanobody CDR design
 - `antibody-anything`: VH-VL antibody CDR design
-- `peptide-anything`: cyclic and linear peptide binders
+- `peptide-anything`: linear peptide binders (cyclic requires bond constraints the platform does not emit; see Step 1)
 - `protein-small_molecule`: small molecule binders
 - `protein-redesign`: template-based protein optimization
 
 #### What It Designs Best
 
-Most universally capable tool on this platform — miniprotein binders, VHH nanobodies, cyclic peptides, disulfide-bonded peptides, small molecule binders, proteins targeting IDRs.
+Most universally capable tool on this platform — miniprotein binders, VHH nanobodies, small molecule binders, proteins targeting IDRs.
+
+Upstream BoltzGen also does cyclic and disulfide-bonded peptides via covalent bond constraints. **The platform does not generate those constraints**, so they are off-platform (bespoke run) only.
 
 #### Known Issues
 
@@ -318,10 +321,10 @@ Key contribution: **multi-predictor confidence filtering** combining metrics fro
 
 | Tool | Primary Format | Mechanism | License | Min VRAM | Design Scale |
 |---|---|---|---|---|---|
-| **RFdiffusion** | Miniprotein, oligomer, scaffold | Backbone diffusion (DDPM) | BSD-3 | 8 GB | 10k–50k |
-| **BindCraft** | Miniprotein, peptide | AF2 backprop hallucination | MIT | 24 GB | 100–5k |
+| **RFdiffusion** | Miniprotein binder (target-conditioned only) | Backbone diffusion (DDPM) | BSD-3 | 8 GB | 10k–50k |
+| **BindCraft** | Miniprotein (50–100 aa, fixed) | AF2 backprop hallucination | MIT | 24 GB | 100–5k |
 | **RFantibody** | VHH, scFv, antibody | Antibody-fine-tuned diffusion | MIT | 8 GB | 5k–20k |
-| **BoltzGen** | Universal (all modalities) | All-atom co-design diffusion | MIT | 24 GB | 10k–60k |
+| **BoltzGen** | Miniprotein, VHH, antibody, linear peptide, small molecule | All-atom co-design diffusion | MIT | 24 GB | 10k–60k |
 | **PXDesign** | Miniprotein | Diffusion + hallucination | Apache 2.0 | 16 GB | 5k–20k |
 
 ---
@@ -329,7 +332,7 @@ Key contribution: **multi-predictor confidence filtering** combining metrics fro
 ## 5. Common Failure Modes
 
 ### RFdiffusion
-- All designs are long helices → Switch to `beta_ckpt.pt`
+- All designs are long helices → Expected. `beta_ckpt.pt` is not available on this platform; switch tool (BindCraft or PXDesign) rather than checkpoint.
 - Designs don't contact hotspots → Use 3–6 residues in a concave pocket
 - AF2 ipTM universally < 0.5 → Target surface too flat; use ConSurf/PDBePISA data
 
