@@ -13,17 +13,17 @@ const CAPABILITIES = [
   },
   {
     label: "RFdiffusion",
-    metric: "5",
-    metricLabel: "design modes",
+    metric: "3",
+    metricLabel: "stage pipeline",
     detail:
-      "Backbone diffusion for minibinders, motif scaffolds, symmetric oligomers, partial diffusion, and fold-conditioned generation. Most experimentally validated tool in the field.",
+      "Target-conditioned backbone diffusion with hotspot control, followed by ProteinMPNN sequence design and AlphaFold2 multimer validation. Most experimentally validated tool in the field.",
   },
   {
     label: "BoltzGen",
-    metric: "6",
+    metric: "5",
     metricLabel: "design protocols",
     detail:
-      "All-atom co-design with joint sequence-structure output. Native protocols for nanobodies, antibodies, cyclic peptides, small-molecule binders, and protein redesign.",
+      "All-atom co-design with joint sequence-structure output. Native protocols for minibinders, nanobodies, antibodies, linear peptides, and small-molecule binders.",
   },
   {
     label: "RFantibody",

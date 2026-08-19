@@ -179,6 +179,8 @@ PXDesign's Protenix-based filtering requires MSA for reliable confidence scoring
 
 ### YAML Configuration Examples
 
+> **These show upstream BoltzGen spec syntax, not what this platform sends.** The platform builds its spec in `backend/pipelines/boltzgen.py::generate_config` (mirrored by `docker/boltzgen/run_pipeline.py::build_yaml_spec`) and emits a different concrete form: a `file:` entity plus a `protein:` entity with `sequence: "<min>..<max>"`, with hotspots as per-chain `binding_types:` — there is no `binder:` block anywhere in the code. Do not quote these examples to a user as the job that will run.
+
 #### Miniprotein Binder (`protein-anything`)
 
 ```yaml
@@ -213,7 +215,9 @@ binder:
       res_index: 30..80
 ```
 
-#### Cyclic Peptide (`peptide-anything`)
+#### Cyclic Peptide (`peptide-anything`) — OFF-PLATFORM ONLY
+
+> **This platform cannot run this.** The `peptide-anything` protocol is reachable, but nothing in the pipeline emits a cyclisation constraint, so a job launched here returns a **linear** peptide. The `cyclic: true` key below is also not the form measured to work: head-to-tail closure was achieved off-platform with a hand-written spec carrying a `constraints: bond:` block through a bespoke Modal app, and even then only 2 of 16 designs closed (N-to-C < 1.6 A) in the one pilot run. Route cyclic requests to a bespoke run and do not promise a yield.
 
 ```yaml
 protocol: peptide-anything

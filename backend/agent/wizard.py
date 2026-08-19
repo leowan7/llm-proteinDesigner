@@ -139,7 +139,7 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
             label="Design protocol",
             param_type="str",
             default="protein-anything",
-            description="protein-anything (minibinder), nanobody-anything (VHH), peptide-anything (cyclic peptide), protein-small_molecule, antibody-anything.",
+            description="protein-anything (minibinder), nanobody-anything (VHH), peptide-anything (linear peptide; cyclisation is not available), protein-small_molecule, antibody-anything.",
         ),
     ],
     "pxdesign": [
