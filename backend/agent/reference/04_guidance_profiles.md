@@ -78,9 +78,11 @@ Recommend yeast display library construction when:
 
 ## BoltzGen Designs
 
-BoltzGen supports both cyclic peptides and protein binders. Apply the appropriate sub-profile.
+On this platform BoltzGen produces protein binders and **linear** peptides; use the protein-binder sub-profile for both. The cyclic sub-profile below applies only to bespoke off-platform runs.
 
-### Cyclic Peptide Designs
+### Cyclic Peptide Designs (off-platform only)
+
+> Not producible through this platform — see `01_tool_selection_guide.md` Step 1. Retained for bespoke runs.
 
 - **Synthesis**: Standard solid-phase peptide synthesis (SPPS) on Rink amide or Wang resin; head-to-tail cyclization via solution-phase macrolactamization after resin cleavage
 - **Analytical confirmation**: HPLC purity > 95%; MALDI-TOF or LC-MS for mass confirmation; 1H NMR for structure confirmation if > 10 residues

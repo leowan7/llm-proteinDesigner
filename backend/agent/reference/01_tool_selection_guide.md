@@ -41,7 +41,7 @@ Work through these questions in order when a user presents a design task.
 | Disulfide-bonded peptide | **Not available on this platform** | Same gap as cyclic peptides: BoltzGen accepts covalent bond constraints upstream, but the platform never generates them. Off-platform only. |
 | Protein binder to a small molecule | **BoltzGen** (`protein-small_molecule` protocol) | Unique capability among the available tools |
 | Symmetric oligomer / nanoparticle | **Not available on this platform** | RFdiffusion supports symmetry upstream, but the platform never passes `inference.symmetry` and only builds fixed-target-plus-binder contigs. Do not offer it, even though `symmetric_assembly` appears in the intent classifier. |
-| Enzyme active site scaffold | **RFdiffusion** (motif scaffolding mode) | Well-validated use case |
+| Enzyme active site scaffold | **Not available on this platform** | RFdiffusion's motif scaffolding is well validated upstream, but the platform builds only fixed-target-plus-binder contigs and cannot select `ActiveSite_ckpt.pt` (baked into the image, unreachable). Off-platform only. |
 
 ---
 
@@ -148,11 +148,9 @@ The target is held rigid throughout diffusion. The binder is designed around the
 
 #### What It Designs Best
 
-- Miniprotein binders (40–150 aa) — most validated use case in the field
-- Symmetric oligomers (C2–C12, D2, tetrahedral, octahedral, icosahedral)
-- Enzyme active site scaffolds (motif scaffolding)
-- Metal-binding proteins
-- Partial diffusion / loop remodeling of existing proteins
+- Miniprotein binders (40–150 aa) — most validated use case in the field, and **the only mode wired on this platform**
+
+Upstream RFdiffusion also does symmetric oligomers, motif scaffolding / enzyme active sites, metal-binding proteins, and partial diffusion. **None are reachable here** — the platform only ever builds a fixed-target-plus-binder contig and never passes a symmetry, motif, or partial-diffusion argument. Do not offer them.
 
 #### What It Cannot Design
 
@@ -164,7 +162,7 @@ The target is held rigid throughout diffusion. The binder is designed around the
 #### Advantages
 
 - Most experimentally validated de novo binder tool (2023–2026); largest published precedent
-- Flexible design modes: binder design, motif scaffolding, symmetry, partial diffusion
+- Flexible design modes upstream (motif scaffolding, symmetry, partial diffusion) — none are exposed on this platform; binder design only
 - Fast per-design runtime (~3–5 seconds/design on A100 for 150-residue systems)
 - Excellent structural diversity; large community; extensive documentation
 
@@ -275,7 +273,7 @@ Built-in design protocols:
 - `antibody-anything`: VH-VL antibody CDR design
 - `peptide-anything`: linear peptide binders (cyclic requires bond constraints the platform does not emit; see Step 1)
 - `protein-small_molecule`: small molecule binders
-- `protein-redesign`: template-based protein optimization
+- ~~`protein-redesign`~~: **rejected by this platform** — not in the container's `ALLOWED_PROTOCOLS` (`docker/boltzgen/run_pipeline.py:1662`); a job requesting it fails preflight. Five protocols are runnable, not six.
 
 #### What It Designs Best
 
