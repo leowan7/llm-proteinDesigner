@@ -193,12 +193,12 @@ post-Phase-11 sweep:
 
 ## Deployment Flow
 
-1. PR opened targeting `main`. GitHub Actions `test.yml` runs 4 gates (backend, frontend, E2E, lint+typecheck+coverage) plus a frontend-bundle secret-leak grep (Phase 11 SC 7). Branch protection blocks merge on any failure.
+1. PR opened targeting `master`. **There is no `main` branch in this repo** — `main` throughout this doc always names the Modal *environment*, never a git branch. GitHub Actions `test.yml` runs 4 gates (backend, frontend, E2E, lint+typecheck+coverage) plus a frontend-bundle secret-leak grep (Phase 11 SC 7). Branch protection blocks merge on any failure.
 2. PR touching `infrastructure/modal/**`, `docker/**`, or `backend/pipelines/**` also triggers `deploy-modal.yml` against Modal `staging` env.
-3. On merge to `main`:
+3. On merge to `master`:
    - Railway auto-deploys the `backend` + `worker` services in project `bindwave`. `railway.toml` runs `supabase db push` as preDeployCommand; failure aborts the deploy.
    - Vercel auto-deploys the frontend to https://bindwave.com.
-   - `deploy-modal.yml` deploys all 5 Modal apps to `main` env (if PR touched Modal paths).
+   - `deploy-modal.yml` deploys only the Modal apps whose files changed, to the `main` Modal env — not all five. The `detect` job scopes the matrix on push as well as on PRs (`deploy-modal.yml:151-158`); all five go out only when a shared input changes, and none when no app-owned file does.
    - `smoke.yml` runs after deploy completes (informational - D-08). Failures post to Sentry + #kendrew-alerts. Human decides rollback.
 
 ## Subprocessors (Phase 10 reference)
