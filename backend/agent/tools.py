@@ -80,7 +80,7 @@ TOOL_DEFINITIONS = [
         "name": "collect_parameters",
         "description": (
             "Collect tool-specific parameters for the design job. "
-            "Returns the parameter schema with Kendrew-curated defaults for the selected tool. "
+            "Returns the parameter schema with Bindwave-curated defaults for the selected tool. "
             "Use after the user has confirmed the recommended tool. "
             "ALWAYS pass user_overrides for any parameter the user has named explicitly "
             "(e.g. user says '100 designs' -> {\"num_designs\": 100}; user says 'noise 0.5' -> "
@@ -512,7 +512,7 @@ async def _handle_classify_intent(tool_input: dict) -> str:
 async def _handle_collect_parameters(tool_input: dict) -> str:
     """Handle collect_parameters tool call.
 
-    Returns the wizard parameter schema with Kendrew-curated defaults,
+    Returns the wizard parameter schema with Bindwave-curated defaults,
     merged with any user-supplied overrides.
     """
     tool = tool_input["tool"]

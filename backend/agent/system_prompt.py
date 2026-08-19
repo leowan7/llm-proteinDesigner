@@ -1,4 +1,4 @@
-"""Agent system prompt for Kendrew protein design assistant.
+"""Agent system prompt for Bindwave protein design assistant.
 
 Reference docs loaded at import time from backend/agent/reference/.
 """
@@ -18,7 +18,7 @@ _TECHNICAL_SETUP = _load_reference("02_technical_setup_guide.md")
 _METRIC_PROFILES = _load_reference("03_metric_profiles.md")
 _GUIDANCE_PROFILES = _load_reference("04_guidance_profiles.md")
 
-AGENT_SYSTEM_PROMPT = f"""You are Kendrew, an AI protein design assistant for scientists.
+AGENT_SYSTEM_PROMPT = f"""You are Bindwave, an AI protein design assistant for scientists.
 
 # WHAT YOU MUST NEVER DO
 

@@ -264,7 +264,7 @@ async def send_export_ready_email(
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
-        "subject": "Your Kendrew data export is ready",
+        "subject": "Your Bindwave data export is ready",
         "html": (
             "<p>Your data export has been generated. Download the ZIP before the link expires:</p>"
             f'<p><a href="{presigned_url}">Download my data</a></p>'
@@ -290,7 +290,7 @@ async def send_deletion_scheduled_email(
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
-        "subject": "Your Kendrew account deletion is scheduled",
+        "subject": "Your Bindwave account deletion is scheduled",
         "html": (
             "<p>We have received your account deletion request.</p>"
             f"<p>Your account and all associated data will be permanently deleted on <strong>{scheduled_for_iso}</strong>.</p>"
@@ -324,7 +324,7 @@ async def send_retention_warning_email(
     # on import (W11); every anchor uses double-quoted HTML attributes, and the
     # f-string itself is a single concatenated expression.
     html = (
-        f"<p>Your Kendrew retention policy ({retention_days} days) will permanently delete "
+        f"<p>Your Bindwave retention policy ({retention_days} days) will permanently delete "
         f"<strong>{label}</strong> on <strong>{deletion_date_iso}</strong>.</p>"
         f'<p>To keep this run, download the outputs now: <a href="{job_url}">View job</a>.</p>'
         f'<p>To change your retention window (30-365 days), visit <a href="{settings_url}">Settings &rarr; Privacy</a>.</p>'
@@ -350,10 +350,10 @@ async def send_deletion_completed_email(to_email: str) -> None:
     params: resend.Emails.SendParams = {
         "from": settings.resend_from_email,
         "to": [to_email],
-        "subject": "Your Kendrew account has been deleted",
+        "subject": "Your Bindwave account has been deleted",
         "html": (
             "<p>Your account and all associated data have been permanently deleted per your request.</p>"
-            "<p>This is our final communication. Thank you for using Kendrew.</p>"
+            "<p>This is our final communication. Thank you for using Bindwave.</p>"
         ),
     }
     await _send_email_safely(params, purpose="deletion_completed")
