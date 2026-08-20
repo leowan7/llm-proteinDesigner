@@ -60,9 +60,105 @@ logger = logging.getLogger("boltzgen_pipeline")
 # ---------------------------------------------------------------------------
 # Filtering thresholds for BoltzGen output
 # ---------------------------------------------------------------------------
+# WHAT THIS PIPELINE CAN AND CANNOT MEASURE. BoltzGen runs exactly one refold,
+# and it folds the DESIGN ALONE — not the complex. That is visible in every
+# `designfolding-*` column of aggregate_metrics_analyze.csv: on a 100-design
+# 2EJN run `designfolding-bb_rmsd_target` is EMPTY, `designfolding-*_iptm` is
+# 0.0 in all seven numeric variants, and `designfolding-min_interaction_pae` is
+# 100000.25 — the "no interaction present" sentinel. There is no target in that
+# fold, so there is nothing to have an interface with.
+#
+# So: PLDDT and RMSD below are measured on that refold and are real. There is
+# NO co-folded binder:target ipTM anywhere in the audited run's 215 columns,
+# and this pipeline never computes one. What the CSV calls `iptm` / `design_iptm` /
+# `design_to_target_iptm` is the generator's own confidence head reading its
+# own output with the target structure supplied to it — which is why the target
+# comes back at 0.5-0.9 A backbone RMSD, far better than any blind fold.
 IPTM_THRESHOLD = 0.70
 PLDDT_THRESHOLD = 80.0
 RMSD_THRESHOLD = 2.0  # refolding RMSD in angstroms
+
+# IPTM_THRESHOLD IS NOT A GATE LEG, AND MUST NOT BECOME ONE AGAIN. 0.70 is the
+# Boltz-2 / AF2-multimer CO-FOLD bar (tools-hub tools/boltz2 STRICT_IPTM). It
+# was being applied to the in-run confidence above, and those are different
+# measurements with different distributions. That is the objection, and it
+# stands on the SCALE alone — 0.70 is calibrated on a fold that contains the
+# target, and the audited refold does not contain one.
+#
+# THE REACH EVIDENCE IS REAL BUT MUST BE SCOPED TO ITS PROTOCOLS:
+#
+#   The audited n100 replicate, THIS column (design_to_target_iptm)
+#       ->  0.084-0.583, 0/100 >= 0.70.
+#   Same campaign's designs, re-scored by an independent Boltz-2 cofold
+#   (boltzgen-workspace/feld1/13_boltz_cofold.py, 29 rows), read on
+#   `binder_to_target`, the per-chain-pair column that step exists to read
+#       ->  0.166-0.806, 1/29 >= 0.70. A different distribution entirely.
+#
+#   DO NOT quote the familiar "460 self-hosted designs, max 0.650" here. That
+#   is BoltzGen's BARE `iptm`, averaged over every chain pair, so on the Fel
+#   d 1 homodimer it carries the target's own A:B crystal interface;
+#   aglyco-fc-vhh/modal_design.py records it as reading "~2x high" and
+#   13_boltz_cofold.py records that the binder-interface column was dropped
+#   inside the container for all 460 and is unrecoverable. On the audited
+#   n100 the two sit side by side: bare `iptm` 0.450-0.649 against
+#   design_to_target_iptm 0.084-0.583. Quoting the contaminated one to
+#   justify this change would reproduce the exact error it exists to fix.
+#   The cofold's complex-wide `cofold_iptm` (0.263-0.852) is wrong for the
+#   same reason.
+#
+# DO NOT restate that as "the number can never reach 0.70". It is false on
+# two other populations, and a reviewer who finds either one concludes the
+# premise collapsed:
+#
+#   * peptide-anything, SAME self-hosted pipeline: max 0.777, 16/36 >= 0.70
+#     (boltzgen-workspace/mdm2-peptide). See the PLDDT_KEYS note — BoltzGen
+#     defaults `designfolding_metrics` to false on that protocol and this
+#     container never overrides it, so no `designfolding-*` column is emitted
+#     there at all.
+#   * the HOSTED Boltz API (api.boltz.bio): max 0.983, and 42.5% over 0.70 on
+#     the matched 3AVE/miniprotein subset (12,500 designs; the all-hosted
+#     figure is 60.3%). A different SERVICE, aggregated retrospectively from
+#     campaign manifests by feld1/12_engine_evidence.py, not a designed
+#     control. Whether its `iptm` is even the same quantity as ours is an
+#     OPEN question — 11_engine_audit.py says so in as many words — which is
+#     the reason to keep the populations apart, not a claim that we know
+#     they differ.
+#
+# Those are separate populations. Pooling them argues either side convincingly
+# and neither correctly.
+#
+# The label therefore uses the two legs this run actually measures. ipTM is
+# still parsed, reported and ranked on — upstream ranks on it too
+# (analyze_utils.get_best_folding_sample) — it just no longer decides pass.
+#
+# ponytail: the honest ceiling is that we have no calibrated bar for the in-run
+# number, because nothing here pairs it against a cofold on the SAME designs.
+# The remedy already ships one click away rather than in this container:
+# boltzgen is in shared/refold.SOURCE_TOOLS, so the results page can send a
+# shortlist to the real Boltz-2 cofold, which IS calibrated against 0.70. To
+# gate on ipTM in here instead, first collect that paired data and calibrate.
+
+
+def label_filter_status(scores: dict) -> str:
+    """Return "pass"/"below threshold" for one design's score dict.
+
+    ONE definition, because there are two gates. ``filter_and_rank`` labels the
+    pilot path and the smoke/mini_pilot path labels inline; they were separate
+    copies of the same expression, so the ipTM leg had to be removed twice or
+    not at all. Both now call this.
+
+    A missing score fails closed: an absent leg is an unmeasured leg, and this
+    label is what the UI turns into "advance to validation" or not.
+    """
+    plddt = scores.get("pLDDT")
+    rmsd = scores.get("refolding_rmsd")
+    is_pass = (
+        plddt is not None
+        and rmsd is not None
+        and plddt >= PLDDT_THRESHOLD
+        and rmsd <= RMSD_THRESHOLD
+    )
+    return "pass" if is_pass else "below threshold"
 
 # BoltzGen weight cache (baked into Docker image)
 BOLTZGEN_CACHE = os.environ.get("HF_HOME", "/opt/boltzgen_cache")
@@ -538,23 +634,12 @@ def run_smoke_tier(
             scores = _stub_scores(rank)
         # Stamp filter_status so the UI shows pass or below threshold
         # instead of a blank dash. Mirrors filter_and_rank which the pilot
-        # path runs but the smoke path bypasses. BoltzGen has no PAE
-        # column, so the label uses ipTM, pLDDT, and refolding_rmsd only.
-        # Stub scores already carry filter_status="stub (smoke)" so we
-        # only stamp when absent.
+        # path runs but the smoke path bypasses — via the shared
+        # label_filter_status, so the two cannot drift again. Stub scores
+        # already carry filter_status="stub (smoke)" so we only stamp when
+        # absent.
         if "filter_status" not in scores:
-            iptm = scores.get("ipTM")
-            plddt = scores.get("pLDDT")
-            rmsd = scores.get("refolding_rmsd")
-            is_pass = (
-                iptm is not None
-                and plddt is not None
-                and rmsd is not None
-                and iptm >= IPTM_THRESHOLD
-                and plddt >= PLDDT_THRESHOLD
-                and rmsd <= RMSD_THRESHOLD
-            )
-            scores["filter_status"] = "pass" if is_pass else "below threshold"
+            scores["filter_status"] = label_filter_status(scores)
         candidates.append({
             "rank": rank,
             "pdb_key": f"design_{rank:03d}.pdb",
@@ -1291,6 +1376,19 @@ def _safe_float(value: str, default: float) -> float:
         return default
 
 
+def _first_present(row: dict, keys: list[str]) -> tuple[str | None, str | None]:
+    """Return the first (key, value) in ``keys`` that ``row`` has non-empty.
+
+    ``(None, None)`` when none matched. Replaces three copies of the same
+    for/if/break, and hands back the KEY so the caller can log which column a
+    number actually came from.
+    """
+    for key in keys:
+        if key in row and row[key] not in (None, ""):
+            return key, row[key]
+    return None, None
+
+
 def parse_metrics_csv(csv_path: str) -> list[dict]:
     """Parse the BoltzGen metrics CSV into a list of scored designs.
 
@@ -1299,11 +1397,16 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
       native_rmsd, native_rmsd_bb, native_rmsd_refolded, native_rmsd_bb_refolded,
       designfolding-bb_rmsd, bb_rmsd, iptm, ptm, design_iptm, complex_plddt, ...
 
-    We pick design_iptm for ipTM — the binder-to-target interface, NOT the
-    complex-wide `iptm`, which coincides with it only while the target is a
-    single chain — complex_plddt for pLDDT, and prefer the refolded backbone
-    RMSD for refolding_rmsd. Multiplies pLDDT by 100 if it looks normalized
-    (BoltzGen emits complex_plddt in [0,1]).
+    The CSV carries two families of the same metric names: bare ones, measured
+    on the generated complex with the target supplied, and `designfolding-*`
+    ones, measured on the refold — which folds the DESIGN ALONE. Both pLDDT and
+    RMSD come from the refold family, so the binder is what they describe;
+    ipTM has no refold-family value that means anything (the design-alone fold
+    has no interface, so all seven of its numeric ipTM columns are 0.0) and comes
+    from the bare family, narrowest mask first: design_to_target_iptm, then
+    design_iptm, then the complex-wide iptm.
+
+    Multiplies pLDDT by 100 if it looks normalized (BoltzGen emits it in [0,1]).
 
     Returns:
         List of dicts with design_name and scores.
@@ -1324,20 +1427,28 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
     ]
     # IMPORTANT: `design_iptm` FIRST. It is the binder-to-target interface;
     # bare `iptm` is the complex-wide value, and the two stop being the same
-    # number as soon as the target has more than one chain. ipTM is a max over
-    # residues, so a real crystal dimer's own chain-chain interface (~0.9)
-    # dominates the complex-wide value almost independently of binder quality
-    # — docs/MULTI-CHAIN-TARGETS.md, "Known limitations". `design_iptm` sat
+    # number as soon as the target has more than one chain: bare `iptm` is
+    # averaged over EVERY chain pair, so a real crystal dimer's own
+    # chain-chain interface is folded into it almost independently of binder
+    # quality. (An older note here called it "a max over residues" and put the
+    # dimer interface at "~0.9". Do not repeat either: four OTHER pipeline
+    # files in this repo say averaged-over-every-pair — bindcraft, rfdiffusion,
+    # pxdesign, rfantibody — and measured across the 29 Fel d 1 cofolds the
+    # target's own A:B pair spans 0.185-0.930, mean 0.555, a wide range rather
+    # than a constant. docs/MULTI-CHAIN-TARGETS.md is corrected to match.) `design_iptm` sat
     # FOURTH here, so `iptm` always won and the per-pair value was never read
     # on any run. Sibling wrappers already carry the warning without the fix:
     # docker/pxdesign/run_pipeline.py calls it "~2x high on a dimeric target",
     # and tools-hub's tools/*/run_pipeline.py comments record it as "lost on
     # 460 BoltzGen designs".
     #
-    # Not cosmetic. The parsed value is the RANKING key at :509 — where the
-    # sort runs BEFORE the [:num_designs] truncation, so it decides which
-    # designs ship at all, not merely their order — and it is the
-    # IPTM_THRESHOLD comparison that sets filter_status.
+    # Not cosmetic. The parsed value is the RANKING key on both paths, and on
+    # the smoke/mini_pilot path it decides which designs SHIP: ``run_smoke_tier``
+    # serves both tiers, sorts on it and then truncates
+    # (``scored = scored[:num_designs]``, the only such slice in this file), so
+    # a design ranked out is not returned at all. ``filter_and_rank`` sorts without
+    # truncating, so there it sets order only. Neither sets filter_status any
+    # more — see IPTM_THRESHOLD; that leg is gone.
     # Pinned by backend/tests/pdb/test_boltzgen_metrics_csv.py.
     #
     # `design_to_target_iptm` is preferred over `design_iptm` where present.
@@ -1350,9 +1461,9 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
     #
     # On a binder plus a SINGLE-chain target the first two select the same
     # set — every cross-chain pair IS a binder-target pair — which is why
-    # this reordering is a no-op on single-chain runs and why IPTM_THRESHOLD
-    # stays calibrated. They diverge only once the target has more than one
-    # chain. The last two diverge for a different reason: `design_iptm`
+    # this reordering is a no-op on single-chain runs. (IPTM_THRESHOLD is no
+    # longer a gate leg either way.) They diverge only once the target has more
+    # than one chain. The last two diverge for a different reason: `design_iptm`
     # scores the whole design CHAIN against the target, so a FIXED scaffold
     # residue in the binder is averaged into the interface number, while
     # `design_to_target_iptm` scores only the tokens actually being designed.
@@ -1367,12 +1478,35 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
         "iptm", "ipTM", "iPTM", "protein_iptm",
         "interface_ptm", "iptm_score",
     ]
+    # IMPORTANT: `designfolding-complex_plddt` FIRST, for the same reason
+    # RMSD_KEYS puts `designfolding-bb_rmsd` first — and it was the ONE key in
+    # this function that did not follow that rule.
+    #
+    # The `designfolding-*` fold contains the design and nothing else (see
+    # IPTM_THRESHOLD), so ITS "complex" pLDDT is the binder's own pLDDT. That is
+    # the quantity PLDDT_THRESHOLD=80 means: the Bennett-style bar is on the
+    # binder, not on a system that is 80% target.
+    #
+    # Bare `complex_plddt` is the whole conditioned complex, so the supplied
+    # target dominates it and its range collapses. Measured on a 100-design
+    # 2EJN run:
+    #
+    #   complex_plddt                54.5 - 66.1   ->   0/100 could ever hit 80
+    #   designfolding-complex_plddt  44.3 - 87.7   ->  11/100 clear 80
+    #
+    # So this was the second structurally-unreachable leg of the same gate: not
+    # merely a worse number, a number with no overlap with its own threshold.
+    # Same failure as proteina reading the AfDesign LOSS column for pLDDT and
+    # Scout reading the wrong DSSP tuple index — a real value, wrong quantity,
+    # then compared against a bar calibrated for the right one.
     PLDDT_KEYS = [
+        "designfolding-complex_plddt", "designfolding-complex_iplddt",
         "complex_plddt", "complex_iplddt",
         "pLDDT", "plddt", "mean_plddt", "binder_plddt", "avg_plddt",
     ]
 
     results = []
+    resolved: dict[str, set] = {}
     with open(csv_path, newline="") as fh:
         reader = csv.DictReader(fh)
         columns = reader.fieldnames or []
@@ -1393,29 +1527,72 @@ def parse_metrics_csv(csv_path: str) -> list[dict]:
 
             scores: dict = {}
 
-            for key in RMSD_KEYS:
-                if key in row and row[key] not in (None, ""):
-                    scores["refolding_rmsd"] = _safe_float(row[key], 99.0)
-                    break
+            rmsd_key, rmsd_raw = _first_present(row, RMSD_KEYS)
+            if rmsd_key:
+                scores["refolding_rmsd"] = _safe_float(rmsd_raw, 99.0)
 
-            for key in IPTM_KEYS:
-                if key in row and row[key] not in (None, ""):
-                    scores["ipTM"] = _safe_float(row[key], 0.0)
-                    break
+            iptm_key, iptm_raw = _first_present(row, IPTM_KEYS)
+            if iptm_key:
+                scores["ipTM"] = _safe_float(iptm_raw, 0.0)
 
-            for key in PLDDT_KEYS:
-                if key in row and row[key] not in (None, ""):
-                    val = _safe_float(row[key], 0.0)
-                    # BoltzGen emits complex_plddt in [0,1]; rescale to 0..100.
-                    if 0.0 <= val <= 1.0:
-                        val = val * 100.0
-                    scores["pLDDT"] = round(val, 2)
-                    break
+            plddt_key, plddt_raw = _first_present(row, PLDDT_KEYS)
+            if plddt_key:
+                val = _safe_float(plddt_raw, 0.0)
+                # BoltzGen emits complex_plddt in [0,1]; rescale to 0..100.
+                if 0.0 <= val <= 1.0:
+                    val = val * 100.0
+                scores["pLDDT"] = round(val, 2)
+
+            for metric, key in (("refolding_rmsd", rmsd_key),
+                                ("ipTM", iptm_key), ("pLDDT", plddt_key)):
+                resolved.setdefault(metric, set()).add(key)
 
             results.append({
                 "design_name": design_name,
                 "scores": scores,
             })
+
+    # WHICH COLUMN EACH NUMBER CAME FROM, in the run log. Three separate
+    # incidents in this codebase — proteina's pLDDT off the AfDesign loss
+    # column, Scout's DSSP tuple index, and this file's own ipTM — were all
+    # invisible in the logs because only the VALUE was ever recorded, and a
+    # wrong-column value looks exactly like a right-column one. It costs a line.
+    #
+    # A set per metric, not a single key, because the fallback is evaluated per
+    # ROW: if a preferred column is blank on some designs the loop falls through
+    # to a different one for those rows only, and a table whose ipTM column is
+    # two different quantities is worse than one that is uniformly the wrong
+    # quantity. More than one entry here means exactly that happened.
+    for metric, keys in sorted(resolved.items()):
+        names = sorted(k or "<none>" for k in keys)
+        if len(names) > 1:
+            logger.warning(
+                "%s resolved to MORE THAN ONE column across rows (%s) — these "
+                "are different quantities in one table", metric, ", ".join(names),
+            )
+        else:
+            logger.info("%s <- column %s", metric, names[0])
+
+    # AND SAY SO WHEN THE FALLBACK PUTS THE GATE BACK OUT OF REACH. The image
+    # pip-installs boltzgen UNPINNED, so a build that stops emitting
+    # `designfolding-complex_plddt` drops pLDDT onto the whole-complex column
+    # the target dominates — 54.5-66.1 on the audited run, against a bar of 80.
+    # That is the exact state this file was in, and it would come back silently:
+    # the fallback is doing its job, the numbers look like pLDDTs, and every
+    # design goes back to "below threshold" with nothing in the log to say why.
+    plddt_cols = resolved.get("pLDDT") or set()
+    if plddt_cols and not any(
+        (c or "").startswith("designfolding-") for c in plddt_cols
+    ):
+        logger.warning(
+            "pLDDT fell back to %s, which covers the whole complex and is "
+            "dominated by the supplied target — PLDDT_THRESHOLD=%.0f is "
+            "calibrated on the binder's own pLDDT and may be unreachable on "
+            "this column. Check whether this BoltzGen build still emits "
+            "designfolding-complex_plddt.",
+            ", ".join(sorted(c or "<none>" for c in plddt_cols)),
+            PLDDT_THRESHOLD,
+        )
 
     logger.info("Parsed %d designs from metrics CSV", len(results))
     return results
@@ -1426,36 +1603,30 @@ def filter_and_rank(designs: list[dict]) -> list[dict]:
 
     A bad result is still a result: every design from the metrics CSV is
     kept and tagged "pass" or "below threshold" so the UI can show all of
-    them. The in silico thresholds (ipTM, pLDDT, refolding RMSD) now
-    drive a label, not a gate. Boltzgen has no PAE column so i_pAE is
-    not part of the label decision.
+    them. The in silico thresholds drive a label, not a gate. Boltzgen has
+    no PAE column so i_pAE is not part of the label decision, and ipTM is
+    not either — see IPTM_THRESHOLD for why the 0.70 cofold bar does not
+    describe the quantity this run produces.
+
+    Ranking still uses ipTM. It is the only interface-shaped signal in the
+    CSV and upstream ranks on it as well; it is just not evidence that a
+    design passes.
     """
     pass_count = 0
     for design in designs:
         scores = design["scores"]
-        iptm = scores.get("ipTM")
-        plddt = scores.get("pLDDT")
-        rmsd = scores.get("refolding_rmsd")
-        is_pass = (
-            iptm is not None
-            and plddt is not None
-            and rmsd is not None
-            and iptm >= IPTM_THRESHOLD
-            and plddt >= PLDDT_THRESHOLD
-            and rmsd <= RMSD_THRESHOLD
-        )
-        scores["filter_status"] = "pass" if is_pass else "below threshold"
-        if is_pass:
+        scores["filter_status"] = label_filter_status(scores)
+        if scores["filter_status"] == "pass":
             pass_count += 1
 
     ranked = list(designs)
     ranked.sort(key=lambda x: x["scores"].get("ipTM", 0.0), reverse=True)
 
     logger.info(
-        "Labeling: %d / %d pass (ipTM>=%.2f, pLDDT>=%.0f, RMSD<=%.1f); "
-        "all designs emitted with filter_status label",
+        "Labeling: %d / %d pass (pLDDT>=%.0f, RMSD<=%.1f; ipTM reported and "
+        "ranked on, not gated); all designs emitted with filter_status label",
         pass_count, len(designs),
-        IPTM_THRESHOLD, PLDDT_THRESHOLD, RMSD_THRESHOLD,
+        PLDDT_THRESHOLD, RMSD_THRESHOLD,
     )
     return ranked
 
