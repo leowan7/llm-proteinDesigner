@@ -1277,11 +1277,32 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     checkpoint = params.get("checkpoint", "Complex_base_ckpt.pt")
     ckpt_path = os.path.join(MODELS_DIR, checkpoint)
 
+    # RFdiffusion injects noise at every denoising step. The default of
+    # 1.0 is tuned for unconditional monomer generation; for BINDER design
+    # the authors' own recipe sets both scales to 0, on the grounds that
+    # less noise yields more designable backbones. This wrapper never set
+    # them at all, so every production binder was diffused at full
+    # inference noise.
+    #
+    # Circumstantial support from the 11 stored production jobs: binders
+    # come out 80-93% helical with Rg 13.8-18.9 A at 55-65 residues --
+    # loose helical bundles -- and the sequences ProteinMPNN then puts on
+    # them are degenerate. Measured inside the delivered structures, the
+    # binder chain uses 12-14 of the 20 residue types with one type at
+    # 25-30%, while the natural target chain in the very same file uses 19
+    # and tops out at 9%. One design is 32 consecutive alanines.
+    #
+    # Overridable so the A/B runs from ONE deploy instead of two:
+    # noise_scale=1.0 reproduces the previous behaviour exactly.
+    noise_scale = float(params.get("noise_scale", 0.0))
+
     hydra_args = [
         f"inference.input_pdb={target_pdb_path}",
         f"contigmap.contigs={contig_str}",
         f"inference.num_designs={num_designs}",
         f"inference.ckpt_override_path={ckpt_path}",
+        f"denoiser.noise_scale_ca={noise_scale}",
+        f"denoiser.noise_scale_frame={noise_scale}",
     ]
 
     if hotspots:
