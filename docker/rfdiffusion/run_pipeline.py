@@ -1639,6 +1639,83 @@ def _resolve_binder_sequence(
     return leftovers[0]
 
 
+def _build_af2_cmd(combined_fasta: str, out_dir: str, tier: str) -> list[str]:
+    """Argv for the colabfold_batch AF2 validation run.
+
+    Deliberately passes no ``--msa-mode``. ColabFold's default
+    (``mmseqs2_uniref_env``) is what makes these scores mean anything.
+
+    This used to force single-sequence MSA mode. That is the right setting
+    for a de novo binder, which has no homologs to find -- and the wrong
+    one for the natural target sharing the complex with it. Run
+    single-sequence, and AF2 folds the target from its sequence alone and
+    hands back a random coil. Across 16 stored production jobs the
+    target's pLDDT never left 26.6-28.6 whatever the input, which pinned
+    ipTM at 0.06-0.13 and i_pAE at 21.5-27.2 across all 115 candidates.
+    Those were constants, not measurements.
+
+    What this fixes is that the numbers can vary at all. Whether they then
+    clear ``IPTM_THRESHOLD`` is expectation, not measurement -- unverified
+    until an A100 run says so. Nor is 0.70 itself calibrated for this
+    protocol: it is the conventional bar for a cofold, and this pipeline
+    scores with vanilla AF2-multimer, no template and no initial guess. The
+    sibling BoltzGen pipeline drops that leg entirely for the same reason,
+    but that reasoning lives on the unmerged ``fix/boltzgen-unreachable-gate``
+    branch, not on master -- do not go looking for it here.
+
+    The default already does the right thing per chain, with no flag. The
+    load-bearing half is that the target gets the MSA it needs -- standard
+    AF2 behaviour, and the whole reason the scores can vary at all. The
+    binder half is expectation, not measurement: a de novo design should
+    find no natural homologs and so degrade to an empty MSA on its own. If
+    it instead picks up spurious hits, that is no worse than the
+    single-sequence it was already getting, so the trade holds either way.
+    Worth confirming from the a3m depths on the first GPU run.
+
+    Either way the old flag forced globally what the default does
+    selectively, and in doing so broke the only chain that needed an MSA.
+
+    Note this makes the MSA server a hard dependency, but not a fail-fast
+    one. ColabFold's ``run_mmseqs2`` retries RATELIMIT and polls
+    PENDING/RUNNING in uncapped ``while True`` loops; only ERROR and
+    MAINTENANCE raise. So an unreachable server raises and fails the
+    design, while a rate-limited or backed-up one instead spins until the
+    3600s ``run_command`` timeout kills it. Either way the failure is
+    visible, which beats billing for a score that cannot vary -- but budget
+    for the slow shape, not just the fast one.
+
+    The argv below is pinned EXACTLY by test_rfdiffusion_af2_cmd.py, both
+    tiers. That is deliberate: a test that only forbids known-bad flags is
+    blind to added ones, and additions here are not cheap. ``--templates``
+    reaches ColabFold's ``mk_template()``, which shells out to ``hhsearch``,
+    which Dockerfile.modal does not install; ``--host-url`` would redirect
+    the MSA lookup to an arbitrary third-party server. Adding a flag means
+    updating the allowlist on purpose.
+    """
+    cmd = [
+        "colabfold_batch",
+        combined_fasta,
+        out_dir,
+        "--model-type", "alphafold2_multimer_v3",
+        "--num-recycle", "3",
+        "--num-models", "1",
+        "--rank", "iptm",
+    ]
+    # Smoke/mini_pilot: cut recycles hard + allow early-exit once a
+    # reasonable ipTM is reached. Legacy production tier keeps the
+    # default 3 recycles, 5 models (see pilot_preset()).
+    if tier in ("smoke", "mini_pilot"):
+        # Replace --num-recycle 3 with --num-recycle 1 and append
+        # early-stop flags. We know the list shape above.
+        recycle_idx = cmd.index("--num-recycle")
+        cmd[recycle_idx + 1] = "1"
+        cmd += [
+            "--stop-at-score", "85",
+            "--recycle-early-stop-tolerance", "0.5",
+        ]
+    return cmd
+
+
 def stage_af2_validation(
     designed_fastas: list[str],
     target_pdb: str,
@@ -1731,28 +1808,17 @@ def stage_af2_validation(
         os.makedirs(per_design_out, exist_ok=True)
 
         try:
-            cmd = [
-                "colabfold_batch",
-                combined_fasta,
-                per_design_out,
-                "--model-type", "alphafold2_multimer_v3",
-                "--msa-mode", "single_sequence",
-                "--num-recycle", "3",
-                "--num-models", "1",
-                "--rank", "iptm",
-            ]
-            # Smoke/mini_pilot: cut recycles hard + allow early-exit once
-            # a reasonable ipTM is reached. Legacy production tier keeps
-            # the default 3 recycles, 5 models (see pilot_preset()).
-            if tier in ("smoke", "mini_pilot"):
-                # Replace --num-recycle 3 with --num-recycle 1 and append
-                # early-stop flags. We know the list shape above.
-                recycle_idx = cmd.index("--num-recycle")
-                cmd[recycle_idx + 1] = "1"
-                cmd += [
-                    "--stop-at-score", "85",
-                    "--recycle-early-stop-tolerance", "0.5",
-                ]
+            # ponytail: TWO MSA server jobs per design, not one --
+            # ColabFold's pair_mode defaults to unpaired_paired, so a
+            # complex with 2 unique sequences submits an unpaired
+            # ``ticket/msa`` AND a paired ``ticket/pair``. One run therefore
+            # re-queries the SAME target 2N times against the public
+            # api.colabfold.com. Tolerable at the design counts actually in
+            # use (the pilot preset clamps to 2, the tools-hub form defaults
+            # to 4, this module's own default is 10) and rude at the
+            # num_designs=1000 the form still accepts. Cache the target a3m
+            # and pass it back in if the design count ever grows.
+            cmd = _build_af2_cmd(combined_fasta, per_design_out, tier)
             # colabfold_batch for a 280+ residue multimer on A10G runs 15-25 min
             # and emits nothing to stdout until done. Without a background
             # heartbeat the stale-detection cron (STALE_HEARTBEAT_SECONDS,
