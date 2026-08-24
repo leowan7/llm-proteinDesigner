@@ -301,6 +301,45 @@ def _encode_pdb(pdb_path: str) -> str:
     return base64.b64encode(Path(pdb_path).read_bytes()).decode()
 
 
+def _webhook_candidate_entry(c: dict) -> dict:
+    """Project one candidate onto the webhook result schema.
+
+    ``sequence`` is the designed binder's amino-acid sequence -- the
+    actual deliverable of the run. It used to be dropped here, and the
+    loss was silent and total: all 12 stored candidate-bearing jobs carry
+    candidates with no sequence at all. Downstream in tools-hub that
+    means the "re-fold with another predictor" button renders on every
+    rfdiffusion results page and does nothing when clicked
+    (``extract_top_n_sequences`` returns ``[]`` and the route redirects
+    with no flash), and ``candidates_to_fasta`` skips every row, so
+    ``export.fasta`` is empty on every job. tools-hub's own
+    ``shared/refold.py`` lists rfdiffusion in ``SOURCE_TOOLS`` with the
+    comment that "each candidate has a sequence" -- which was not true.
+    The sequences survived only in ``designs/metrics.csv`` in Storage,
+    which the web tier exposes nowhere.
+
+    ``pdb_content_b64`` is inlined so candidate_table.html can render the
+    3D-viewer and PDB-download buttons; without it the template falls
+    through to the em-dash branch keyed on that field.
+    """
+    entry = {
+        "rank": c["rank"],
+        "pdb_key": c["pdb_key"],
+        "scores": c["scores"],
+        "sequence": c.get("sequence", ""),
+    }
+    local_file = c.get("local_file")
+    if local_file and os.path.exists(local_file):
+        try:
+            entry["pdb_content_b64"] = _encode_pdb(local_file)
+        except OSError as exc:
+            logger.warning(
+                "Failed to read PDB for rank %d (%s): %s",
+                c["rank"], local_file, exc,
+            )
+    return entry
+
+
 def _build_smoke_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     """Like build_hydra_args but adds diffuser.T override for smoke speed."""
     args = build_hydra_args(job_spec, target_pdb_path)
@@ -521,6 +560,9 @@ def run_smoke_tier(
             "pdb_key": f"design_{rank_idx + 1:03d}.pdb",
             "pdb_content_b64": _encode_pdb(backbone_pdb),
             "scores": r["scores"],
+            # Same deliverable, same omission as the production path had.
+            # Empty when AF2 was stubbed, since no sequence was designed.
+            "sequence": r.get("sequence", ""),
         })
 
     if len(candidates) < num_designs:
@@ -2167,27 +2209,9 @@ def main():
         )
 
         # ----- POST results to webhook -----
-        # Inline base64 of each candidate's PDB so candidate_table.html can
-        # render the 3D-viewer + PDB-download buttons (otherwise it falls
-        # through to the em-dash branch keyed on pdb_content_b64). Mirrors
-        # the smoke path at line 418.
-        webhook_candidates: list[dict] = []
-        for c in candidates:
-            entry = {
-                "rank": c["rank"],
-                "pdb_key": c["pdb_key"],
-                "scores": c["scores"],
-            }
-            local_file = c.get("local_file")
-            if local_file and os.path.exists(local_file):
-                try:
-                    entry["pdb_content_b64"] = _encode_pdb(local_file)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to read PDB for rank %d (%s): %s",
-                        c["rank"], local_file, exc,
-                    )
-            webhook_candidates.append(entry)
+        webhook_candidates: list[dict] = [
+            _webhook_candidate_entry(c) for c in candidates
+        ]
 
         result_payload = {
             "candidates": webhook_candidates,
