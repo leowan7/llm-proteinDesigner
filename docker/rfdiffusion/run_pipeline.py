@@ -960,7 +960,12 @@ def parse_af2_scores(
     ``target_residues`` is the authoritative residue count of that target
     block, taken from the sequences we actually wrote into the FASTA. Prefer
     it: ColabFold's scores JSON does NOT carry per-chain lengths, so a
-    boundary derived from the JSON alone silently degrades to a guess.
+    boundary derived from the JSON alone silently degrades to a guess. It is
+    also what splits ``pLDDT`` (the binder's) from ``complex_pLDDT``.
+
+    ``pLDDT`` is the mean over the BINDER residues only; ``complex_pLDDT``
+    is the whole-complex mean this used to report under the ``pLDDT`` name.
+    See the comment in the body for the production measurement.
     """
     score_files = glob(os.path.join(result_dir, f"{design_name}*scores*.json"))
     if not score_files:
@@ -975,7 +980,53 @@ def parse_af2_scores(
 
         iptm = float(data.get("iptm", 0.0))
         plddt_values = data.get("plddt", [])
-        mean_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else 0.0
+        complex_plddt = (
+            sum(plddt_values) / len(plddt_values) if plddt_values else 0.0
+        )
+
+        # ``pLDDT`` is the BINDER's, not the complex's. ColabFold's
+        # per-residue plddt list is in FASTA order, so it carries the same
+        # target-first layout the interface-PAE boundary below already
+        # relies on.
+        #
+        # The complex mean is not a design-quality metric here: the target
+        # block outnumbers the binder several to one, so it sets the number
+        # and the binder only nudges it. Measured on production run
+        # d44865ae (SARS-CoV-2 RBD, 194 target residues + 61 binder
+        # residues in design_001; the job's binder mean is 59.4, and 61 is
+        # the shape the arithmetic below uses): target pLDDT held 26.8-28.0
+        # across every design while binder pLDDT ranged 44.0-65.7, and the
+        # reported complex mean compressed that 22-point spread into 5
+        # points (31.1-36.7). Across three jobs the target never left
+        # 26.6-28.6 and the binder spanned 44.0-82.0 -- the whole signal,
+        # averaged away.
+        #
+        # The compression also puts PLDDT_THRESHOLD out of arithmetic
+        # reach: with 194 of 255 residues pinned near 28, a binder at a
+        # perfect 100 still only reports (194*28 + 61*100)/255 = 45.2, so
+        # the pLDDT leg of filter_status could never be cleared on this
+        # shape.
+        #
+        # That leg is not why designs were labelled "below threshold",
+        # though. filter_status is an AND of three legs, and on the same
+        # 115 stored candidates the ipTM leg (0.06-0.13 vs a 0.70 bar) and
+        # the i_pAE leg (21.45-27.20 vs a 10.0 bar) each fail on their own,
+        # independently of pLDDT. Reporting the binder mean restores the
+        # metric's information content; it flips no verdict. Applied to the
+        # 28 scored designs it moves 0 of them to "pass", and only 2 of the
+        # 28 clear even the pLDDT leg (80.77 and 81.98). The label changes
+        # only once the ipTM/i_pAE causes are addressed too.
+        binder_plddt = None
+        if target_residues and 0 < int(target_residues) < len(plddt_values):
+            tail = plddt_values[int(target_residues):]
+            binder_plddt = sum(tail) / len(tail)
+        else:
+            logger.warning(
+                "pLDDT: no usable target/binder boundary (target_residues=%r, "
+                "n_residues=%d); falling back to the COMPLEX mean, which is "
+                "dominated by the target and is not a design-quality metric.",
+                target_residues, len(plddt_values),
+            )
 
         pae_matrix = data.get("pae", [])
         ipae = (
@@ -987,8 +1038,16 @@ def parse_af2_scores(
 
         return {
             "ipTM": round(iptm, 4),
-            "pLDDT": round(mean_plddt, 2),
+            "pLDDT": round(
+                complex_plddt if binder_plddt is None else binder_plddt, 2
+            ),
             "i_pAE": round(ipae, 2),
+            # Appended last so a reader diffing this dict sees an added
+            # key rather than a reordered one. Nothing depends on the
+            # position: every consumer reads these by name (ranking.py
+            # flattens with pd.json_normalize and indexes by column name),
+            # so moving it would be harmless and no test enforces it.
+            "complex_pLDDT": round(complex_plddt, 2),
         }
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("Failed to parse AF2 scores for %s: %s", design_name, exc)
