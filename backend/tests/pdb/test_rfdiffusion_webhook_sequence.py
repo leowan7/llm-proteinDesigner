@@ -97,7 +97,40 @@ def test_main_actually_uses_the_helper():
     assert '"pdb_content_b64"' not in src
 
 
+def _candidate_dict_literals(func):
+    """Every dict literal in `func` that looks like a candidate.
+
+    Parsed from the AST rather than matched in the source text. The
+    text version of this test -- `'"sequence"' in inspect.getsource(...)`
+    -- passed against a build where the key had been DELETED and
+    replaced with `# TODO: restore the "sequence" field here`, because
+    a comment contains the substring. A comment contributes no AST key.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {
+            k.value for k in node.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)
+        }
+        if "rank" in keys and "pdb_key" in keys:
+            out.append(keys)
+    return out
+
+
 def test_smoke_tier_candidates_also_carry_the_sequence():
-    """The sibling path had the identical omission."""
-    src = inspect.getsource(rfd.run_smoke_tier)
-    assert '"sequence"' in src
+    """The sibling path had the identical omission.
+
+    Asserts the key is in the candidate dict the smoke tier actually
+    builds, not merely somewhere in its source.
+    """
+    dicts = _candidate_dict_literals(rfd.run_smoke_tier)
+    assert dicts, "found no candidate dict literal in run_smoke_tier"
+    assert all("sequence" in keys for keys in dicts), (
+        f"a smoke candidate omits 'sequence': {dicts}"
+    )

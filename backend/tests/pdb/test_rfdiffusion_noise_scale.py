@@ -104,8 +104,11 @@ def test_the_wizard_default_agrees_with_the_pipeline_default(tmp_path):
     Pinning the two together is the whole guard: either default may be
     changed deliberately, but they cannot drift apart unnoticed.
     """
-    sys.path.insert(0, _REPO_ROOT)
-    from backend.agent.wizard import WIZARD_PARAMS
+    # `agent.wizard`, NOT `backend.agent.wizard`: backend/agent/tools.py
+    # imports the former, and the two are DISTINCT module objects with
+    # separate WizardParam instances. Comparing the wrong one would pin a
+    # copy of the config the app never reads.
+    from agent.wizard import WIZARD_PARAMS
 
     param = next(
         p for p in WIZARD_PARAMS["rfdiffusion"] if p.name == "noise_scale"

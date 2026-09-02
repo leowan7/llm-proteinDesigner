@@ -802,14 +802,37 @@ def run_command(
     """Run a subprocess command with timeout and logging."""
     logger.info("Running: %s", " ".join(cmd[:6]) + ("..." if len(cmd) > 6 else ""))
     start = time.time()
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=cwd,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.TimeoutExpired is a SubprocessError, NOT a
+        # RuntimeError -- so before this, a timeout sailed straight
+        # through every `except RuntimeError: continue` in the pipeline.
+        # A single slow design did not skip that design; it unwound out
+        # of stage_af2_validation and discarded `results`, throwing away
+        # every design already scored in the run.
+        #
+        # Newly reachable: dropping --msa-mode single_sequence made the
+        # MSA server a hard dependency, and ColabFold's run_mmseqs2
+        # retries an unreachable host in an uncapped loop (its
+        # error_count resets inside the loop, so its own `raise` is
+        # unreachable). Both the unreachable and the merely-backed-up
+        # shapes therefore arrive here as a timeout rather than a
+        # non-zero exit.
+        #
+        # Converting to RuntimeError makes both existing handlers behave
+        # the way their comments already claim: skip this design, keep
+        # the rest.
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {' '.join(cmd[:6])}"
+        ) from exc
     elapsed = time.time() - start
     logger.info("Command finished in %.1fs (exit code %d)", elapsed, result.returncode)
     if result.returncode != 0:
@@ -1084,11 +1107,22 @@ def parse_af2_scores(
                 complex_plddt if binder_plddt is None else binder_plddt, 2
             ),
             "i_pAE": round(ipae, 2),
-            # Appended last so a reader diffing this dict sees an added
-            # key rather than a reordered one. Nothing depends on the
-            # position: every consumer reads these by name (ranking.py
-            # flattens with pd.json_normalize and indexes by column name),
-            # so moving it would be harmless and no test enforces it.
+            # MUST STAY LAST. This dict's INSERTION ORDER is load-bearing
+            # in the consumer, which an earlier version of this comment
+            # denied. Two tools-hub readers iterate it in order and take
+            # the first match rather than a named key:
+            #
+            #   blueprints/jobs.py::_share_top_score -- first NUMERIC
+            #     value, and the result is the og:title of a PUBLIC share
+            #     card. Prepend this key and the card advertises
+            #     "complex_pLDDT 35.600" instead of "ipTM 0.110".
+            #   shared/email.py::_top_candidate_summary -- first key with
+            #     a registered legend. Safe only because complex_pLDDT has
+            #     no legend entry; giving it one makes order matter here
+            #     too.
+            #
+            # So a reorder is a user-visible change, not a cosmetic one.
+            # No test pins it, in either repo.
             "complex_pLDDT": round(complex_plddt, 2),
         }
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
@@ -1830,8 +1864,14 @@ def _build_af2_cmd(combined_fasta: str, out_dir: str, tier: str) -> list[str]:
         "--rank", "iptm",
     ]
     # Smoke/mini_pilot: cut recycles hard + allow early-exit once a
-    # reasonable ipTM is reached. Legacy production tier keeps the
-    # default 3 recycles, 5 models (see pilot_preset()).
+    # reasonable ipTM is reached.
+    #
+    # The production tier does NOT "keep the defaults", as this comment
+    # claimed until it was checked: --num-recycle 3 and --num-models 1
+    # are both set explicitly above, for BOTH tiers, and both override
+    # upstream (whose defaults are None and 5). pilot_preset() returns
+    # only {"num_designs": 2} and says nothing about either, so the
+    # cross-reference it pointed at was dead.
     if tier in ("smoke", "mini_pilot"):
         # Replace --num-recycle 3 with --num-recycle 1 and append
         # early-stop flags. We know the list shape above.
@@ -2219,6 +2259,33 @@ def main():
             logger.error("AF2 validation failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, {
                 "error": f"AF2 validation failed: {exc}",
+                "partial": True,
+                "backbone_count": len(backbone_pdbs),
+                "designed_count": len(designed_fastas),
+            })
+            return
+
+        # Every design failed INDIVIDUALLY: stage_af2_validation swallows
+        # a per-design RuntimeError and continues, so N failures return []
+        # rather than raising, and the except above never fires. Without
+        # this the run reports SUCCESS with candidate_count 0 and a
+        # next_steps line recommending experimental validation of nothing,
+        # while the user is billed for the full GPU time.
+        #
+        # run_smoke_tier has had this guard since it was written; the
+        # production path never did. What makes it worth closing now is
+        # that dropping --msa-mode single_sequence introduced a failure
+        # mode that hits every design ALIKE -- an MSA server returning
+        # ERROR or MAINTENANCE fails all N identically, where the old
+        # compute-bound failures were independent per design.
+        if not af2_results:
+            logger.error("AF2 validation parsed zero results from %d designs.",
+                         len(designed_fastas))
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": (
+                    f"AF2 validation produced no scores for any of "
+                    f"{len(designed_fastas)} designs."
+                ),
                 "partial": True,
                 "backbone_count": len(backbone_pdbs),
                 "designed_count": len(designed_fastas),
