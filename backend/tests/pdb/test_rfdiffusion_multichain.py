@@ -619,3 +619,107 @@ def test_hotspot_guard_skipped_without_a_structure(double_pdb):
     """Back-compat: the two-argument form keeps working for callers that
     have no PDB on hand."""
     assert rfd.build_hotspot_string(["A999"], ["A", "B"]) == "[A999]"
+
+
+def _write_scores(tmp_path, design_name, plddt, pae=None):
+    """Write a minimal ColabFold-shaped scores JSON and return its dir."""
+    import json
+    d = tmp_path / design_name
+    d.mkdir()
+    n = len(plddt)
+    (d / f"{design_name}_scores_rank_001_model_1_seed_000.json").write_text(
+        json.dumps({
+            "iptm": 0.1,
+            "plddt": plddt,
+            "pae": pae if pae is not None else [[1.0] * n for _ in range(n)],
+        })
+    )
+    return str(d)
+
+
+def test_plddt_is_the_binder_not_the_complex(tmp_path):
+    """194 target residues at 28.0 + 61 binder residues at 58.0.
+
+    The shape of production run d44865ae: reporting the complex mean here
+    hands back a number the target sets, not the design.
+    """
+    plddt = [28.0] * 194 + [58.0] * 61
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=194,
+    )
+    assert scores["pLDDT"] == 58.0
+    assert scores["complex_pLDDT"] == round((194 * 28.0 + 61 * 58.0) / 255, 2)
+    assert scores["complex_pLDDT"] == 35.18
+
+
+def test_complex_mean_makes_the_plddt_gate_unreachable(tmp_path):
+    """A perfect binder still fails the gate on the complex mean."""
+    plddt = [28.0] * 194 + [100.0] * 61
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=194,
+    )
+    assert scores["pLDDT"] >= rfd.PLDDT_THRESHOLD
+    assert scores["complex_pLDDT"] < rfd.PLDDT_THRESHOLD
+
+
+def test_plddt_slice_is_the_tail_not_the_head(tmp_path):
+    """An inverted or off-by-one slice must not pass.
+
+    The binder block RAMPS (60.0, 60.5, ... 90.0) rather than sitting at a
+    constant. A constant binder block cannot catch a boundary shift at all:
+    dropping leading binder residues from a flat list leaves the mean
+    unchanged, so ``target_residues + 1`` and ``+ 5`` both still produce the
+    right answer. With the ramp every shift moves the mean.
+    """
+    binder = [60.0 + 0.5 * i for i in range(61)]  # mean exactly 75.0
+    plddt = [10.0] * 194 + binder
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=194,
+    )
+    # boundary + 1 -> 75.25; + 5 -> 76.25; - 1 -> 73.95 (eats a target
+    # residue); head slice -> 10.0.
+    assert scores["pLDDT"] == 75.0
+    # Head-slice check, stated separately so the failure names the cause.
+    assert scores["pLDDT"] != 10.0
+    assert scores["complex_pLDDT"] == 25.55
+    assert scores["pLDDT"] != scores["complex_pLDDT"]
+
+
+def test_plddt_rejects_a_negative_boundary(tmp_path):
+    """Guards the ``0 <`` lower bound.
+
+    A negative ``target_residues`` is truthy and is less than the residue
+    count, so without that lower bound ``plddt_values[-5:]`` would slice the
+    LAST five residues and report them as the binder (90.0 here). Fall back
+    to the complex mean instead.
+    """
+    plddt = [10.0] * 194 + [90.0] * 61
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=-5,
+    )
+    assert scores["pLDDT"] == scores["complex_pLDDT"] == 29.14
+    assert scores["pLDDT"] != 90.0
+
+
+def test_plddt_falls_back_to_complex_mean_without_a_boundary(tmp_path):
+    """No target_residues means no binder block -- do not invent one."""
+    plddt = [28.0] * 194 + [58.0] * 61
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=None,
+    )
+    assert scores["pLDDT"] == scores["complex_pLDDT"] == 35.18
+
+
+def test_plddt_falls_back_when_the_boundary_covers_everything(tmp_path):
+    """target_residues >= n_residues leaves an empty tail: no ZeroDivision."""
+    plddt = [28.0] * 10
+    result_dir = _write_scores(tmp_path, "design_0", plddt)
+    scores = rfd.parse_af2_scores(
+        result_dir, "design_0", n_target_chains=1, target_residues=10,
+    )
+    assert scores["pLDDT"] == scores["complex_pLDDT"] == 28.0
