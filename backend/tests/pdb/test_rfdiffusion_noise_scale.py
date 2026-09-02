@@ -89,3 +89,33 @@ def test_the_binder_checkpoint_is_still_selected(tmp_path):
     assert _value(args, "inference.ckpt_override_path").endswith(
         "Complex_base_ckpt.pt"
     )
+
+
+def test_the_wizard_default_agrees_with_the_pipeline_default(tmp_path):
+    """The agent wizard must not re-request the noise the pipeline avoids.
+
+    _handle_collect_parameters emits EVERY WizardParam.default into
+    job_spec["parameters"], and build_hydra_args reads that key. So a
+    wizard default of 1.0 does not merely fail to help -- it explicitly
+    overrides the pipeline's 0.0 and restores the old behaviour, for
+    agent-driven runs only. Direct API callers send no noise_scale and
+    would have silently got a different result from the same product.
+
+    Pinning the two together is the whole guard: either default may be
+    changed deliberately, but they cannot drift apart unnoticed.
+    """
+    sys.path.insert(0, _REPO_ROOT)
+    from backend.agent.wizard import WIZARD_PARAMS
+
+    param = next(
+        p for p in WIZARD_PARAMS["rfdiffusion"] if p.name == "noise_scale"
+    )
+    pipeline_default = _value(_args(_pdb_file(tmp_path)), "denoiser.noise_scale_ca")
+
+    assert float(param.default) == float(pipeline_default), (
+        f"wizard default {param.default} != pipeline default "
+        f"{pipeline_default}; agent runs and API runs would diverge"
+    )
+    assert param.min_value <= 0.0, (
+        f"min_value={param.min_value} cannot express the recommended 0.0"
+    )

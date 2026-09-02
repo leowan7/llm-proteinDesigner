@@ -46,9 +46,22 @@ WIZARD_PARAMS: dict[str, list[WizardParam]] = {
             name="noise_scale",
             label="Noise scale",
             param_type="float",
-            default=1.0,
-            description="1.0 is the default diffusion noise; lower values produce more conservative designs.",
-            min_value=0.1,
+            # 0.0 is RFdiffusion's own binder-design recipe, and it must
+            # match build_hydra_args' default. This wizard emits every
+            # param.default into job_spec["parameters"], so a default of
+            # 1.0 here would EXPLICITLY re-request the full inference
+            # noise the pipeline default exists to avoid -- leaving every
+            # agent-driven run broken while direct API callers, which send
+            # no noise_scale at all, got the fix.
+            default=0.0,
+            description=(
+                "0 is RFdiffusion's recommended setting for binder design. "
+                "Raise it toward 1.0 for more topological diversity at the "
+                "cost of designability."
+            ),
+            # 0.0 must be REACHABLE: the old floor of 0.1 could not express
+            # the recommended value even if a user asked for it.
+            min_value=0.0,
             max_value=2.0,
         ),
     ],
