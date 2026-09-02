@@ -119,3 +119,32 @@ def test_the_wizard_default_agrees_with_the_pipeline_default(tmp_path):
     assert param.min_value <= 0.0, (
         f"min_value={param.min_value} cannot express the recommended 0.0"
     )
+
+
+def test_an_explicit_null_is_treated_as_unspecified(tmp_path):
+    """A JSON null must not kill the run inside a billed container.
+
+    _handle_collect_parameters copies user_overrides through verbatim,
+    and those come from the agent as JSON, where "unspecified" is
+    plausibly emitted as null rather than an omitted key. params.get
+    returns None for that, and float(None) raises -- so before this
+    guard the failure landed after the GPU container had already
+    started. Absent and null must mean the same thing.
+    """
+    args = _args(_pdb_file(tmp_path), noise_scale=None)
+    assert _value(args, "denoiser.noise_scale_ca") == "0.0"
+    assert _value(args, "denoiser.noise_scale_frame") == "0.0"
+
+
+def test_a_null_checkpoint_is_also_treated_as_unspecified(tmp_path):
+    """The sibling of the noise_scale null, in the same function.
+
+    os.path.join rejects None the way float() does, so the same agent
+    override shape killed the run in the same already-billed container.
+    Pre-dates the noise_scale work; fixed with it because it is one
+    class of bug at one call site, not two.
+    """
+    args = _args(_pdb_file(tmp_path), checkpoint=None)
+    assert _value(args, "inference.ckpt_override_path").endswith(
+        "Complex_base_ckpt.pt"
+    )

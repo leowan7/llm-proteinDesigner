@@ -1375,7 +1375,8 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
         target_pdb_path, target_chains, binder_min, binder_max,
     )
 
-    checkpoint = params.get("checkpoint", "Complex_base_ckpt.pt")
+    # Same null hazard as noise_scale below: os.path.join rejects None.
+    checkpoint = params.get("checkpoint") or "Complex_base_ckpt.pt"
     ckpt_path = os.path.join(MODELS_DIR, checkpoint)
 
     # RFdiffusion injects noise at every denoising step. The default of
@@ -1395,7 +1396,12 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     #
     # Overridable so the A/B runs from ONE deploy instead of two:
     # noise_scale=1.0 reproduces the previous behaviour exactly.
-    noise_scale = float(params.get("noise_scale", 0.0))
+    # .get(..., 0.0) is not enough: an agent override can carry an
+    # explicit JSON null, which .get returns as None and float()
+    # rejects -- killing the run inside an already-billed GPU
+    # container. A null means "unspecified", so treat it as absent.
+    _raw_noise = params.get("noise_scale")
+    noise_scale = 0.0 if _raw_noise is None else float(_raw_noise)
 
     hydra_args = [
         f"inference.input_pdb={target_pdb_path}",
