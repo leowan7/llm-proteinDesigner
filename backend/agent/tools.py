@@ -793,8 +793,10 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
             "message": f"Structural pre-flight check skipped: {exc}",
         })
 
-    # Parameter sanity checks against wizard min/max definitions
-    results.extend(check_param_bounds(tool, tool_input.get("parameters") or {}))
+    # Parameter sanity checks against wizard min/max definitions.
+    # `params` is still needed below, for the draft job row.
+    params = tool_input.get("parameters") or {}
+    results.extend(check_param_bounds(tool, params))
 
     has_fail = any(r["status"] == "fail" for r in results)
     has_warn = any(r["status"] == "warn" for r in results)
