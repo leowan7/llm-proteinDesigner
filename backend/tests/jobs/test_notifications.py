@@ -32,7 +32,7 @@ class TestJobNotifications:
             patch("jobs.notifications.settings") as mock_settings,
         ):
             mock_settings.resend_api_key = "re_test"
-            mock_settings.resend_from_email = "Kendrew <jobs@bindwave.com>"
+            mock_settings.resend_from_email = "Bindwave <jobs@bindwave.com>"
             mock_settings.app_base_url = "http://localhost:8000"
             from jobs.notifications import send_completion_email
             await send_completion_email(
@@ -67,7 +67,7 @@ class TestJobNotifications:
             patch("jobs.notifications.settings") as mock_settings,
         ):
             mock_settings.resend_api_key = "re_test"
-            mock_settings.resend_from_email = "Kendrew <jobs@bindwave.com>"
+            mock_settings.resend_from_email = "Bindwave <jobs@bindwave.com>"
             mock_settings.app_base_url = "http://localhost:8000"
             from jobs.notifications import send_failure_email
             await send_failure_email(

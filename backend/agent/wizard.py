@@ -1,4 +1,4 @@
-"""Tool-specific wizard parameter definitions with Kendrew-curated defaults.
+"""Tool-specific wizard parameter definitions with Bindwave-curated defaults.
 
 Each tool has 3-5 essential parameters. Advanced settings are deferred to v2.
 These definitions drive the wizard UI and validate user-supplied parameters

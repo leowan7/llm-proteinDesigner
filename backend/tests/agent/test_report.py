@@ -98,7 +98,7 @@ def test_generate_pdf_report_contains_kendrew_header():
     # in the source module (ensures it wasn't accidentally deleted)
     from agent.analysis import report as report_module
     source = open(report_module.__file__, encoding="utf-8").read()
-    assert "Kendrew Design Analysis Report" in source
+    assert "Bindwave Design Analysis Report" in source
 
 
 def test_generate_pdf_report_shortlist_row_count():
@@ -200,7 +200,7 @@ def test_generate_markdown_report_returns_string():
 
 
 def test_generate_markdown_report_has_top_level_header():
-    """Markdown contains '# Kendrew Design Analysis Report' header."""
+    """Markdown contains '# Bindwave Design Analysis Report' header."""
     from agent.analysis.report import generate_markdown_report
 
     with patch("agent.analysis.report.generate_presigned_get_url", return_value="https://example.com/fake.pdb"):
@@ -214,7 +214,7 @@ def test_generate_markdown_report_has_top_level_header():
             job_spec=FAKE_JOB_SPEC,
             guidance_text="Validate by SPR.",
         )
-    assert "# Kendrew Design Analysis Report" in md
+    assert "# Bindwave Design Analysis Report" in md
 
 
 def test_generate_markdown_report_has_red_flags_section():
