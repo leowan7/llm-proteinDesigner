@@ -132,14 +132,20 @@ Each of these previously produced output that looked like a successful run.
 - **`ipTM` on a multi-chain target is not the binder-target pair.** Fixed for
   BoltzGen; still open for RFdiffusion and PXDesign. Both halves are below.
   This was harmless while every target was single-chain, because the two
-  coincide for a 2-chain complex. On a multi-chain target they do not: the
-  target-target interface of a real crystal dimer scores ~0.9 and, since
-  `ipTM` is a max over residues rather than a mean, dominates almost
-  independently of binder quality. It is both the ranking key and the
-  `IPTM_THRESHOLD` gate, so a mediocre binder can rank first with a
-  plausible-looking number. **Fixed for BoltzGen** (2026-08-07): `design_iptm`
-  is now first in `IPTM_KEYS`, so the value carried into ranking and the
-  `IPTM_THRESHOLD` label is the binder-to-target pair. RFdiffusion and
+  coincide for a 2-chain complex — measured on a single-chain peptide run,
+  bare `iptm` and `design_to_target_iptm` are identical to 3 dp on all 36
+  designs. On a multi-chain target they do not: bare `ipTM` is an interface-pTM
+  **averaged over every chain pair**, so the target's own chain-chain interface
+  is folded in almost independently of binder quality. Across 29 Fel d 1
+  cofolds that A:B pair spans 0.185-0.930 (mean 0.555) — an earlier version of
+  this page called the reduction "a max over residues" and put the dimer
+  interface at "~0.9"; neither holds, and 0.9 is the top of that range rather
+  than its value. It is the ranking key, so a mediocre binder can rank first
+  with a plausible-looking number. **Fixed for BoltzGen** (2026-08-07):
+  `design_to_target_iptm` is now first in `IPTM_KEYS`, so the value carried
+  into ranking is the binder-to-target pair. It no longer feeds a
+  `IPTM_THRESHOLD` gate at all — that leg was removed once it became clear
+  0.70 is a Boltz-2 cofold bar and this pipeline does not cofold. RFdiffusion and
   PXDesign still need a per-pair value derived from the chain layout —
   **not fixed there, treat their multi-chain `ipTM` as unreliable.** tools-hub
   marks it as such in the results UI rather than letting the number stand.

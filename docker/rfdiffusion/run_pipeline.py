@@ -301,6 +301,45 @@ def _encode_pdb(pdb_path: str) -> str:
     return base64.b64encode(Path(pdb_path).read_bytes()).decode()
 
 
+def _webhook_candidate_entry(c: dict) -> dict:
+    """Project one candidate onto the webhook result schema.
+
+    ``sequence`` is the designed binder's amino-acid sequence -- the
+    actual deliverable of the run. It used to be dropped here, and the
+    loss was silent and total: all 12 stored candidate-bearing jobs carry
+    candidates with no sequence at all. Downstream in tools-hub that
+    means the "re-fold with another predictor" button renders on every
+    rfdiffusion results page and does nothing when clicked
+    (``extract_top_n_sequences`` returns ``[]`` and the route redirects
+    with no flash), and ``candidates_to_fasta`` skips every row, so
+    ``export.fasta`` is empty on every job. tools-hub's own
+    ``shared/refold.py`` lists rfdiffusion in ``SOURCE_TOOLS`` with the
+    comment that "each candidate has a sequence" -- which was not true.
+    The sequences survived only in ``designs/metrics.csv`` in Storage,
+    which the web tier exposes nowhere.
+
+    ``pdb_content_b64`` is inlined so candidate_table.html can render the
+    3D-viewer and PDB-download buttons; without it the template falls
+    through to the em-dash branch keyed on that field.
+    """
+    entry = {
+        "rank": c["rank"],
+        "pdb_key": c["pdb_key"],
+        "scores": c["scores"],
+        "sequence": c.get("sequence", ""),
+    }
+    local_file = c.get("local_file")
+    if local_file and os.path.exists(local_file):
+        try:
+            entry["pdb_content_b64"] = _encode_pdb(local_file)
+        except OSError as exc:
+            logger.warning(
+                "Failed to read PDB for rank %d (%s): %s",
+                c["rank"], local_file, exc,
+            )
+    return entry
+
+
 def _build_smoke_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
     """Like build_hydra_args but adds diffuser.T override for smoke speed."""
     args = build_hydra_args(job_spec, target_pdb_path)
@@ -521,6 +560,9 @@ def run_smoke_tier(
             "pdb_key": f"design_{rank_idx + 1:03d}.pdb",
             "pdb_content_b64": _encode_pdb(backbone_pdb),
             "scores": r["scores"],
+            # Same deliverable, same omission as the production path had.
+            # Empty when AF2 was stubbed, since no sequence was designed.
+            "sequence": r.get("sequence", ""),
         })
 
     if len(candidates) < num_designs:
@@ -760,14 +802,37 @@ def run_command(
     """Run a subprocess command with timeout and logging."""
     logger.info("Running: %s", " ".join(cmd[:6]) + ("..." if len(cmd) > 6 else ""))
     start = time.time()
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=cwd,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.TimeoutExpired is a SubprocessError, NOT a
+        # RuntimeError -- so before this, a timeout sailed straight
+        # through every `except RuntimeError: continue` in the pipeline.
+        # A single slow design did not skip that design; it unwound out
+        # of stage_af2_validation and discarded `results`, throwing away
+        # every design already scored in the run.
+        #
+        # Newly reachable: dropping --msa-mode single_sequence made the
+        # MSA server a hard dependency, and ColabFold's run_mmseqs2
+        # retries an unreachable host in an uncapped loop (its
+        # error_count resets inside the loop, so its own `raise` is
+        # unreachable). Both the unreachable and the merely-backed-up
+        # shapes therefore arrive here as a timeout rather than a
+        # non-zero exit.
+        #
+        # Converting to RuntimeError makes both existing handlers behave
+        # the way their comments already claim: skip this design, keep
+        # the rest.
+        raise RuntimeError(
+            f"Command timed out after {timeout}s: {' '.join(cmd[:6])}"
+        ) from exc
     elapsed = time.time() - start
     logger.info("Command finished in %.1fs (exit code %d)", elapsed, result.returncode)
     if result.returncode != 0:
@@ -960,7 +1025,12 @@ def parse_af2_scores(
     ``target_residues`` is the authoritative residue count of that target
     block, taken from the sequences we actually wrote into the FASTA. Prefer
     it: ColabFold's scores JSON does NOT carry per-chain lengths, so a
-    boundary derived from the JSON alone silently degrades to a guess.
+    boundary derived from the JSON alone silently degrades to a guess. It is
+    also what splits ``pLDDT`` (the binder's) from ``complex_pLDDT``.
+
+    ``pLDDT`` is the mean over the BINDER residues only; ``complex_pLDDT``
+    is the whole-complex mean this used to report under the ``pLDDT`` name.
+    See the comment in the body for the production measurement.
     """
     score_files = glob(os.path.join(result_dir, f"{design_name}*scores*.json"))
     if not score_files:
@@ -975,7 +1045,53 @@ def parse_af2_scores(
 
         iptm = float(data.get("iptm", 0.0))
         plddt_values = data.get("plddt", [])
-        mean_plddt = sum(plddt_values) / len(plddt_values) if plddt_values else 0.0
+        complex_plddt = (
+            sum(plddt_values) / len(plddt_values) if plddt_values else 0.0
+        )
+
+        # ``pLDDT`` is the BINDER's, not the complex's. ColabFold's
+        # per-residue plddt list is in FASTA order, so it carries the same
+        # target-first layout the interface-PAE boundary below already
+        # relies on.
+        #
+        # The complex mean is not a design-quality metric here: the target
+        # block outnumbers the binder several to one, so it sets the number
+        # and the binder only nudges it. Measured on production run
+        # d44865ae (SARS-CoV-2 RBD, 194 target residues + 61 binder
+        # residues in design_001; the job's binder mean is 59.4, and 61 is
+        # the shape the arithmetic below uses): target pLDDT held 26.8-28.0
+        # across every design while binder pLDDT ranged 44.0-65.7, and the
+        # reported complex mean compressed that 22-point spread into 5
+        # points (31.1-36.7). Across three jobs the target never left
+        # 26.6-28.6 and the binder spanned 44.0-82.0 -- the whole signal,
+        # averaged away.
+        #
+        # The compression also puts PLDDT_THRESHOLD out of arithmetic
+        # reach: with 194 of 255 residues pinned near 28, a binder at a
+        # perfect 100 still only reports (194*28 + 61*100)/255 = 45.2, so
+        # the pLDDT leg of filter_status could never be cleared on this
+        # shape.
+        #
+        # That leg is not why designs were labelled "below threshold",
+        # though. filter_status is an AND of three legs, and on the same
+        # 115 stored candidates the ipTM leg (0.06-0.13 vs a 0.70 bar) and
+        # the i_pAE leg (21.45-27.20 vs a 10.0 bar) each fail on their own,
+        # independently of pLDDT. Reporting the binder mean restores the
+        # metric's information content; it flips no verdict. Applied to the
+        # 28 scored designs it moves 0 of them to "pass", and only 2 of the
+        # 28 clear even the pLDDT leg (80.77 and 81.98). The label changes
+        # only once the ipTM/i_pAE causes are addressed too.
+        binder_plddt = None
+        if target_residues and 0 < int(target_residues) < len(plddt_values):
+            tail = plddt_values[int(target_residues):]
+            binder_plddt = sum(tail) / len(tail)
+        else:
+            logger.warning(
+                "pLDDT: no usable target/binder boundary (target_residues=%r, "
+                "n_residues=%d); falling back to the COMPLEX mean, which is "
+                "dominated by the target and is not a design-quality metric.",
+                target_residues, len(plddt_values),
+            )
 
         pae_matrix = data.get("pae", [])
         ipae = (
@@ -987,8 +1103,27 @@ def parse_af2_scores(
 
         return {
             "ipTM": round(iptm, 4),
-            "pLDDT": round(mean_plddt, 2),
+            "pLDDT": round(
+                complex_plddt if binder_plddt is None else binder_plddt, 2
+            ),
             "i_pAE": round(ipae, 2),
+            # MUST STAY LAST. This dict's INSERTION ORDER is load-bearing
+            # in the consumer, which an earlier version of this comment
+            # denied. Two tools-hub readers iterate it in order and take
+            # the first match rather than a named key:
+            #
+            #   blueprints/jobs.py::_share_top_score -- first NUMERIC
+            #     value, and the result is the og:title of a PUBLIC share
+            #     card. Prepend this key and the card advertises
+            #     "complex_pLDDT 35.600" instead of "ipTM 0.110".
+            #   shared/email.py::_top_candidate_summary -- first key with
+            #     a registered legend. Safe only because complex_pLDDT has
+            #     no legend entry; giving it one makes order matter here
+            #     too.
+            #
+            # So a reorder is a user-visible change, not a cosmetic one.
+            # No test pins it, in either repo.
+            "complex_pLDDT": round(complex_plddt, 2),
         }
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("Failed to parse AF2 scores for %s: %s", design_name, exc)
@@ -1274,14 +1409,41 @@ def build_hydra_args(job_spec: dict, target_pdb_path: str) -> list[str]:
         target_pdb_path, target_chains, binder_min, binder_max,
     )
 
-    checkpoint = params.get("checkpoint", "Complex_base_ckpt.pt")
+    # Same null hazard as noise_scale below: os.path.join rejects None.
+    checkpoint = params.get("checkpoint") or "Complex_base_ckpt.pt"
     ckpt_path = os.path.join(MODELS_DIR, checkpoint)
+
+    # RFdiffusion injects noise at every denoising step. The default of
+    # 1.0 is tuned for unconditional monomer generation; for BINDER design
+    # the authors' own recipe sets both scales to 0, on the grounds that
+    # less noise yields more designable backbones. This wrapper never set
+    # them at all, so every production binder was diffused at full
+    # inference noise.
+    #
+    # Circumstantial support from the 11 stored production jobs: binders
+    # come out 80-93% helical with Rg 13.8-18.9 A at 55-65 residues --
+    # loose helical bundles -- and the sequences ProteinMPNN then puts on
+    # them are degenerate. Measured inside the delivered structures, the
+    # binder chain uses 12-14 of the 20 residue types with one type at
+    # 25-30%, while the natural target chain in the very same file uses 19
+    # and tops out at 9%. One design is 32 consecutive alanines.
+    #
+    # Overridable so the A/B runs from ONE deploy instead of two:
+    # noise_scale=1.0 reproduces the previous behaviour exactly.
+    # .get(..., 0.0) is not enough: an agent override can carry an
+    # explicit JSON null, which .get returns as None and float()
+    # rejects -- killing the run inside an already-billed GPU
+    # container. A null means "unspecified", so treat it as absent.
+    _raw_noise = params.get("noise_scale")
+    noise_scale = 0.0 if _raw_noise is None else float(_raw_noise)
 
     hydra_args = [
         f"inference.input_pdb={target_pdb_path}",
         f"contigmap.contigs={contig_str}",
         f"inference.num_designs={num_designs}",
         f"inference.ckpt_override_path={ckpt_path}",
+        f"denoiser.noise_scale_ca={noise_scale}",
+        f"denoiser.noise_scale_frame={noise_scale}",
     ]
 
     if hotspots:
@@ -1639,6 +1801,89 @@ def _resolve_binder_sequence(
     return leftovers[0]
 
 
+def _build_af2_cmd(combined_fasta: str, out_dir: str, tier: str) -> list[str]:
+    """Argv for the colabfold_batch AF2 validation run.
+
+    Deliberately passes no ``--msa-mode``. ColabFold's default
+    (``mmseqs2_uniref_env``) is what makes these scores mean anything.
+
+    This used to force single-sequence MSA mode. That is the right setting
+    for a de novo binder, which has no homologs to find -- and the wrong
+    one for the natural target sharing the complex with it. Run
+    single-sequence, and AF2 folds the target from its sequence alone and
+    hands back a random coil. Across 16 stored production jobs the
+    target's pLDDT never left 26.6-28.6 whatever the input, which pinned
+    ipTM at 0.06-0.13 and i_pAE at 21.5-27.2 across all 115 candidates.
+    Those were constants, not measurements.
+
+    What this fixes is that the numbers can vary at all. Whether they then
+    clear ``IPTM_THRESHOLD`` is expectation, not measurement -- unverified
+    until an A100 run says so. Nor is 0.70 itself calibrated for this
+    protocol: it is the conventional bar for a cofold, and this pipeline
+    scores with vanilla AF2-multimer, no template and no initial guess. The
+    sibling BoltzGen pipeline drops that leg entirely for the same reason,
+    but that reasoning lives on the unmerged ``fix/boltzgen-unreachable-gate``
+    branch, not on master -- do not go looking for it here.
+
+    The default already does the right thing per chain, with no flag. The
+    load-bearing half is that the target gets the MSA it needs -- standard
+    AF2 behaviour, and the whole reason the scores can vary at all. The
+    binder half is expectation, not measurement: a de novo design should
+    find no natural homologs and so degrade to an empty MSA on its own. If
+    it instead picks up spurious hits, that is no worse than the
+    single-sequence it was already getting, so the trade holds either way.
+    Worth confirming from the a3m depths on the first GPU run.
+
+    Either way the old flag forced globally what the default does
+    selectively, and in doing so broke the only chain that needed an MSA.
+
+    Note this makes the MSA server a hard dependency, but not a fail-fast
+    one. ColabFold's ``run_mmseqs2`` retries RATELIMIT and polls
+    PENDING/RUNNING in uncapped ``while True`` loops; only ERROR and
+    MAINTENANCE raise. So an unreachable server raises and fails the
+    design, while a rate-limited or backed-up one instead spins until the
+    3600s ``run_command`` timeout kills it. Either way the failure is
+    visible, which beats billing for a score that cannot vary -- but budget
+    for the slow shape, not just the fast one.
+
+    The argv below is pinned EXACTLY by test_rfdiffusion_af2_cmd.py, both
+    tiers. That is deliberate: a test that only forbids known-bad flags is
+    blind to added ones, and additions here are not cheap. ``--templates``
+    reaches ColabFold's ``mk_template()``, which shells out to ``hhsearch``,
+    which Dockerfile.modal does not install; ``--host-url`` would redirect
+    the MSA lookup to an arbitrary third-party server. Adding a flag means
+    updating the allowlist on purpose.
+    """
+    cmd = [
+        "colabfold_batch",
+        combined_fasta,
+        out_dir,
+        "--model-type", "alphafold2_multimer_v3",
+        "--num-recycle", "3",
+        "--num-models", "1",
+        "--rank", "iptm",
+    ]
+    # Smoke/mini_pilot: cut recycles hard + allow early-exit once a
+    # reasonable ipTM is reached.
+    #
+    # The production tier does NOT "keep the defaults", as this comment
+    # claimed until it was checked: --num-recycle 3 and --num-models 1
+    # are both set explicitly above, for BOTH tiers, and both override
+    # upstream (whose defaults are None and 5). pilot_preset() returns
+    # only {"num_designs": 2} and says nothing about either, so the
+    # cross-reference it pointed at was dead.
+    if tier in ("smoke", "mini_pilot"):
+        # Replace --num-recycle 3 with --num-recycle 1 and append
+        # early-stop flags. We know the list shape above.
+        recycle_idx = cmd.index("--num-recycle")
+        cmd[recycle_idx + 1] = "1"
+        cmd += [
+            "--stop-at-score", "85",
+            "--recycle-early-stop-tolerance", "0.5",
+        ]
+    return cmd
+
+
 def stage_af2_validation(
     designed_fastas: list[str],
     target_pdb: str,
@@ -1731,28 +1976,17 @@ def stage_af2_validation(
         os.makedirs(per_design_out, exist_ok=True)
 
         try:
-            cmd = [
-                "colabfold_batch",
-                combined_fasta,
-                per_design_out,
-                "--model-type", "alphafold2_multimer_v3",
-                "--msa-mode", "single_sequence",
-                "--num-recycle", "3",
-                "--num-models", "1",
-                "--rank", "iptm",
-            ]
-            # Smoke/mini_pilot: cut recycles hard + allow early-exit once
-            # a reasonable ipTM is reached. Legacy production tier keeps
-            # the default 3 recycles, 5 models (see pilot_preset()).
-            if tier in ("smoke", "mini_pilot"):
-                # Replace --num-recycle 3 with --num-recycle 1 and append
-                # early-stop flags. We know the list shape above.
-                recycle_idx = cmd.index("--num-recycle")
-                cmd[recycle_idx + 1] = "1"
-                cmd += [
-                    "--stop-at-score", "85",
-                    "--recycle-early-stop-tolerance", "0.5",
-                ]
+            # ponytail: TWO MSA server jobs per design, not one --
+            # ColabFold's pair_mode defaults to unpaired_paired, so a
+            # complex with 2 unique sequences submits an unpaired
+            # ``ticket/msa`` AND a paired ``ticket/pair``. One run therefore
+            # re-queries the SAME target 2N times against the public
+            # api.colabfold.com. Tolerable at the design counts actually in
+            # use (the pilot preset clamps to 2, the tools-hub form defaults
+            # to 4, this module's own default is 10) and rude at the
+            # num_designs=1000 the form still accepts. Cache the target a3m
+            # and pass it back in if the design count ever grows.
+            cmd = _build_af2_cmd(combined_fasta, per_design_out, tier)
             # colabfold_batch for a 280+ residue multimer on A10G runs 15-25 min
             # and emits nothing to stdout until done. Without a background
             # heartbeat the stale-detection cron (STALE_HEARTBEAT_SECONDS,
@@ -2031,6 +2265,33 @@ def main():
             })
             return
 
+        # Every design failed INDIVIDUALLY: stage_af2_validation swallows
+        # a per-design RuntimeError and continues, so N failures return []
+        # rather than raising, and the except above never fires. Without
+        # this the run reports SUCCESS with candidate_count 0 and a
+        # next_steps line recommending experimental validation of nothing,
+        # while the user is billed for the full GPU time.
+        #
+        # run_smoke_tier has had this guard since it was written; the
+        # production path never did. What makes it worth closing now is
+        # that dropping --msa-mode single_sequence introduced a failure
+        # mode that hits every design ALIKE -- an MSA server returning
+        # ERROR or MAINTENANCE fails all N identically, where the old
+        # compute-bound failures were independent per design.
+        if not af2_results:
+            logger.error("AF2 validation parsed zero results from %d designs.",
+                         len(designed_fastas))
+            post_webhook(webhook_url, job_id, pod_id, {
+                "error": (
+                    f"AF2 validation produced no scores for any of "
+                    f"{len(designed_fastas)} designs."
+                ),
+                "partial": True,
+                "backbone_count": len(backbone_pdbs),
+                "designed_count": len(designed_fastas),
+            })
+            return
+
         # ----- Label and rank -----
         # A bad result is still a result. Every AF2 scored design is kept
         # and tagged with filter_status so the UI can show all of them.
@@ -2167,27 +2428,9 @@ def main():
         )
 
         # ----- POST results to webhook -----
-        # Inline base64 of each candidate's PDB so candidate_table.html can
-        # render the 3D-viewer + PDB-download buttons (otherwise it falls
-        # through to the em-dash branch keyed on pdb_content_b64). Mirrors
-        # the smoke path at line 418.
-        webhook_candidates: list[dict] = []
-        for c in candidates:
-            entry = {
-                "rank": c["rank"],
-                "pdb_key": c["pdb_key"],
-                "scores": c["scores"],
-            }
-            local_file = c.get("local_file")
-            if local_file and os.path.exists(local_file):
-                try:
-                    entry["pdb_content_b64"] = _encode_pdb(local_file)
-                except OSError as exc:
-                    logger.warning(
-                        "Failed to read PDB for rank %d (%s): %s",
-                        c["rank"], local_file, exc,
-                    )
-            webhook_candidates.append(entry)
+        webhook_candidates: list[dict] = [
+            _webhook_candidate_entry(c) for c in candidates
+        ]
 
         result_payload = {
             "candidates": webhook_candidates,
