@@ -603,6 +603,58 @@ async def _handle_extract_interface(tool_input: dict) -> str:
         })
 
 
+def check_param_bounds(tool: str, params: dict) -> list:
+    """Validate job parameters against the wizard's min/max definitions.
+
+    Extracted from _handle_validate_preflight so the crash below is
+    reachable from a test at all; that function is async and writes a
+    draft job row, so the loop had no coverage.
+
+    Returns a list of check dicts. It must never RAISE: values arrive
+    from the model's user_overrides, copied through verbatim by
+    _handle_collect_parameters, so a JSON null (the model saying
+    "unspecified") or a string can reach the comparison. `None < 0.0`
+    and `"" < 0.0` both raise TypeError, and dispatch_tool has no
+    try/except -- so the agent turn died inside the very function whose
+    job is to turn bad input into a reported failure.
+    """
+    results = []
+    wizard_defs = {p.name: p for p in WIZARD_PARAMS.get(tool, [])}
+    for name, value in (params or {}).items():
+        defn = wizard_defs.get(name)
+        if defn is not None and (
+            defn.min_value is not None or defn.max_value is not None
+        ):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                results.append({
+                    "check_name": f"param_{name}",
+                    "status": "fail",
+                    "message": f"{defn.label} ({value!r}) is not a number.",
+                })
+                continue
+        if defn and defn.min_value is not None and value < defn.min_value:
+            results.append({
+                "check_name": f"param_{name}",
+                "status": "fail",
+                "message": f"{defn.label} ({value}) is below minimum ({defn.min_value}).",
+            })
+        elif defn and defn.max_value is not None and value > defn.max_value:
+            results.append({
+                "check_name": f"param_{name}",
+                "status": "fail",
+                "message": f"{defn.label} ({value}) exceeds maximum ({defn.max_value}).",
+            })
+        else:
+            results.append({
+                "check_name": f"param_{name}",
+                "status": "pass",
+                "message": f"{defn.label if defn else name}: {value} (within range).",
+            })
+    return results
+
+
 async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str:
     """Handle validate_preflight tool call.
 
@@ -741,29 +793,10 @@ async def _handle_validate_preflight(tool_input: dict, user_id: str = "") -> str
             "message": f"Structural pre-flight check skipped: {exc}",
         })
 
-    # Parameter sanity checks against wizard min/max definitions
+    # Parameter sanity checks against wizard min/max definitions.
+    # `params` is still needed below, for the draft job row.
     params = tool_input.get("parameters") or {}
-    wizard_defs = {p.name: p for p in WIZARD_PARAMS.get(tool, [])}
-    for name, value in params.items():
-        defn = wizard_defs.get(name)
-        if defn and defn.min_value is not None and value < defn.min_value:
-            results.append({
-                "check_name": f"param_{name}",
-                "status": "fail",
-                "message": f"{defn.label} ({value}) is below minimum ({defn.min_value}).",
-            })
-        elif defn and defn.max_value is not None and value > defn.max_value:
-            results.append({
-                "check_name": f"param_{name}",
-                "status": "fail",
-                "message": f"{defn.label} ({value}) exceeds maximum ({defn.max_value}).",
-            })
-        else:
-            results.append({
-                "check_name": f"param_{name}",
-                "status": "pass",
-                "message": f"{defn.label if defn else name}: {value} (within range).",
-            })
+    results.extend(check_param_bounds(tool, params))
 
     has_fail = any(r["status"] == "fail" for r in results)
     has_warn = any(r["status"] == "warn" for r in results)
