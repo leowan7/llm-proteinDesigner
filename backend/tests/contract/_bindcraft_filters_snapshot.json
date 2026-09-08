@@ -1,0 +1,143 @@
+{
+  "_comment": "Active (non-null) thresholds in FreeBindCraft settings_filters/default_filters.json on master, the filter_set selected by backend/pipelines/bindcraft.py. Top-level Average_* entries only; _per_model records the 1_-5_ shape. 56 active leaves total. Regenerate deliberately: see test_bindcraft_filter_docs.py.",
+  "_top_level_keys": 218,
+  "_active_leaves": 56,
+  "_constants": {
+    "_note": "Values hard-coded in FreeBindCraft functions/pr_alternative_utils.py because the metric is not computed without PyRosetta. Quoted verbatim in 02_technical_setup_guide.md; the agent must never report them as measurements.",
+    "interface_interface_hbonds": "5",
+    "interface_delta_unsat_hbonds": "1",
+    "binder_score": "-1.0",
+    "interface_dG": "-10.0",
+    "interface_packstat": "0.65",
+    "interface_hbond_percentage": "60.0",
+    "interface_bunsch_percentage": "0.0",
+    "interface_dG_SASA_ratio": "0.0"
+  },
+  "_sentinels": {
+    "_note": "Fallback values returned when a genuinely-computed metric fails. Each must appear in the docs on the same line as its metric token.",
+    "interface_sc": [
+      "interface_sc",
+      "0.70"
+    ],
+    "surface_hydrophobicity_biopython": [
+      "surface_hydrophobicity",
+      "0.30"
+    ],
+    "surface_hydrophobicity_freesasa": [
+      "surface_hydrophobicity",
+      "0.00"
+    ],
+    "binder_loop_dssp_failure": [
+      "Binder_Loop%",
+      "100.0"
+    ]
+  },
+  "_models_3_to_5_note": "Models 3–5 carry only two active filters each",
+  "_per_model": {
+    "_note": "Per-model overrides relative to the Average_* values above. 'same' means identical threshold and direction.",
+    "1": {
+      "rule": "same",
+      "except": {
+        "ShapeComplementarity": 0.55,
+        "InterfaceAAs": null
+      }
+    },
+    "2": {
+      "rule": "same",
+      "except": {
+        "ShapeComplementarity": 0.55,
+        "InterfaceAAs": null
+      }
+    },
+    "3": {
+      "rule": "only",
+      "active": [
+        "Binder_pLDDT",
+        "Binder_RMSD"
+      ]
+    },
+    "4": {
+      "rule": "only",
+      "active": [
+        "Binder_pLDDT",
+        "Binder_RMSD"
+      ]
+    },
+    "5": {
+      "rule": "only",
+      "active": [
+        "Binder_pLDDT",
+        "Binder_RMSD"
+      ]
+    }
+  },
+  "Average_pLDDT": {
+    "threshold": 0.8,
+    "higher": true
+  },
+  "Average_Binder_pLDDT": {
+    "threshold": 0.8,
+    "higher": true
+  },
+  "Average_pTM": {
+    "threshold": 0.55,
+    "higher": true
+  },
+  "Average_i_pTM": {
+    "threshold": 0.5,
+    "higher": true
+  },
+  "Average_i_pAE": {
+    "threshold": 0.35,
+    "higher": false
+  },
+  "Average_Binder_RMSD": {
+    "threshold": 3.5,
+    "higher": false
+  },
+  "Average_Hotspot_RMSD": {
+    "threshold": 6,
+    "higher": false
+  },
+  "Average_ShapeComplementarity": {
+    "threshold": 0.6,
+    "higher": true
+  },
+  "Average_Surface_Hydrophobicity": {
+    "threshold": 0.35,
+    "higher": false
+  },
+  "Average_dSASA": {
+    "threshold": 1,
+    "higher": true
+  },
+  "Average_n_InterfaceResidues": {
+    "threshold": 7,
+    "higher": true
+  },
+  "Average_n_InterfaceHbonds": {
+    "threshold": 3,
+    "higher": true
+  },
+  "Average_n_InterfaceUnsatHbonds": {
+    "threshold": 4,
+    "higher": false
+  },
+  "Average_Binder_Energy_Score": {
+    "threshold": 0,
+    "higher": false
+  },
+  "Average_dG": {
+    "threshold": 0,
+    "higher": false
+  },
+  "Average_Binder_Loop%": {
+    "threshold": 90,
+    "higher": false
+  },
+  "Average_InterfaceAAs": {
+    "threshold": 3,
+    "higher": false,
+    "_note": "nested per-residue dict upstream; only K and M are active, both <= 3. Flattened here."
+  }
+}

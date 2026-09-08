@@ -79,7 +79,7 @@ All five tools are fully open-source and commercially deployable with no licensi
 | Tool | License | PyRosetta | Notes |
 |---|---|---|---|
 | RFdiffusion | BSD-3-Clause | None in core pipeline | Optional FastRelax step in separate repo uses PyRosetta — skip it |
-| BindCraft | MIT | None | Full PyRosetta replacement with OpenMM, FreeSASA, sc-rs |
+| BindCraft | MIT | None | PyRosetta-free via OpenMM, FreeSASA, sc-rs (eight interface scores are fixed constants) |
 | RFantibody | MIT | None | — |
 | BoltzGen | MIT | None | — |
 | PXDesign | Apache 2.0 | None | Built on Protenix (Apache 2.0) |
@@ -114,19 +114,21 @@ All five tools are fully open-source and commercially deployable with no licensi
 
 ### Key Quality Metrics
 
-**pLDDT:** Per-residue confidence score from AF2/Boltz/Protenix (0–100). >80 = well-folded.
+**pLDDT:** Per-residue confidence score from AF2/Boltz/Protenix. AF2, RFdiffusion and PXDesign report it on **0–100** (>80 = well-folded); BindCraft reports *and* filters it on **0–1** (`Average_pLDDT >= 0.80`). Always establish which scale a pLDDT number is on before quoting or comparing it.
 
-**ipTM (interface predicted Template Modeling score):** Predicted structural quality of the protein-protein interface (0–1). Typical passing threshold: **>= 0.70–0.80**. ipTM is a **binary predictor of binding likelihood only — it does not predict affinity magnitude.**
+**ipTM (interface predicted Template Modeling score):** Predicted structural quality of the protein-protein interface (0–1). Typical passing threshold: **>= 0.70–0.80**. BindCraft's own default filter is looser: `Average_i_pTM >= 0.50`. ipTM is a **binary predictor of binding likelihood only — it does not predict affinity magnitude.**
 
 **ipSAE (BindCraft-specific):** Alternative interface metric using per-residue d0 normalization based on interface contact count. Range 0–1; higher is better. Used via `--rank-by ipSAE`.
 
-**i_pAE (interface predicted Aligned Error):** Predicted uncertainty in binder-target relative orientation. Lower is better. Typical threshold: **<= 10 A**.
+**i_pAE (interface predicted Aligned Error):** Predicted uncertainty in binder-target relative orientation. Lower is better. Raw pAE is in A (typical cutoff <= 10 A), but BindCraft **normalizes it to 0–1** and filters on `Average_i_pAE <= 0.35`. Confirm which scale a number is on before quoting a threshold.
 
-**Binder_RMSD (BindCraft-specific):** Backbone RMSD of binder in complex vs. binder alone. Low RMSD (<= 1.5 A) = binder folds the same way with or without target.
+**Binder_RMSD (BindCraft-specific):** CA RMSD of binder in complex vs. binder alone, computed **without superposition**. Low RMSD = binder folds the same way with or without target. BindCraft's default filter is `Average_Binder_RMSD <= 3.5 A` (and `Average_Hotspot_RMSD <= 6 A`, which despite its name is also measured on the binder chain). Because there is no alignment step, these values are not comparable to the aligned RMSDs quoted in papers — do not apply a literature 1.5 A cutoff to them.
 
-**Shape complementarity (Sc):** Geometric fit between binder and target surfaces (0–1). Default threshold: **>= 0.60**.
+**Shape complementarity (Sc):** Geometric fit between binder and target surfaces (0–1). BindCraft's default filter is `Average_ShapeComplementarity >= 0.60` (per-model `1_ShapeComplementarity >= 0.55`). An exact 0.70 is a failure sentinel, not a measurement.
 
-**SAP score:** Spatial Aggregation Propensity. Predicts aggregation risk. Lower is better; >5 indicates risk.
+**Surface hydrophobicity (BindCraft):** Fraction of the binder monomer's solvent-accessible surface area contributed by hydrophobic residues (0–1 fraction, not a raw score). Lower is better; BindCraft's default filter is `Average_Surface_Hydrophobicity <= 0.35`. It is a crude proxy for aggregation and solubility risk.
+
+**There is no SAP score.** No tool on this platform computes Spatial Aggregation Propensity. Never quote a SAP value to a user; report surface hydrophobicity instead, and do not describe it as a renamed SAP.
 
 **Critical rule — ipTM != affinity:** Always remind users that computational metrics predict whether binding will occur, not how tightly. Kd must be measured experimentally by SPR, BLI, or ITC.
 
@@ -186,14 +188,14 @@ The target is held rigid throughout diffusion. The binder is designed around the
 
 #### What BindCraft Is
 
-Community fork of the original `martinpacesa/BindCraft` that replaces the PyRosetta dependency with fully open-source alternatives. Design logic, AF2 backpropagation hallucination, ProteinMPNN integration, and filtering architecture are **identical** to original BindCraft. Only the backend implementations of specific scoring functions differ.
+Community fork of the original `martinpacesa/BindCraft` that replaces the PyRosetta dependency with fully open-source alternatives. Design logic, AF2 backpropagation hallucination, ProteinMPNN integration, and filtering architecture are **identical** to original BindCraft. The backend implementations of specific scoring functions differ — and eight of them are not reimplemented at all, but returned as fixed constants. Four sit under an active filter (interface dG, binder energy score, and both H-bond counts) and always pass it; the other four are unfiltered. See *Metrics that are not computed on the PyRosetta-free path* in `02_technical_setup_guide.md`.
 
 #### Mechanism (4 Automated Stages Per Trajectory)
 
 1. **AF2 Multimer Hallucination** — gradient descent on interface loss (ipTM, i_pAE, pLDDT) via ColabDesign; binder initialized from random length/composition
 2. **ProteinMPNN Sequence Redesign** — sequences redesigned on the hallucinated backbone
 3. **AF2 Monomer Validation** — binder repredicted in isolation using AF2 monomer model (deliberately stringent cross-check)
-4. **Interface Analysis** — OpenMM relaxation, FreeSASA, sc-rs shape complementarity, RMSD, SAP score
+4. **Interface Analysis** — OpenMM relaxation, FreeSASA/Biopython SASA, sc-rs shape complementarity, CA RMSD. Interface dG, binder energy score and H-bond counts are **not computed** — see `02_technical_setup_guide.md`.
 
 Key distinction from RFdiffusion and PXDesign: the interface is **re-evaluated at every optimization step** (induced-fit).
 
@@ -219,7 +221,7 @@ Key distinction from RFdiffusion and PXDesign: the interface is **re-evaluated a
 
 - Cannot be parallelized across multiple GPUs on a single instance
 - Hard VRAM limits constrain target size
-- H-bond network metrics absent (expected behavior — no open-source equivalent)
+- H-bond network metrics not computed — returned as the fixed constants `interface_interface_hbonds` = 5 and `interface_delta_unsat_hbonds` = 1, which always pass their filters
 - No guaranteed throughput per unit time (runs until filter quota is met)
 
 ---
@@ -335,7 +337,7 @@ Key contribution: **multi-predictor confidence filtering** combining metrics fro
 
 ### BindCraft
 - Zero designs passing all filter stages → Try `Relaxed` filter set
-- H-bond metrics missing or zero → Expected FreeBindCraft behavior (placeholder values)
+- H-bond counts always exactly 5 and 1 → Expected FreeBindCraft behavior; these are constants, not measurements. Same for a shape complementarity of exactly 0.70 or a surface hydrophobicity of exactly 0.30 or 0.00 — those are failure sentinels
 - All designs structurally identical → Increase temperature; run multiple separate jobs
 
 ### RFantibody
@@ -353,7 +355,7 @@ Key contribution: **multi-predictor confidence filtering** combining metrics fro
 
 ### General (All Tools)
 - No experimental hits despite good ipTM → ipTM is binary only; screen more designs
-- Expression failure → Add SAP score filter; use SolMPNN variant
+- Expression failure → Tighten BindCraft's surface-hydrophobicity filter (`Average_Surface_Hydrophobicity`, default <= 0.35); use SolMPNN variant. There is no SAP filter to add — no tool here computes SAP.
 
 ---
 

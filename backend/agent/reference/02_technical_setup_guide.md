@@ -75,6 +75,11 @@ PXDesign's Protenix-based filtering requires MSA for reliable confidence scoring
 2. AlphaFold2 validation (multimer prediction)
 3. Filter: ipTM >= 0.70–0.80, pLDDT >= 80, i_pAE <= 10 A, buried SASA >= 800 A^2
 
+These are conventional post-hoc cutoffs you apply yourself to raw AF2 output, on **raw scales**
+(pLDDT 0–100, pAE in A). They are not BindCraft's filters and must not be quoted as such —
+BindCraft ships its own `default_filters.json` on normalized 0–1 scales with different values.
+See §3, *Default Filter Thresholds*.
+
 ### Hardware
 
 | GPU | Max Target Size | Designs/Hour |
@@ -119,17 +124,99 @@ PXDesign's Protenix-based filtering requires MSA for reliable confidence scoring
 
 ### Default Filter Thresholds
 
-| Filter | Threshold | Backend |
-|---|---|---|
-| pLDDT | >= 80 | AF2 |
-| i_pTM | >= 0.70 | AF2 |
-| i_pAE | <= 10 | AF2 |
-| binder_RMSD | <= 1.5 A | Biopython |
-| Clash_score | <= 20 | OpenMM / FreeSASA |
-| shape_complementarity | >= 0.60 | sc-rs (MIT) |
-| SAP_score | <= 5.0 | Biopython |
-| Interface_buried_sasa | >= 800 A^2 | FreeSASA |
-| H-bond network | Not computed | Placeholder — expected behavior |
+Verified against `settings_filters/default_filters.json` on FreeBindCraft `master` — the filter set
+`backend/pipelines/bindcraft.py` selects by default. The names below are the literal JSON keys.
+That file has 218 top-level keys holding 56 active thresholds: 18 at the average level (the 17 rows
+below — `Average_InterfaceAAs` carries two, K and M), plus 38 per-model duplicates (see the per-model
+note below). Every other key is `"threshold": null` and rejects nothing.
+
+| Filter key | Pass condition | Scale | Backend |
+|---|---|---|---|
+| `Average_pLDDT` | >= 0.80 | **0–1, not 0–100** | AF2 |
+| `Average_Binder_pLDDT` | >= 0.80 | 0–1 | AF2 |
+| `Average_pTM` | >= 0.55 | 0–1 | AF2 |
+| `Average_i_pTM` | >= 0.50 | 0–1 | AF2 |
+| `Average_i_pAE` | <= 0.35 | **normalized 0–1, not raw A** | AF2 |
+| `Average_Binder_RMSD` | <= 3.5 A | A | Biopython, CA-only, **no superposition** |
+| `Average_Hotspot_RMSD` | <= 6 A | A | Biopython, CA-only, **no superposition** |
+| `Average_ShapeComplementarity` | >= 0.60 | 0–1 | `sc-rs` CLI (MIT) |
+| `Average_Surface_Hydrophobicity` | <= 0.35 | 0–1 fraction of binder-monomer SASA | FreeSASA, Biopython `ShrakeRupley` fallback |
+| `Average_dSASA` | >= 1 A^2 | A^2, binder + target sides summed | FreeSASA / Biopython |
+| `Average_n_InterfaceResidues` | >= 7 | count | Biopython contact search |
+| `Average_InterfaceAAs` K, M | <= 3 each | count | Biopython |
+| `Average_Binder_Loop%` | <= 90 | percent | Biopython + DSSP |
+| `Average_Binder_Energy_Score` | <= 0 | — | **Not computed — see below** |
+| `Average_dG` | <= 0 | — | **Not computed — see below** |
+| `Average_n_InterfaceHbonds` | >= 3 | count | **Not computed — see below** |
+| `Average_n_InterfaceUnsatHbonds` | <= 4 | count | **Not computed — see below** |
+
+**There is no clash filter and no SAP filter in the default set.** `Average_Unrelaxed_Clashes` and
+`Average_Relaxed_Clashes` both have null thresholds, so clashes reject nothing by default (they are
+still computed, and are still worth reporting — see `03_metric_profiles.md`); also null are
+`Average_PackStat`, `Average_pAE`, `Average_i_pLDDT`, `Average_Interface_SASA_%` and
+`Average_dG/dSASA`. No key named `SAP` exists anywhere in the file — the closest quantity is
+`Average_Surface_Hydrophobicity`, defined in `01_tool_selection_guide.md` under *Key Quality
+Metrics*. It is a different measurement, not a renamed SAP.
+
+Some thresholds mean less than they look like. `Average_dSASA >= 1 A^2` only checks that an interface
+exists at all — it is not a burial requirement, so never present it as an 800 A^2-style cutoff. The
+800 A^2 figures elsewhere — the RFdiffusion post-hoc filter in §2 and the dSASA interpretation band in
+`03_metric_profiles.md` — are conventions for judging a design, not BindCraft pass/reject rules. And both RMSD filters
+are computed **without superposition**, as a direct CA-coordinate difference, so their values are not
+comparable to the aligned RMSDs quoted in most papers — which is why the cutoff is 3.5 A rather than
+the ~1.5 A an aligned metric would use. `Average_Hotspot_RMSD` is measured on the binder chain
+despite its name; it does not measure hotspot residues.
+
+Per-model keys mirror the average for models 1 and 2 (`1_*`, `2_*`), with two exceptions:
+`1_ShapeComplementarity` and `2_ShapeComplementarity` are 0.55 rather than 0.60, and `InterfaceAAs`
+carries its K/M limits **only** on the average (`1_InterfaceAAs` and `2_InterfaceAAs` are fully null).
+Models 3–5 carry only two active filters each — `3_Binder_pLDDT >= 0.80` and
+`3_Binder_RMSD <= 3.5` A (likewise `4_` and `5_`) — and are null for everything else.
+
+#### Metrics that are not computed on the PyRosetta-free path
+
+FreeBindCraft replaces PyRosetta, and four filtered quantities are not calculated at all. They are
+returned as fixed constants deliberately chosen to sit on the passing side of their own filters
+(`functions/pr_alternative_utils.py:577-584`; the image clones `master` unpinned, so line numbers are
+as of 2026-09 and may drift — the values are what matter):
+
+| Metric | Constant returned | Its filter | Effect |
+|---|---|---|---|
+| `interface_dG` | -10.0 | `Average_dG <= 0` | always passes |
+| `binder_score` | -1.0 | `Average_Binder_Energy_Score <= 0` | always passes |
+| `interface_interface_hbonds` | 5 | `Average_n_InterfaceHbonds >= 3` | always passes |
+| `interface_delta_unsat_hbonds` | 1 | `Average_n_InterfaceUnsatHbonds <= 4` | always passes |
+
+`interface_packstat` (0.65), `interface_hbond_percentage` (60.0), `interface_bunsch_percentage` (0.0)
+and `interface_dG_SASA_ratio` (0.0) are constants too, but have no active filter. Never present any of
+these to a user as a measured property of their design — an H-bond count of 5 means "not measured",
+not "five hydrogen bonds".
+
+#### Failure sentinels: values that mean "the calculation failed"
+
+Two genuinely-computed metrics fall back to hard-coded values when their computation fails — three
+sentinels in all, every one on the **passing** side of its own filter, so a failed calculation is
+silently indistinguishable from a good design. A fourth fallback, on a third metric, runs the other
+way (below).
+
+| Metric | Sentinel | Its filter | Why it is silent |
+|---|---|---|---|
+| `interface_sc` (shape complementarity) | **0.70** | `>= 0.60` (per-model `>= 0.55`) | `sc-rs` binary missing, empty output, 120 s timeout, or any exception |
+| `surface_hydrophobicity` | **0.30** | `<= 0.35` | Biopython SASA path raises |
+| `surface_hydrophobicity` | **0.00** | `<= 0.35` | FreeSASA hydrophobic-residue selection fails (`except Exception: pass` leaves the variable at its 0.0 initial value) |
+
+Which sentinel you get depends on where the SASA calculation fails. FreeSASA is the default engine
+when it imports, so **0.00 is the more likely silent pass**; if the freesasa package is missing
+entirely, Biopython becomes the first-level engine and 0.30 becomes the likely one. A 0.00 can also
+mean the binder chain was simply absent from the model, on either engine.
+
+The fourth fallback runs the other way. If DSSP fails, secondary-structure assignment returns a
+hard-coded `Binder_Loop% = 100.0`, which **fails** `Average_Binder_Loop% <= 90` — so a DSSP failure
+silently discards good designs rather than passing bad ones. A run with suspiciously few survivors is
+worth checking for DSSP errors before blaming the target.
+
+Treat an exact 0.70 shape complementarity, or a surface hydrophobicity of exactly 0.30 or 0.00, as
+suspect rather than as a result.
 
 ### GPU Memory Reference
 
