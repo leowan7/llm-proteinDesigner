@@ -516,13 +516,18 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
     # PDBs correspond to the highest-scoring model but downstream display
     # uses the aggregate for ranking parity with other tools.
     #
-    # The web service's bindcraft results template renders 5 columns:
-    # ipTM, pLDDT, RMSD, shape_complementarity, SAP. Each must be
-    # populated here or the table renders an em-dash. We accept multiple CSV
-    # column names per canonical key because FreeBindCraft (cytokineking fork)
-    # ships a different column layout than upstream BindCraft and naming has
-    # drifted across versions — earlier dict entries lose to later ones, so
-    # the most common name should appear last for each canonical key.
+    # The web tier renders a FIXED column list per tool (tools-hub carries two
+    # separate copies of it: templates/tools/bindcraft_results.html and
+    # shared/result_columns.py). Any canonical key that list names but this map
+    # never populates renders as an em-dash — silently, since neither repo has a
+    # guard that a rendered column actually resolves. Renaming a key here is
+    # therefore a cross-repo change, and the web tier has to accept the new
+    # spelling before this side ships it.
+    #
+    # Where a key genuinely has several upstream spellings, list them all:
+    # earlier entries lose to later ones, so the most common name goes last.
+    # List only names checked against the FreeBindCraft revision we install; an
+    # unverified name buys nothing and silently mismatches if its units differ.
     _METRIC_MAP = {
         # ipTM
         "Average_i_pTM": "ipTM",
@@ -543,12 +548,23 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
         "ShapeComplementarity": "shape_complementarity",
         "Average_Shape_Complementarity": "shape_complementarity",
         "Average_ShapeComplementarity": "shape_complementarity",
-        # SAP (Spatial Aggregation Propensity) / surface hydrophobicity.
-        # FreeBindCraft writes Average_Surface_Hydrophobicity by default;
-        # legacy / alternate naming covered for forward compat.
-        "HydrophobicityScore": "SAP",
-        "Average_Binder_Surface_Hydrophobicity": "SAP",
-        "Average_Surface_Hydrophobicity": "SAP",
+        # Surface hydrophobicity — NOT SAP. This key was called "SAP" (Spatial
+        # Aggregation Propensity); BindCraft computes no such thing. We install
+        # FreeBindCraft with --no-pyrosetta (both Dockerfiles), whose scoring
+        # emits surface_hydrophobicity = hydrophobic-residue SASA over
+        # binder-monomer SASA (functions/pr_alternative_utils.py), a 0-1
+        # fraction that settings_filters/default_filters.json rejects above 0.35
+        # (higher=false). SAP is a different, unbounded quantity.
+        #
+        # The key reaches customers verbatim as a CSV header — from
+        # _write_metrics_csv below, and again from the web tier's own export —
+        # so the old name shipped a column headed SAP holding a hydrophobicity
+        # fraction.
+        #
+        # This is the only hydrophobicity column FreeBindCraft writes:
+        # functions/generic_utils.py builds headers as Average_/1_../5_ + label,
+        # and the only hydrophobicity labels are Surface_ and Interface_.
+        "Average_Surface_Hydrophobicity": "surface_hydrophobicity",
     }
 
     candidates = []
