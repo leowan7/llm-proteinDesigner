@@ -161,7 +161,8 @@ class BindCraftPipeline(ToolPipeline):
         """Parse BindCraft output into CandidateResult list.
 
         Expects output dict with 'candidates' list where each entry has
-        'rank', 'pdb_key', and scores: ipTM, pLDDT, RMSD, shape_complementarity, SAP.
+        'rank', 'pdb_key', and scores: ipTM, pLDDT, RMSD,
+        shape_complementarity, surface_hydrophobicity.
 
         Args:
             output: RunPod handler output dict.
