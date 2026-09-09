@@ -29,21 +29,28 @@ from agent.analysis.ranking import (
 # Green = strong; red = red_flag; lower_is_better flips the comparison
 # ---------------------------------------------------------------------------
 
+# Interpretation bands for candidates that have ALREADY passed BindCraft's filters.
+# This is the executable copy of the table in
+# backend/agent/reference/03_metric_profiles.md -- change both together, or the agent
+# will read one set of bands and report verdicts computed from the other.
+#
+# BindCraft's default_filters.json rejects before we ever see a candidate, so a band
+# below the filter line can never fire and would only mislabel: i_pTM < 0.50,
+# pLDDT < 0.80, ShapeComplementarity < 0.60 and Surface_Hydrophobicity > 0.35 are all
+# already gone. "red" is therefore omitted where the filter is the red line.
+#
+# dG is deliberately absent: FreeBindCraft has no PyRosetta, so interface_dG is the fixed
+# constant -10.0 for every design. Scoring it would rank noise.
 METRIC_THRESHOLDS: dict[str, dict] = {
     "ipTM": {
         "green": 0.7,
-        "red": 0.45,
+        "red": None,  # filter rejects < 0.50
         "lower_is_better": False,
     },
     "pLDDT": {
-        "green": 0.8,
-        "red": 0.7,
+        "green": 0.85,
+        "red": None,  # filter rejects < 0.80
         "lower_is_better": False,
-    },
-    "dG": {
-        "green": -30,
-        "red": -10,
-        "lower_is_better": True,  # more negative = better
     },
     "dSASA": {
         "green": 800,
@@ -51,18 +58,18 @@ METRIC_THRESHOLDS: dict[str, dict] = {
         "lower_is_better": False,
     },
     "ShapeComplementarity": {
-        "green": 0.65,
-        "red": 0.5,
+        "green": 0.7,
+        "red": None,  # filter rejects < 0.60
         "lower_is_better": False,
     },
     "Relaxed_Clashes": {
         "green": 0,
         "red": 2,
-        "lower_is_better": True,  # 0 = best, >2 = red flag
+        "lower_is_better": True,  # 0 = best, >2 = red flag; computed but not filtered
     },
     "Surface_Hydrophobicity": {
-        "green": 0.4,
-        "red": 0.6,
+        "green": 0.25,
+        "red": None,  # filter rejects > 0.35
         "lower_is_better": True,  # lower = less aggregation risk
     },
 }
@@ -80,6 +87,10 @@ def _assess_threshold(metric: str, value: float) -> str:
         'red_flag' if value crosses the red threshold,
         'passable' otherwise.
         Returns 'unknown' if the metric is not in METRIC_THRESHOLDS.
+
+    A red threshold of None means BindCraft's own filter is the red line, so anything we
+    are scoring already cleared it -- such a metric is never 'red_flag', only 'strong' or
+    'passable'.
     """
     thresholds = METRIC_THRESHOLDS.get(metric)
     if thresholds is None:
@@ -93,7 +104,7 @@ def _assess_threshold(metric: str, value: float) -> str:
         # Lower value is better: green if <= green threshold, red_flag if >= red threshold
         if value <= green:
             return "strong"
-        elif value >= red:
+        elif red is not None and value >= red:
             return "red_flag"
         else:
             return "passable"
@@ -101,7 +112,7 @@ def _assess_threshold(metric: str, value: float) -> str:
         # Higher value is better: green if >= green threshold, red_flag if <= red threshold
         if value >= green:
             return "strong"
-        elif value <= red:
+        elif red is not None and value <= red:
             return "red_flag"
         else:
             return "passable"
@@ -365,11 +376,16 @@ async def handle_analyze_candidates(tool_input: dict, user_id: str) -> str:
 async def handle_flag_red_flags(tool_input: dict, user_id: str) -> str:
     """Scan all candidates from a loaded job for problematic metric combinations.
 
-    Checks four red flag patterns (per D-12):
-    1. ipTM > 0.7 AND ShapeComplementarity < 0.5 — high confidence / poor geometric fit
-    2. dG < -30 AND Surface_Hydrophobicity > 0.6 — favorable energy / aggregation-prone
-    3. Relaxed_Clashes > 0 — structural clashes survive Rosetta relaxation
-    4. pLDDT < 0.7 — low backbone confidence / foldability concern
+    Checks three red flag patterns (per D-12), all reachable for candidates that already
+    passed BindCraft's filters:
+    1. ipTM > 0.7 AND ShapeComplementarity in 0.60-0.70 — high confidence, packing only
+       just clears the filter
+    2. ipTM > 0.7 AND Surface_Hydrophobicity > 0.30 — good interface, aggregation-prone
+    3. Relaxed_Clashes > 0 — structural clashes survive OpenMM relaxation
+
+    A fourth pattern (dG < -30 AND Surface_Hydrophobicity > 0.6) was removed: FreeBindCraft
+    has no PyRosetta, so interface_dG is the fixed constant -10.0 and the rule could never
+    fire. See backend/agent/reference/03_metric_profiles.md.
 
     Args:
         tool_input: Must contain 'job_id'.
@@ -404,7 +420,6 @@ async def handle_flag_red_flags(tool_input: dict, user_id: str) -> str:
 
         iptm = scores.get("ipTM")
         sc = scores.get("ShapeComplementarity")
-        dg = scores.get("dG")
         surface_hydro = scores.get("Surface_Hydrophobicity")
         clashes = scores.get("Relaxed_Clashes")
         plddt = scores.get("pLDDT")
@@ -412,27 +427,32 @@ async def handle_flag_red_flags(tool_input: dict, user_id: str) -> str:
         # Flag 1: High ipTM + low ShapeComplementarity
         # Likely false positive — confidence doesn't match geometric fit
         if iptm is not None and sc is not None:
-            if iptm > 0.7 and sc < 0.5:
+            # 0.70 is the sc-rs failure sentinel, not a measurement, so exclude it.
+            if iptm > 0.7 and 0.6 <= sc < 0.7:
                 candidate_flags.append({
                     "flag": (
-                        "High confidence but poor geometric fit — likely false positive"
+                        "High confidence but packing only just clears the filter — "
+                        "likely false positive"
                     ),
                     "metrics": {"ipTM": iptm, "ShapeComplementarity": sc},
                 })
 
-        # Flag 2: Very favorable dG + high Surface_Hydrophobicity
-        # Energetically favorable but aggregation-prone
-        if dg is not None and surface_hydro is not None:
-            if dg < -30 and surface_hydro > 0.6:
+        # Flag 2: Good interface + Surface_Hydrophobicity near the filter ceiling.
+        # Replaces a dG-based rule that could never fire -- interface_dG is a fixed
+        # constant on the PyRosetta-free path. 0.30 and 0.00 are SASA failure sentinels,
+        # not measurements, so only values strictly above 0.30 count.
+        if iptm is not None and surface_hydro is not None:
+            if iptm > 0.7 and 0.30 < surface_hydro <= 0.35:
                 candidate_flags.append({
                     "flag": (
-                        "Energetically favorable but aggregation-prone"
+                        "Good interface but aggregation-prone — surface hydrophobicity "
+                        "near the filter ceiling"
                     ),
-                    "metrics": {"dG": dg, "Surface_Hydrophobicity": surface_hydro},
+                    "metrics": {"ipTM": iptm, "Surface_Hydrophobicity": surface_hydro},
                 })
 
         # Flag 3: Relaxed_Clashes > 0
-        # Structural clashes survive Rosetta relaxation — structural problem
+        # Structural clashes survive OpenMM relaxation — structural problem
         if clashes is not None and clashes > 0:
             candidate_flags.append({
                 "flag": (
@@ -441,11 +461,11 @@ async def handle_flag_red_flags(tool_input: dict, user_id: str) -> str:
                 "metrics": {"Relaxed_Clashes": clashes},
             })
 
-        # Flag 4: pLDDT < 0.7
-        # Low backbone confidence — foldability concern
-        if plddt is not None and plddt < 0.7:
+        # Flag 4: pLDDT near the filter floor. Below 0.80 is unreachable -- the filter
+        # already rejected it -- so the reachable concern is a design that only just cleared.
+        if plddt is not None and 0.80 <= plddt < 0.85:
             candidate_flags.append({
-                "flag": "Low backbone confidence — foldability concern",
+                "flag": "Backbone confidence only just clears the filter",
                 "metrics": {"pLDDT": plddt},
             })
 
