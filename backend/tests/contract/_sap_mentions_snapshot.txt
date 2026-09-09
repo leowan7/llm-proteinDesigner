@@ -1,0 +1,14 @@
+// Every line in backend/agent/reference/**.md allowed to mention SAP, verbatim.
+// BindCraft computes no Spatial Aggregation Propensity; these lines all say so, and the
+// test asserts both directions: no new SAP line may appear, and none of these may vanish.
+// Comment marker is '//' not '#', so a markdown heading mentioning SAP can be allowlisted.
+// Entries are whole hard-wrapped lines, so reflowing a paragraph that mentions SAP will
+// fail the test until you regenerate. To regenerate, from the repo root:
+//   PYTHONIOENCODING=utf-8 python -c "import pathlib;p=pathlib.Path('backend/agent/reference');print(chr(10).join(l.strip() for f in sorted(p.rglob('*.md')) for l in f.read_text(encoding='utf-8').splitlines() if 'SAP' in l))"
+// (PYTHONIOENCODING is needed on Windows: one line contains a non-cp1252 arrow.)
+// Blank lines and //-comments are ignored.
+**There is no SAP score.** No tool on this platform computes Spatial Aggregation Propensity. Never quote a SAP value to a user; report surface hydrophobicity instead, and do not describe it as a renamed SAP.
+- Expression failure → Tighten BindCraft's surface-hydrophobicity filter (`Average_Surface_Hydrophobicity`, default <= 0.35); use SolMPNN variant. There is no SAP filter to add — no tool here computes SAP.
+**There is no clash filter and no SAP filter in the default set.** `Average_Unrelaxed_Clashes` and
+`Average_dG/dSASA`. No key named `SAP` exists anywhere in the file — the closest quantity is
+Metrics*. It is a different measurement, not a renamed SAP.

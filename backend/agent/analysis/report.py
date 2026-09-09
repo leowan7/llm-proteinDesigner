@@ -87,7 +87,6 @@ def _get_guidance(tool: str) -> str:
 _METRIC_INTERPRETATION: dict[str, str] = {
     "ipTM": "Interface predicted TM-score (0-1). >0.7 indicates strong predicted binding.",
     "pLDDT": "Per-residue confidence (0-1). >0.8 indicates high backbone confidence.",
-    "dG": "Binding free energy (Rosetta units). More negative = stronger predicted binding.",
     "dSASA": (
         "Buried solvent-accessible surface area on binding (Ų). "
         ">800 Ų indicates a substantial interface."

@@ -191,7 +191,7 @@ TOOL_DEFINITIONS = [
                 },
                 "sort_by": {
                     "type": "string",
-                    "description": "Metric name to rank candidates by (e.g. 'ipTM', 'dG', 'pLDDT').",
+                    "description": "Metric name to rank candidates by (e.g. 'ipTM', 'ShapeComplementarity', 'pLDDT').",
                 },
                 "filters": {
                     "type": "object",

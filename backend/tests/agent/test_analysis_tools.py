@@ -22,14 +22,15 @@ def _make_candidates(n: int = 25) -> list[dict]:
     for i in range(n):
         # Vary scores so we get a range of quality
         rank = i + 1
-        iptm = round(0.90 - i * 0.015, 3)           # 0.90 down to ~0.54
-        plddt = round(0.88 - i * 0.012, 3)           # 0.88 down to ~0.60
-        dg = round(-45.0 + i * 0.8, 2)               # -45 up to ~-26
-        dsasa = round(950 - i * 15, 1)               # 950 down to ~590
-        sc = round(0.72 - i * 0.008, 3)              # 0.72 down to ~0.52
+        # All values stay inside what default_filters.json lets through -- a candidate
+        # below the filter line never reaches this code.
+        iptm = round(0.90 - i * 0.015, 3)           # 0.90 down to ~0.54 (filter: >= 0.50)
+        plddt = round(0.89 - i * 0.003, 3)          # 0.89 down to ~0.82 (filter: >= 0.80)
+        dsasa = round(950 - i * 15, 1)              # 950 down to ~590
+        sc = round(0.72 - i * 0.004, 3)             # 0.72 down to ~0.62 (filter: >= 0.60)
         # Inject some red flags
         relaxed_clashes = 1 if i in (3, 7, 12) else 0   # clashes in some
-        surface_hydro = round(0.30 + i * 0.015, 3)  # 0.30 up to ~0.66
+        surface_hydro = round(0.20 + i * 0.006, 3)  # 0.20 up to ~0.34 (filter: <= 0.35)
         n_interface = max(4, 14 - i // 2)
 
         candidates.append({
@@ -38,7 +39,6 @@ def _make_candidates(n: int = 25) -> list[dict]:
             "scores": {
                 "ipTM": iptm,
                 "pLDDT": plddt,
-                "dG": dg,
                 "dSASA": dsasa,
                 "ShapeComplementarity": sc,
                 "Relaxed_Clashes": relaxed_clashes,
@@ -144,9 +144,10 @@ class TestFilterCandidates:
         """filter_candidates with < threshold returns only rows below value."""
         from agent.analysis.ranking import filter_candidates
 
-        filtered = filter_candidates(FAKE_CANDIDATES, {"dG": {"<": -35.0}})
+        filtered = filter_candidates(FAKE_CANDIDATES, {"dSASA": {"<": 800.0}})
+        assert filtered, "fixture should contain candidates under the threshold"
         for candidate in filtered:
-            assert candidate["scores"]["dG"] < -35.0
+            assert candidate["scores"]["dSASA"] < 800.0
 
     def test_filter_candidates_and_logic(self):
         """Multiple criteria are applied with AND logic."""
@@ -185,7 +186,7 @@ class TestComputeDistributionStats:
         # Should have an entry for each score key
         assert "ipTM" in stats
         assert "pLDDT" in stats
-        assert "dG" in stats
+        assert "ShapeComplementarity" in stats
         assert "dSASA" in stats
 
     def test_compute_distribution_stats_correct_keys(self):
@@ -226,12 +227,11 @@ def _make_db_rows(n: int):
             "pdb_key": f"jobs/job-xyz/candidate_{i+1:03d}.pdb",
             "scores": json.dumps({
                 "ipTM": round(0.90 - i * 0.015, 3),
-                "pLDDT": round(0.88 - i * 0.012, 3),
-                "dG": round(-45.0 + i * 0.8, 2),
+                "pLDDT": round(0.89 - i * 0.003, 3),
                 "dSASA": round(950 - i * 15, 1),
-                "ShapeComplementarity": round(0.72 - i * 0.008, 3),
+                "ShapeComplementarity": round(0.72 - i * 0.004, 3),
                 "Relaxed_Clashes": 1 if i in (3, 7) else 0,
-                "Surface_Hydrophobicity": round(0.30 + i * 0.015, 3),
+                "Surface_Hydrophobicity": round(0.20 + i * 0.006, 3),
                 "n_InterfaceResidues": max(4, 14 - i // 2),
             }),
         })
@@ -432,18 +432,18 @@ class TestHandleFlagRedFlags:
         """Flags candidates with high ipTM + low ShapeComplementarity combo."""
         from agent.analysis.tools import handle_flag_red_flags
 
-        # Candidate that should trigger this flag: ipTM > 0.7 AND SC < 0.5
+        # ipTM > 0.7 AND ShapeComplementarity only just clearing the 0.60 filter.
+        # A sub-0.60 value would be unreachable -- BindCraft rejects it before we see it.
         flagged_candidate = {
             "rank": 1,
             "pdb_key": "test.pdb",
             "scores": {
                 "ipTM": 0.85,
-                "pLDDT": 0.82,
-                "dG": -40.0,
+                "pLDDT": 0.86,
                 "dSASA": 800,
-                "ShapeComplementarity": 0.42,  # < 0.5 triggers flag
+                "ShapeComplementarity": 0.63,  # in 0.60-0.70 triggers flag
                 "Relaxed_Clashes": 0,
-                "Surface_Hydrophobicity": 0.35,
+                "Surface_Hydrophobicity": 0.22,
                 "n_InterfaceResidues": 12,
             },
         }
@@ -467,13 +467,12 @@ class TestHandleFlagRedFlags:
             "rank": 1,
             "pdb_key": "test.pdb",
             "scores": {
-                "ipTM": 0.75,
-                "pLDDT": 0.80,
-                "dG": -38.0,
+                "ipTM": 0.68,
+                "pLDDT": 0.86,
                 "dSASA": 750,
-                "ShapeComplementarity": 0.62,
+                "ShapeComplementarity": 0.72,
                 "Relaxed_Clashes": 2,  # > 0 triggers flag
-                "Surface_Hydrophobicity": 0.38,
+                "Surface_Hydrophobicity": 0.22,
                 "n_InterfaceResidues": 11,
             },
         }
@@ -497,12 +496,11 @@ class TestHandleFlagRedFlags:
             "pdb_key": "clean.pdb",
             "scores": {
                 "ipTM": 0.82,
-                "pLDDT": 0.85,
-                "dG": -42.0,
+                "pLDDT": 0.88,
                 "dSASA": 900,
-                "ShapeComplementarity": 0.70,
+                "ShapeComplementarity": 0.74,
                 "Relaxed_Clashes": 0,
-                "Surface_Hydrophobicity": 0.32,
+                "Surface_Hydrophobicity": 0.22,
                 "n_InterfaceResidues": 14,
             },
         }

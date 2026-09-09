@@ -11,7 +11,7 @@
 For ALL tools, recommend orthogonal refolding validation before committing to synthesis or expression:
 
 - Top 5-10 candidates should be refolded with an independent structure predictor (AF2-multimer or Boltz2)
-- Compare predicted structure to designed structure — RMSD < 2A indicates good agreement between design model and independent prediction
+- Compare predicted structure to designed structure — RMSD < 2 A indicates good agreement between design model and independent prediction (this is a conventional aligned RMSD, unrelated to BindCraft's unaligned `Binder_RMSD`)
 - Candidates with good refolding agreement have higher probability of adopting the intended conformation experimentally
 
 ---
