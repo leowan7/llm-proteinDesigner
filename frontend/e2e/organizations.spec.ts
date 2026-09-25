@@ -72,26 +72,46 @@ async function readStoredOrgId(page: Page): Promise<string | null | undefined> {
 }
 
 /**
- * Wait for the stored active-org id to become something other than
- * ``previous``. CreateOrganization and AcceptInvitation both write the id and
- * then reload, so polling is the only reliable read.
+ * Id of the team org named ``name``, polled until it appears.
+ *
+ * Deliberately not "wait for the stored active-org id to change": signing in
+ * changes it too. OrgProvider.refresh() resolves an active org on mount and
+ * persists whatever it resolved (OrganizationContext.tsx:143-146), and with no
+ * stored id it resolves the personal org (:110) -- so the first write after a
+ * sign-in is A's personal org id, and only the create flow's own write, a
+ * round trip later, replaces it. Reading "it changed" therefore returns the
+ * personal org whenever that org already exists, which is the state every
+ * retry of this serial group starts from. Everything downstream then looks at
+ * a personal workspace, where the Organization tab is hidden by design
+ * (SettingsPage.tsx:597-598), and the failure surfaces three steps away from
+ * its cause.
+ *
+ * page.request shares the page's cookies, and GET /organizations/mine takes no
+ * X-Org-Id (backend/organizations/router.py:52).
  */
-async function waitForNewStoredOrgId(
+async function waitForOrgIdByName(
   page: Page,
-  previous: string | null,
+  name: string,
   timeoutMs = 20_000,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
-  let last: string | null | undefined;
+  let seen = "nothing";
   while (Date.now() < deadline) {
-    last = await readStoredOrgId(page);
-    if (typeof last === "string" && last.length > 0 && last !== previous) {
-      return last;
+    const res = await page.request.get(`${ORGS_API_BASE}/organizations/mine`);
+    if (res.ok()) {
+      const body = (await res.json()) as {
+        orgs: Array<{ id: string; name: string; is_personal: boolean }>;
+      };
+      const match = body.orgs.find((o) => o.name === name && !o.is_personal);
+      if (match) return match.id;
+      seen = body.orgs
+        .map((o) => `${o.name}(personal=${String(o.is_personal)})`)
+        .join(", ");
     }
     await page.waitForTimeout(250);
   }
   throw new Error(
-    `active org id never changed (previous=${previous}, last=${String(last)})`,
+    `no team org named "${name}" within ${timeoutMs}ms; saw ${seen}`,
   );
 }
 
@@ -168,16 +188,23 @@ test.describe.serial("Phase 12: full teams flow", () => {
   test("1. User A creates a team org", async ({ page }) => {
     await loginAs(page, USER_A_EMAIL, USER_A_PW);
 
-    const before = (await readStoredOrgId(page)) ?? null;
-
     await page.goto("/organizations/new");
     await page.fill("#org-name", ORG_NAME);
     await page.getByRole("button", { name: "Create organization" }).click();
 
-    // createOrg -> refresh -> setActiveOrg writes localStorage and reloads;
-    // the route itself does not change.
-    teamOrgId = await waitForNewStoredOrgId(page, before);
+    // The org every later step uses is the one carrying the name just
+    // submitted -- see waitForOrgIdByName for why "the stored id changed"
+    // returns the personal org instead.
+    teamOrgId = await waitForOrgIdByName(page, ORG_NAME);
     expect(teamOrgId).toMatch(/^[0-9a-f-]{36}$/);
+
+    // Separately, the create flow must leave that org active: createOrg ->
+    // refresh -> setActiveOrg writes localStorage and reloads, and the route
+    // itself does not change. Asserting the id rather than "it differs" is
+    // what makes a personal-org fallback here fail loudly.
+    await expect
+      .poll(() => readStoredOrgId(page), { timeout: 20_000 })
+      .toBe(teamOrgId);
   });
 
   test("2. User A invites User B and can read the invitation token", async ({
@@ -317,19 +344,25 @@ test.describe.serial("Phase 12: full teams flow", () => {
       .getByRole("button", { name: "Transfer ownership", exact: true })
       .click();
 
-    // handleTransfer reloads on success. A is a scientist afterwards, so the
-    // owner-only affordances are gone.
+    // handleTransfer reloads on success, so the role assertion comes first:
+    // it is the only one here that needs a painted members table, and it gets
+    // the same budget as every other post-reload wait in this spec. Non-owners
+    // see their role as plain text, so A's own row now reads scientist
+    // (MembersTab.tsx:291 renders <span>{m.role}</span> off isOwner).
+    await expect(
+      page.getByRole("row").filter({ hasText: USER_A_EMAIL }),
+    ).toContainText("scientist", { timeout: 20_000 });
+    // Only now are the absences evidence. Asserted before the table repaints
+    // they pass on the blank page and prove nothing -- MembersTab renders a
+    // skeleton with no table at all while members is null
+    // (MembersTab.tsx:156-163), which is what starved the assertion above of
+    // its 5s default on the first flag-on CI run.
     await expect(
       page.locator('form[aria-label="Invite member"]'),
-    ).toHaveCount(0, { timeout: 20_000 });
+    ).toHaveCount(0);
     await expect(
       page.locator(`select[aria-label="Role for ${USER_A_EMAIL}"]`),
     ).toHaveCount(0);
-    // Non-owners see their role as plain text, so A's own row now reads
-    // scientist (MembersTab renders <span>{m.role}</span> off isOwner).
-    await expect(
-      page.getByRole("row").filter({ hasText: USER_A_EMAIL }),
-    ).toContainText("scientist");
   });
 
   test("10. User B is the owner and reaches billing", async () => {
