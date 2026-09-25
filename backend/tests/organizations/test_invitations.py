@@ -71,20 +71,29 @@ def _make_invite_pool(
     accept_execute_result="UPDATE 1",
     caller_role="owner",
     insert_raises=None,
+    is_personal=False,
 ):
     """Build a pool that responds to the create-invite + accept-invite flows."""
     fetchrow_responses = [invite_row, org_row, user_row]
     execute_results = [membership_execute_result, accept_execute_result]
-    captured = {"execute_calls": [], "fetchrow_calls": [], "fetchval_calls": []}
+    captured = {
+        "execute_calls": [], "fetchrow_calls": [], "fetchval_calls": [],
+        # execute and fetchrow land in separate lists, so an index into one
+        # says nothing about ordering against the other. This is the single
+        # ordered log of every statement the handler issued.
+        "order": [],
+    }
 
     async def _execute(query, *args):
         captured["execute_calls"].append((query, args))
+        captured["order"].append(query)
         if execute_results:
             return execute_results.pop(0)
         return "OK"
 
     async def _fetchrow(query, *args):
         captured["fetchrow_calls"].append((query, args))
+        captured["order"].append(query)
         # require_path_role reads the caller's role straight from the DB before
         # the handler body runs; answer it out of band so it does not consume a
         # queued response meant for the handler.
@@ -96,9 +105,17 @@ def _make_invite_pool(
             return fetchrow_responses.pop(0)
         return None
 
+    async def _fetchval(query, *args):
+        captured["fetchval_calls"].append((query, args))
+        captured["order"].append(query)
+        if "is_personal" in query:
+            return is_personal
+        return None
+
     conn = AsyncMock()
     conn.execute = _execute
     conn.fetchrow = _fetchrow
+    conn.fetchval = _fetchval
 
     txn = AsyncMock()
     txn.__aenter__ = AsyncMock(return_value=None)
@@ -549,10 +566,55 @@ async def test_invite_retires_an_expired_pending_invitation_first():
     # which is why the sweep and the index both compare lower(email) rather than
     # relying on the stored value being normalised.
     assert args == (ORG_1, "Returning@example.com")
-    # It has to run before the INSERT, or the INSERT still hits the index.
-    insert_at = next(
-        i for i, (q, _) in enumerate(captured["fetchrow_calls"])
-        if "INSERT INTO public.organization_invitations" in q
+    # It has to run BEFORE the INSERT, or the INSERT still hits the index and
+    # 409s -- the sweep would be inert while every assertion above still
+    # passed. captured["order"] is the one ordered log of both methods.
+    def _first(needle):
+        return next(
+            (i for i, q in enumerate(captured["order"]) if needle in q), -1,
+        )
+
+    sweep_at = _first("revoked_at = now()")
+    insert_at = _first("INSERT INTO public.organization_invitations")
+    assert sweep_at >= 0 and insert_at >= 0, captured["order"]
+    assert sweep_at < insert_at, captured["order"]
+
+
+async def test_invite_into_a_personal_org_is_refused():
+    """A personal workspace cannot have a second member.
+
+    guard_personal_org_single_member (migration 20260605000003 section 7)
+    rejects the membership INSERT, so without this check the owner gets a 201
+    and an email goes out, and the failure surfaces as a 500 for the invitee
+    when they click accept. protect_last_owner's user-gone tolerance is only
+    sound because a personal org has exactly one member.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    pool, captured = _make_invite_pool(
+        invite_row={"id": uuid.uuid4()},
+        org_row={"name": "owner (Personal)"},
+        user_row={"email": "owner@example.com"},
+        is_personal=True,
     )
-    assert insert_at >= 0
-    assert captured["fetchrow_calls"][insert_at][1][1] == "Returning@example.com"
+
+    app = _build_app(active_role="owner")
+    sent = []
+    with patch("organizations.router.get_db_pool", return_value=pool), \
+         patch("organizations.router.notifications.send_invitation_email",
+               AsyncMock(side_effect=lambda **kw: sent.append(kw))):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/organizations/{ORG_1}/invitations",
+                json={"email": "colleague@example.com", "role": "scientist"},
+                headers={"X-Org-Id": ORG_1},
+            )
+
+    assert r.status_code == 400, r.text
+    assert "personal workspace" in r.json()["detail"].lower()
+    assert sent == [], "no invitation may be emailed for an org that cannot accept it"
+    assert not any(
+        "INSERT INTO public.organization_invitations" in q
+        for q in captured["order"]
+    ), captured["order"]

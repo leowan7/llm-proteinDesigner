@@ -170,13 +170,39 @@ async def execute_hard_delete(
                     row["user_id"],
                 )
 
+            # A job row that outlives this user must not keep pointing at them.
+            # Today none can: launch_job's UPDATE matches WHERE user_id = the
+            # calling user and jobs/router.py:249 passes that same id as the
+            # launcher (backend/jobs/dispatch.py:54,67-71), so every row naming
+            # this user as launcher is also owned by them and goes in the
+            # cascade. jobs.created_by_user_id is NOT NULL with no delete rule
+            # (20260605000002_jobs_created_by.sql:4,8), so if the launcher !=
+            # owner path that launch_job's docstring anticipates ever lands, one
+            # such row would abort the cascade below and the deletion cron would
+            # retry it forever. Re-attributing to the row's own owner keeps that
+            # from becoming unrecoverable, and keeps a deleted user's id out of a
+            # surviving row.
+            reattributed = await conn.execute(
+                """UPDATE public.jobs
+                      SET created_by_user_id = user_id
+                    WHERE created_by_user_id = $1::uuid
+                      AND user_id <> $1::uuid""",
+                user_id,
+            )
+            if reattributed != "UPDATE 0":
+                logger.info(
+                    "Hard-delete: re-attributed launcher on another user's jobs (%s)",
+                    reattributed,
+                )
+
             # Any org whose ONLY member is this user goes with them. That is the
             # personal org -- whose name embeds the email local part, so leaving
             # it behind would survive the GDPR erasure as PII -- plus any team
             # org the user never shared. Nothing is promoted here: the CTE above
             # found no heir, because there is no other member.
-            emptied = await conn.fetch(
-                """DELETE FROM public.organizations o
+            doomed = await conn.fetch(
+                """SELECT o.id, o.is_personal
+                     FROM public.organizations o
                     WHERE EXISTS (
                               SELECT 1 FROM public.organization_memberships m
                                WHERE m.organization_id = o.id
@@ -184,16 +210,47 @@ async def execute_hard_delete(
                       AND NOT EXISTS (
                               SELECT 1 FROM public.organization_memberships rival
                                WHERE rival.organization_id = o.id
-                                 AND rival.user_id <> $1::uuid)
-                RETURNING o.id, o.is_personal""",
+                                 AND rival.user_id <> $1::uuid)""",
                 user_id,
             )
-            for row in emptied:
-                logger.info(
-                    "Hard-delete: deleted sole-member org %s (personal=%s)",
-                    row["id"],
-                    row["is_personal"],
+            doomed_ids = [row["id"] for row in doomed]
+
+            if doomed_ids:
+                # Membership and job ownership are decoupled: remove_member
+                # deletes the membership row and nothing else
+                # (backend/organizations/router.py:311-315), so an org this user
+                # is now alone in can still hold jobs owned by someone who is NOT
+                # being deleted. jobs.organization_id is ON DELETE CASCADE
+                # (20260605000001_organizations.sql:213), so dropping the org
+                # would destroy that person's history. Move those jobs to their
+                # own personal org first; personal_org_for is find-or-create, so
+                # it also covers an owner whose personal org never materialised.
+                rescued = await conn.fetch(
+                    """UPDATE public.jobs j
+                          SET organization_id = public.personal_org_for(j.user_id)
+                        WHERE j.organization_id = ANY($2::uuid[])
+                          AND j.user_id <> $1::uuid
+                    RETURNING j.id, j.user_id""",
+                    user_id, doomed_ids,
                 )
+                for row in rescued:
+                    logger.info(
+                        "Hard-delete: job %s belongs to user %s, moved to their "
+                        "personal org before its org was deleted",
+                        row["id"],
+                        row["user_id"],
+                    )
+
+                await conn.execute(
+                    "DELETE FROM public.organizations WHERE id = ANY($1::uuid[])",
+                    doomed_ids,
+                )
+                for row in doomed:
+                    logger.info(
+                        "Hard-delete: deleted sole-member org %s (personal=%s)",
+                        row["id"],
+                        row["is_personal"],
+                    )
     delete_auth_user(user_id)
     logger.info("Hard-delete: Supabase auth user deleted %s", user_id)
 

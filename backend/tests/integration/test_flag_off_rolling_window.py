@@ -588,7 +588,7 @@ async def test_a_settled_invitation_does_not_block_a_re_invite(pool, make_user):
 # ---------------------------------------------------------------------------
 
 
-async def _add_member(pool, org_id, user_id, role="member", created_at=None):
+async def _add_member(pool, org_id, user_id, role="scientist", created_at=None):
     await pool.execute(
         "INSERT INTO public.organization_memberships "
         "(organization_id, user_id, role, created_at) "
@@ -667,7 +667,7 @@ async def test_hard_delete_promotes_the_longest_standing_member_of_a_shared_org(
             "SELECT role::text FROM public.organization_memberships "
             "WHERE organization_id = $1 AND user_id = $2",
             org_id, junior_id,
-        ) == "member", "only one heir is promoted"
+        ) == "scientist", "only one heir is promoted"
         # The personal org carries the email local part in its name, so leaving
         # it behind would mean PII surviving a GDPR erasure.
         assert await pool.fetchval(
@@ -758,7 +758,7 @@ async def test_hard_delete_touches_no_org_when_the_user_cancelled(pool, make_use
         "SELECT role::text FROM public.organization_memberships "
         "WHERE organization_id = $1 AND user_id = $2",
         org_id, member_id,
-    ) == "member"
+    ) == "scientist"
 
 
 async def test_an_expired_pending_invitation_blocks_the_index_until_swept(
@@ -816,3 +816,77 @@ async def test_an_expired_pending_invitation_blocks_the_index_until_swept(
     ) == "UPDATE 0"
     with pytest.raises(asyncpg.exceptions.UniqueViolationError):
         await _invite(pool, org_id, email, user_id)
+
+
+async def test_a_personal_org_refuses_a_second_member(pool, make_user):
+    """The invariant protect_last_owner's user-gone tolerance depends on.
+
+    Without guard_personal_org_single_member, the invite + accept flow could put
+    a second member into someone's personal org -- require_path_role('owner')
+    passes, they own it -- and deleting that owner's account would then leave
+    the second member in an org with zero owners that delete_organization
+    refuses to remove (backend/organizations/router.py:195-199).
+    """
+    owner_id, _ = await make_user()
+    stranger_id, _ = await make_user()
+    personal_id = await pool.fetchval("SELECT public.personal_org_for($1)", owner_id)
+
+    with pytest.raises(asyncpg.exceptions.CheckViolationError):
+        await _add_member(pool, personal_id, stranger_id)
+
+    # The owner's own membership is re-asserted on every call, and must not trip
+    # over the guard.
+    assert await pool.fetchval(
+        "SELECT public.personal_org_for($1)", owner_id,
+    ) == personal_id
+    # A shared org is unaffected.
+    shared_id = await _sole_owner_org(pool, owner_id)
+    await _add_member(pool, shared_id, stranger_id)
+    await pool.execute("DELETE FROM public.organizations WHERE id = $1", shared_id)
+
+
+async def test_hard_delete_keeps_a_removed_members_jobs_out_of_the_cascade(
+    pool, make_user,
+):
+    """A job owned by someone else must survive their old org being deleted.
+
+    remove_member deletes the membership row and nothing else
+    (backend/organizations/router.py:311-315), so an org can hold jobs whose
+    owner is no longer a member of it. When the last remaining member is then
+    hard-deleted, execute_hard_delete drops that org -- and
+    jobs.organization_id is ON DELETE CASCADE
+    (20260605000001_organizations.sql:213), so without the re-parent those jobs
+    would be destroyed for a user who was never deleted.
+    """
+    leaver_id, leaver_email = await make_user()
+    stayer_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, leaver_id)
+    await _add_member(pool, org_id, stayer_id)
+
+    job_id = uuid.uuid4()
+    await pool.execute(
+        "INSERT INTO public.jobs (id, user_id, tool, status, organization_id) "
+        "VALUES ($1, $2, 'bindcraft', 'pending', $3)",
+        job_id, stayer_id, org_id,
+    )
+    # The org owner removes them from the team; the job stays where it is.
+    await pool.execute(
+        "DELETE FROM public.organization_memberships "
+        "WHERE organization_id = $1 AND user_id = $2",
+        org_id, stayer_id,
+    )
+    assert await pool.fetchval(
+        "SELECT organization_id FROM public.jobs WHERE id = $1", job_id,
+    ) == org_id
+
+    await pool.execute(
+        "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1", leaver_id,
+    )
+    await _hard_delete_then_cascade(pool, leaver_id, leaver_email)
+
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
+    ) == 0, "the org had one member left and goes with them"
+    assert await pool.fetchval(
+        "SELECT organization_id FROM public.jobs WHERE id = $1", job_id,
+    ) == await pool.fetchval("SELECT public.personal_org_for($1)", stayer_id)

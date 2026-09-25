@@ -69,6 +69,11 @@ def _generic_pool(caller_role: str = "owner"):
         return "OK"
 
     async def _fetchval(query, *args):
+        # create_invitation asks whether the org is personal before it inserts.
+        # This fake's happy path is a team org, matching the is_personal: False
+        # the organizations fetchrow below already returns.
+        if "is_personal" in query:
+            return False
         return new_id
 
     async def _fetchrow(query, *args):

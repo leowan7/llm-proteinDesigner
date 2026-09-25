@@ -422,6 +422,19 @@ async def create_invitation(
     token = service.generate_invitation_token()
     expires_at = service.expires_default()
     async with pool.acquire() as conn:
+        # A personal org is one person's own workspace, and the database
+        # rejects a second member outright (guard_personal_org_single_member,
+        # migration 20260605000003 section 7). Catching it here makes that a
+        # 400 for the owner sending the invite instead of a 500 for whoever
+        # clicks the accept link.
+        if await conn.fetchval(
+            "SELECT is_personal FROM public.organizations WHERE id = $1", org_id,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A personal workspace cannot have other members. "
+                       "Create a team organization to invite people.",
+            )
         # An EXPIRED invitation still satisfies organization_invitations_one_pending
         # -- the predicate is (accepted_at IS NULL AND revoked_at IS NULL), and
         # expires_at > now() cannot join it because now() is not IMMUTABLE. Retire

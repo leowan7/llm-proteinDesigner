@@ -261,8 +261,9 @@ BEGIN
         RETURN OLD;
     END IF;
 
-    -- Only the USER is going away. A personal org has exactly one member, so
-    -- its owner leaving strands nobody. A SHARED org would be left with zero
+    -- Only the USER is going away. A personal org has exactly one member --
+    -- guard_personal_org_single_member() in section 7 enforces that -- so its
+    -- owner leaving strands nobody. A SHARED org would be left with zero
     -- owners, and no owner-only route or memberships_write_owners RLS policy
     -- would have a satisfiable caller ever again -- so shared orgs fall through
     -- to the check below on purpose. backend/user/deletion.py promotes an heir
@@ -322,3 +323,48 @@ CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_one_pending
 COMMENT ON INDEX public.organization_invitations_one_pending IS
     'At most one live invitation per (org, email). Revoked and accepted rows are '
     'excluded so an address can be re-invited.';
+
+
+-- ----------------------------------------------------------------------------
+-- 7. A personal org has exactly one member
+-- ----------------------------------------------------------------------------
+-- Section 5's user-gone tolerance rests on that sentence, and until now nothing
+-- enforced it. require_path_role('owner') passes for the owner of their own
+-- personal org, so the invite + accept flow would add a second member to it.
+-- The owner then deletes their account, section 5 lets the only owner
+-- membership go with the cascade, and the second member is left in an org with
+-- zero owners -- which delete_organization refuses to remove because it is
+-- personal (backend/organizations/router.py:195-199), so nobody can clean it up
+-- and the departed user's email local part stays in its name. Rejecting the
+-- second member is what makes that tolerance sound.
+CREATE OR REPLACE FUNCTION public.guard_personal_org_single_member()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM public.organizations
+                WHERE id = NEW.organization_id AND is_personal)
+       AND EXISTS (SELECT 1 FROM public.organization_memberships
+                    WHERE organization_id = NEW.organization_id
+                      AND user_id <> NEW.user_id)
+    THEN
+        RAISE EXCEPTION
+            'Organization % is personal and cannot have a second member',
+            NEW.organization_id
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+-- UPDATE OF as well: moving an existing membership row onto a personal org
+-- reaches the same end state as inserting one there.
+CREATE TRIGGER organization_memberships_personal_single_member
+    BEFORE INSERT OR UPDATE OF organization_id, user_id
+    ON public.organization_memberships
+    FOR EACH ROW
+    EXECUTE FUNCTION public.guard_personal_org_single_member();
+
+COMMENT ON FUNCTION public.guard_personal_org_single_member() IS
+    'Rejects a second member in a personal organization. protect_last_owner() '
+    'tolerates the user-gone cascade for personal orgs only because of this.';
