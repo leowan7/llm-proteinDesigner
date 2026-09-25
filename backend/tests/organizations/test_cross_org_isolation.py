@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 os.environ.setdefault("TESTING", "true")
 
 
@@ -29,9 +28,8 @@ def _build_app(user_id: str = "user-attacker"):
 
     get_active_org runs unmodified so the membership cross-check actually fires.
     """
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
+    from fastapi import FastAPI
     from jobs.router import router as jobs_router
     from middleware.rate_limit import limiter as _limiter
 

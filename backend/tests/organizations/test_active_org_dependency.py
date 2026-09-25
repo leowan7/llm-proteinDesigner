@@ -3,7 +3,7 @@
 These tests exercise the dependency callables directly with mocked asyncpg
 pools -- no FastAPI app, no real DB. The point is to lock down the contract:
 
-- Missing ``X-Org-Id`` header -> HTTP 400
+- Missing ``X-Org-Id`` header -> the caller's personal org, as ``owner``
 - Non-member -> HTTP 403
 - Member -> returns ``(org_id, role)`` tuple
 - ``require_role(...)`` -> 403 on insufficient role; returns ``org_id`` otherwise
@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-
 pytestmark = pytest.mark.asyncio
 
 
@@ -25,10 +24,15 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 
-def _make_pool(fetchrow_return):
-    """Build an asyncpg-like pool whose acquire().fetchrow returns the given value."""
+def _make_pool(fetchrow_return=None, fetchval_return=None):
+    """Build an asyncpg-like pool whose acquire() connection returns these values.
+
+    ``pool.conn`` is exposed (not part of the asyncpg API) so a test can assert
+    on the SQL the dependency actually emitted.
+    """
     conn = AsyncMock()
     conn.fetchrow = AsyncMock(return_value=fetchrow_return)
+    conn.fetchval = AsyncMock(return_value=fetchval_return)
 
     ctx = AsyncMock()
     ctx.__aenter__ = AsyncMock(return_value=conn)
@@ -36,6 +40,7 @@ def _make_pool(fetchrow_return):
 
     pool = AsyncMock()
     pool.acquire = MagicMock(return_value=ctx)
+    pool.conn = conn
     return pool
 
 
@@ -44,14 +49,24 @@ def _make_pool(fetchrow_return):
 # ---------------------------------------------------------------------------
 
 
-async def test_missing_header_returns_400():
-    """No X-Org-Id header -> HTTPException 400."""
+async def test_missing_header_falls_back_to_personal_org():
+    """No X-Org-Id header -> the caller's personal org, returned as owner.
+
+    This is the flag-off path. With organizations_enabled false the orgs router
+    is not mounted (main.py), so a client has no endpoint to learn an org id
+    from and sends no header; a 400 here would answer 400 on every /jobs,
+    /billing and /user/usage request for every existing customer.
+    """
     from auth.org_dependencies import get_active_org
 
-    with pytest.raises(HTTPException) as exc_info:
-        await get_active_org(x_org_id=None, user_id="user-abc")
-    assert exc_info.value.status_code == 400
-    assert "X-Org-Id" in exc_info.value.detail
+    pool = _make_pool(fetchval_return="org-personal-uuid")
+    with patch("auth.org_dependencies.get_db_pool", return_value=pool):
+        result = await get_active_org(x_org_id=None, user_id="user-abc")
+
+    assert result == ("org-personal-uuid", "owner")
+    # Resolved through the find-or-create function, so a user signed up by an
+    # old replica mid-rolling-deploy gets an org instead of a NULL org_id.
+    assert "public.personal_org_for" in pool.conn.fetchval.call_args.args[0]
 
 
 async def test_non_member_returns_403():

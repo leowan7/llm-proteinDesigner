@@ -16,11 +16,10 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 os.environ.setdefault("TESTING", "true")
 
@@ -35,11 +34,11 @@ pytestmark = pytest.mark.asyncio
 
 def _build_app(user_id: str = "user-owner", active_role: str | None = "owner", active_org_id: str = "org-1"):
     """Build a minimal FastAPI app with org + invitations routers and overrides."""
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
-    from organizations.router import router as orgs_router, invitations_router
+    from fastapi import FastAPI
+    from organizations.router import invitations_router
+    from organizations.router import router as orgs_router
 
     app = FastAPI()
     app.include_router(orgs_router)
@@ -235,7 +234,7 @@ async def test_accept_with_matching_email_inserts_membership():
         "organization_id": org_id,
         "email": "invitee@example.com",
         "role": "scientist",
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=3),
+        "expires_at": datetime.now(UTC) + timedelta(days=3),
         "accepted_at": None,
         "revoked_at": None,
     }
@@ -274,7 +273,7 @@ async def test_accept_with_mismatched_email_returns_409():
         "organization_id": uuid.uuid4(),
         "email": "foo@example.com",
         "role": "scientist",
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=3),
+        "expires_at": datetime.now(UTC) + timedelta(days=3),
         "accepted_at": None,
         "revoked_at": None,
     }
@@ -302,7 +301,7 @@ async def test_accept_with_expired_token_returns_410():
         "organization_id": uuid.uuid4(),
         "email": "invitee@example.com",
         "role": "scientist",
-        "expires_at": datetime.now(timezone.utc) - timedelta(days=1),
+        "expires_at": datetime.now(UTC) - timedelta(days=1),
         "accepted_at": None,
         "revoked_at": None,
     }
@@ -330,9 +329,9 @@ async def test_accept_with_revoked_token_returns_410():
         "organization_id": uuid.uuid4(),
         "email": "invitee@example.com",
         "role": "scientist",
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=3),
+        "expires_at": datetime.now(UTC) + timedelta(days=3),
         "accepted_at": None,
-        "revoked_at": datetime.now(timezone.utc),
+        "revoked_at": datetime.now(UTC),
     }
     pool, _ = _accept_pool(
         invite_row=invite_row,
@@ -363,7 +362,7 @@ async def test_accept_idempotent_on_double_click():
         "organization_id": org_id,
         "email": "invitee@example.com",
         "role": "scientist",
-        "expires_at": datetime.now(timezone.utc) + timedelta(days=3),
+        "expires_at": datetime.now(UTC) + timedelta(days=3),
         "accepted_at": None,
         "revoked_at": None,
     }

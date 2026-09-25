@@ -299,19 +299,23 @@ async def runpod_webhook(request: Request):
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
-    # we resolve the billing customer by joining the job row to its org:
-    #   jobs.id -> jobs.organization_id -> organizations.stripe_customer_id
+    # we resolve the billing customer from the job's org:
+    #   jobs.id -> jobs.organization_id -> org_stripe_customer()
+    # which reads organizations.stripe_customer_id and falls back to the
+    # deprecated public.users.stripe_customer_id for a personal org whose
+    # customer was created by an old replica mid-deploy. Without that fallback
+    # the GPU time of an existing payer would silently go unmetered, because
+    # a NULL resolution skips billing rather than raising.
     if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
         async with pool.acquire() as conn:
-            cust_row = await conn.fetchrow(
-                """SELECT o.stripe_customer_id
+            stripe_customer_id = await conn.fetchval(
+                """SELECT public.org_stripe_customer(j.organization_id)
                    FROM public.jobs j
-                   JOIN public.organizations o ON o.id = j.organization_id
                    WHERE j.id = $1""",
                 job_id,
             )
-        if cust_row and cust_row["stripe_customer_id"]:
-            record_gpu_usage(cust_row["stripe_customer_id"], job_id, gpu_seconds)
+        if stripe_customer_id:
+            record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
 
     # Send email notification.
     async with pool.acquire() as conn:

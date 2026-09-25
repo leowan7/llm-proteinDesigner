@@ -1,4 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+// Phase 12: api() consults the /health feature probe before attaching
+// X-Org-Id. Default null = probe unresolved, which is the pre-Phase-12
+// behaviour every other test in this file expects.
+const featureFlag = vi.hoisted(() => ({ orgs: null as boolean | null }));
+vi.mock("./features", () => ({
+  organizationsEnabled: async () => featureFlag.orgs === true,
+  organizationsEnabledSync: () => featureFlag.orgs,
+  useOrganizationsEnabled: () => featureFlag.orgs,
+}));
+
 import { ApiError, api } from "./api";
 
 // ---------------------------------------------------------------------------
@@ -164,5 +175,62 @@ describe("api()", () => {
 
     const calledHeaders = mockFetch.mock.calls[0][1].headers;
     expect(calledHeaders["Content-Type"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// X-Org-Id header — Phase 12 flag gate
+// ---------------------------------------------------------------------------
+
+describe("api() X-Org-Id header", () => {
+  const mockFetch = vi.fn();
+  const STORAGE_KEY = "kendrew.activeOrgId";
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", mockFetch);
+    Object.defineProperty(document, "cookie", {
+      value: "",
+      writable: true,
+      configurable: true,
+    });
+    localStorage.setItem(STORAGE_KEY, "org-from-an-earlier-flag-on-session");
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    mockFetch.mockReset();
+    localStorage.removeItem(STORAGE_KEY);
+    featureFlag.orgs = null;
+  });
+
+  async function headersFor(path: string): Promise<Record<string, string>> {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    });
+    await api(path);
+    return mockFetch.mock.calls[0][1].headers;
+  }
+
+  it("sends the stored org id when the flag is on", async () => {
+    featureFlag.orgs = true;
+    const headers = await headersFor("/jobs");
+    expect(headers["X-Org-Id"]).toBe("org-from-an-earlier-flag-on-session");
+  });
+
+  it("sends nothing when the flag is off, even with a stored org id", async () => {
+    // Guards the flag-off/rollback path: a stale id must not scope requests
+    // once the backend has stopped mounting the orgs routes. Without the
+    // gate in api.ts this test fails with the stored id in the header.
+    featureFlag.orgs = false;
+    const headers = await headersFor("/jobs");
+    expect(headers["X-Org-Id"]).toBeUndefined();
+  });
+
+  it("never sends the header on opt-out routes", async () => {
+    featureFlag.orgs = true;
+    const headers = await headersFor("/auth/me");
+    expect(headers["X-Org-Id"]).toBeUndefined();
   });
 });

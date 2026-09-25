@@ -4,15 +4,21 @@
  * Owner-self path for spinning up a new team org:
  *   1. Single "Organization name" input (max 100 chars).
  *   2. On submit, POST /organizations.
- *   3. On success: refresh() the OrgContext, then setActiveOrg(newOrgId)
- *      which writes localStorage and reloads into the new org's scope.
- *      The reload lands the user on /settings?tab=organization where they
- *      can immediately invite teammates.
+ *   3. On success: refresh() the OrgContext, then setActiveOrg(newOrgId),
+ *      which writes localStorage["kendrew.activeOrgId"] and calls
+ *      window.location.reload(). The reload re-renders this same route with
+ *      the new org active; the user reaches Members from
+ *      /settings?tab=organization.
  *
  * Failure modes:
  *   - Empty name: submit disabled.
  *   - 409 (duplicate name) and other 4xx: error banner with the backend
  *     detail string.
+ *
+ * Renders nothing when the organizations feature flag is off, so the route
+ * behaves like any unregistered path does on a single-tenant deploy (App.tsx
+ * has no catch-all route). The backend would 404 the POST anyway, since
+ * main.py mounts the orgs router only with the flag on.
  */
 
 import { useState } from "react";
@@ -29,7 +35,12 @@ export function CreateOrganization() {
   const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { refresh, setActiveOrg } = useOrgContext();
+  const {
+    enabled: orgsEnabled,
+    loading: orgsLoading,
+    refresh,
+    setActiveOrg,
+  } = useOrgContext();
   const navigate = useNavigate();
 
   async function handleSubmit(event: FormEvent) {
@@ -43,8 +54,6 @@ export function CreateOrganization() {
       const org = await createOrg(trimmed);
       // Refresh org list, then switch active — the switch triggers reload.
       await refresh();
-      // Pre-seed the localStorage entry so /settings?tab=organization resolves
-      // to the new org on the post-reload paint.
       setActiveOrg(org.id);
     } catch (err) {
       const message =
@@ -53,6 +62,9 @@ export function CreateOrganization() {
       setSubmitting(false);
     }
   }
+
+  // Flag off (or not yet resolved): render nothing at all.
+  if (orgsLoading || !orgsEnabled) return null;
 
   return (
     <main className="max-w-md mx-auto px-6 py-12">
@@ -71,7 +83,6 @@ export function CreateOrganization() {
             onChange={(e) => setName(e.target.value)}
             maxLength={100}
             required
-            autoFocus
             aria-describedby={error ? "create-org-error" : undefined}
           />
         </div>

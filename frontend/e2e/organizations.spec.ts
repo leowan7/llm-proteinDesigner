@@ -1,137 +1,147 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { LoginPage } from "./pages/LoginPage";
+import { FLAG_ON_API, FLAG_ON_URL, consentState } from "./stacks";
 
 /**
- * Phase 12 E2E -- full teams-and-orgs happy path.
+ * Phase 12 E2E — teams and organizations, against a FLAG-ON backend.
  *
- * Exercises every user-facing path Plan 12-05 shipped against a live local
- * stack: create org, invite a teammate, accept the invite from a second user,
- * launch a job in the team org, cross-check visibility from the other side,
- * gate billing on owner role, transfer ownership, and confirm the new owner
- * now sees billing.
+ * Every other spec in this directory runs against the flag-OFF stack
+ * (frontend :5173 -> backend :8000), which is what proves the flag-off
+ * landing keeps today's single-tenant behaviour. This spec is the only one
+ * that needs ``settings.organizations_enabled = true``, so it runs in its own
+ * Playwright project against a second stack (frontend :5174 -> backend
+ * :8001). Both stacks are declared in playwright.config.ts (projects +
+ * webServer) and started by the "E2E Tests" job in
+ * .github/workflows/test.yml.
  *
- * Selectors lifted from 12-05-SUMMARY "Notes for Plan 12-06" so the test
- * tracks the implementation contract documented at plan close-out.
+ * Nothing here skips itself. Step 0 asserts the flag-on backend is reachable
+ * and reports the flag on, so a missing or misconfigured stack fails with one
+ * clear message instead of a green run that tested nothing.
  *
- * Requires a running local stack:
- *   - backend on :8000 with settings.organizations_enabled = true
- *   - frontend on :5173 (vite dev, started by playwright.config.ts webServer)
- *   - Supabase local at port 54321
- *   - Two pre-seeded auth.users + public.users rows for usera-e2e@example.com
- *     and userb-e2e@example.com (password = "TestPassword123!" by default).
- *     conftest.py-style seeding pattern; for the moment the spec test.skips
- *     itself when the seed accounts are absent so it doesn't break CI.
+ * Requires, all provided by the CI job:
+ *   - backend on :8001 with ORGANIZATIONS_ENABLED=true and CORS allowing
+ *     http://localhost:5174
+ *   - frontend on :5174 built with VITE_API_BASE=http://localhost:8001
+ *   - Supabase local (migrations applied, so public.personal_org_for exists)
+ *   - two seeded accounts, usera-e2e@example.com and userb-e2e@example.com,
+ *     each with public.users.tos_version current so the re-acceptance modal
+ *     does not cover the app
  *
- * Run: `cd frontend && npx playwright test e2e/organizations.spec.ts`
+ * Neither seeded account has a personal-org row: both are created by GoTrue
+ * admin + a direct public.users upsert, never through /auth/signup. So this
+ * spec also exercises the lazy personal-org path in
+ * backend/auth/org_dependencies.py — an existing user whose personal org is
+ * created on first org-scoped request.
  *
- * Skip path: missing seed users -> step 1 fails login -> test.skip().
- * Missing feature flag -> /organizations/mine 404 -> step 1 detects + skips.
- * Missing debug-token endpoint -> step 3 falls back to API-cookie inspection
- * via the public previewInvitation endpoint with a static fixture token.
+ * Run locally (both stacks up):
+ *   cd frontend && npx playwright test --project=chromium-orgs
  *
- * Security note (T-09-04): only env-controlled *-e2e@example.com test
- * accounts are referenced. Never run this spec against production -- it
- * mutates org state.
+ * Security note (T-09-04): only env-controlled *-e2e@example.com accounts are
+ * referenced. Never point this spec at production — it mutates org state.
  */
 
-// --- env-controlled test accounts -----------------------------------------
+// --- env-controlled test accounts + stack ---------------------------------
 
 const USER_A_EMAIL = process.env.PHASE12_USER_A_EMAIL ?? "usera-e2e@example.com";
 const USER_A_PW = process.env.PHASE12_USER_A_PW ?? "TestPassword123!";
 const USER_B_EMAIL = process.env.PHASE12_USER_B_EMAIL ?? "userb-e2e@example.com";
 const USER_B_PW = process.env.PHASE12_USER_B_PW ?? "TestPassword123!";
+
+/** Flag-on backend, from the shared stack topology. */
+const ORGS_API_BASE = FLAG_ON_API;
+
 const ORG_NAME = `E2E Acme ${Date.now()}`;
 
-// localStorage key from Plan 12-05 (frontend/src/components/org/OrganizationContext.tsx).
+/** localStorage key from frontend/src/components/org/OrganizationContext.tsx. */
 const ORG_STORAGE_KEY = "kendrew.activeOrgId";
 
 // --- helpers --------------------------------------------------------------
 
 async function loginAs(page: Page, email: string, password: string) {
-  const loginPage = new LoginPage(page);
-  await loginPage.login(email, password);
+  await new LoginPage(page).login(email, password);
 }
 
-/**
- * Switch the active org via the header switcher. Falls back to writing
- * localStorage + reloading if the switcher isn't visible (e.g., the user has
- * only one membership pre-creation).
- *
- * Selector (12-05-SUMMARY):
- *   - trigger:  button[aria-label="Switch organization"]
- *   - item:     [data-testid="org-switcher-item-<orgId>"]
- */
-async function switchToOrgByName(page: Page, orgName: string) {
-  await page.goto("/");
-  const trigger = page.locator('button[aria-label="Switch organization"]');
-  if (await trigger.isVisible({ timeout: 2_000 }).catch(() => false)) {
-    await trigger.click();
-    await page.getByRole("menuitem", { name: new RegExp(orgName, "i") }).click();
-    // setActiveOrg in 12-05 reloads; wait for the post-reload paint.
-    await page.waitForLoadState("networkidle");
+/** Read the stored active-org id. Tolerates a navigation in flight. */
+async function readStoredOrgId(page: Page): Promise<string | null | undefined> {
+  try {
+    return await page.evaluate((key) => localStorage.getItem(key), ORG_STORAGE_KEY);
+  } catch {
+    // Execution context destroyed mid-read (setActiveOrg reloads the page).
+    return undefined;
   }
 }
 
 /**
- * Switch the active org by id via localStorage + reload. Used when the
- * switcher is hidden (user has only one membership) and we need to land
- * into a newly-joined org without going through the UI.
+ * Wait for the stored active-org id to become something other than
+ * ``previous``. CreateOrganization and AcceptInvitation both write the id and
+ * then reload, so polling is the only reliable read.
  */
+async function waitForNewStoredOrgId(
+  page: Page,
+  previous: string | null,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let last: string | null | undefined;
+  while (Date.now() < deadline) {
+    last = await readStoredOrgId(page);
+    if (typeof last === "string" && last.length > 0 && last !== previous) {
+      return last;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(
+    `active org id never changed (previous=${previous}, last=${String(last)})`,
+  );
+}
+
+/** Put ``orgId`` in localStorage and reload, landing the page in that org. */
 async function switchToOrgById(page: Page, orgId: string) {
-  await page.goto("/");
+  await page.goto("/jobs");
   await page.evaluate(
     ([key, id]) => localStorage.setItem(key, id),
     [ORG_STORAGE_KEY, orgId],
   );
   await page.reload();
-  await page.waitForLoadState("networkidle");
+}
+
+/** Open /settings on the Organization tab, then the named sub-tab. */
+async function openOrgSubTab(
+  page: Page,
+  subTab: "Members" | "Invitations" | "Settings",
+) {
+  await page.goto("/settings?tab=organization");
+  // The tab only mounts once OrgProvider has resolved a non-personal active
+  // org, so wait for the trigger rather than assuming the deep link painted.
+  const trigger = page.getByRole("tab", { name: "Organization" });
+  await expect(trigger).toBeVisible({ timeout: 15_000 });
+  await trigger.click();
+  await page.getByRole("button", { name: subTab, exact: true }).click();
 }
 
 /**
- * Fetch the token of the most recent pending invitation for `email` in the
- * active org. Uses the owner-only GET /organizations/{id}/invitations?status=pending
- * endpoint (Plan 12-06 contract bug-fix returns `token` to owners).
+ * Pending invitation token for ``email``, read through the owner-only
+ * GET /organizations/{id}/invitations?status=pending. page.request shares the
+ * page's cookies, and the endpoint requires X-Org-Id to equal the path org id
+ * (backend/organizations/router.py).
  */
 async function fetchInviteToken(
   page: Page,
   orgId: string,
   email: string,
 ): Promise<string | null> {
-  const res = await page.evaluate(
-    async ([id, e]) => {
-      const r = await fetch(`/api/organizations/${id}/invitations?status=pending`, {
-        method: "GET",
-        credentials: "include",
-        headers: { "X-Org-Id": id },
-      });
-      if (!r.ok) return { ok: false, status: r.status, body: null };
-      const j = await r.json();
-      const match = (j.invitations as Array<{ email: string; token: string | null }>)
-        .find((i) => i.email.toLowerCase() === e.toLowerCase());
-      return { ok: true, status: r.status, body: match ?? null };
-    },
-    [orgId, email],
+  const res = await page.request.get(
+    `${ORGS_API_BASE}/organizations/${orgId}/invitations?status=pending`,
+    { headers: { "X-Org-Id": orgId } },
   );
-  if (!res.ok || !res.body) return null;
-  return res.body.token;
-}
-
-/**
- * Capture the active org id from localStorage after a navigation. Lets the
- * test follow create-org -> reload -> store-write without parsing URLs.
- */
-async function readActiveOrgId(page: Page): Promise<string | null> {
-  await page.goto("/");
-  return page.evaluate((key) => localStorage.getItem(key), ORG_STORAGE_KEY);
-}
-
-/** Probe /organizations/mine; returns false if 404 (feature flag off). */
-async function orgsEnabled(page: Page): Promise<boolean> {
-  const status = await page.evaluate(async () => {
-    const r = await fetch("/api/organizations/mine", { credentials: "include" });
-    return r.status;
-  });
-  return status !== 404;
+  expect(res.status(), "owner invitation list should be readable").toBe(200);
+  const body = (await res.json()) as {
+    invitations: Array<{ email: string; token: string | null }>;
+  };
+  const match = body.invitations.find(
+    (i) => i.email.toLowerCase() === email.toLowerCase(),
+  );
+  return match?.token ?? null;
 }
 
 // --- the spec -------------------------------------------------------------
@@ -139,298 +149,209 @@ async function orgsEnabled(page: Page): Promise<boolean> {
 test.describe.serial("Phase 12: full teams flow", () => {
   let teamOrgId: string | null = null;
   let inviteToken: string | null = null;
-  let userAContext: BrowserContext | null = null;
   let userBContext: BrowserContext | null = null;
 
-  test.beforeAll(async () => {
-    // Two parallel browser contexts simulate the two-user flow without
-    // logout/login churn. Each context holds its own auth cookies +
-    // localStorage. The actual contexts are created lazily per test via
-    // the page fixture; this block stays empty.
+  test("0. the flag-on backend is up and reports organizations_enabled", async ({
+    request,
+  }) => {
+    const res = await request.get(`${ORGS_API_BASE}/health`);
+    // /health answers 503 whenever any dependency is degraded and still
+    // carries the flag, so assert the field, not the status code.
+    const body = (await res.json()) as { organizations_enabled?: boolean };
+    expect(
+      body.organizations_enabled,
+      `${ORGS_API_BASE} must run with ORGANIZATIONS_ENABLED=true; ` +
+        `got ${JSON.stringify(body)}`,
+    ).toBe(true);
   });
 
-  test("1. User A signs in and verifies orgs are enabled", async ({ page }) => {
+  test("1. User A creates a team org", async ({ page }) => {
     await loginAs(page, USER_A_EMAIL, USER_A_PW);
-    const enabled = await orgsEnabled(page);
-    test.skip(
-      !enabled,
-      "settings.organizations_enabled=false on backend; full teams flow skipped",
-    );
-  });
 
-  test("1b. User A creates a team org", async ({ page }) => {
-    await loginAs(page, USER_A_EMAIL, USER_A_PW);
+    const before = (await readStoredOrgId(page)) ?? null;
 
     await page.goto("/organizations/new");
-    // CreateOrganization.tsx renders a single text input + Create button.
-    // We don't rely on a specific label here; use any input + the visible
-    // create button. Adjust if a stable testid lands later.
-    await page.fill('input[type="text"]', ORG_NAME);
-    await page.click('button:has-text("Create")');
+    await page.fill("#org-name", ORG_NAME);
+    await page.getByRole("button", { name: "Create organization" }).click();
 
-    // After create_org, OrgContext.setActiveOrg writes localStorage and
-    // reloads. The new org should be the active org on the next paint.
-    await page.waitForURL((url) => !url.pathname.startsWith("/organizations/new"), {
-      timeout: 10_000,
-    });
-
-    teamOrgId = await readActiveOrgId(page);
-    expect(teamOrgId, "team org id should be active in localStorage").not.toBeNull();
+    // createOrg -> refresh -> setActiveOrg writes localStorage and reloads;
+    // the route itself does not change.
+    teamOrgId = await waitForNewStoredOrgId(page, before);
+    expect(teamOrgId).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  test("2. User A invites User B from the Organization tab", async ({ page }) => {
-    test.skip(!teamOrgId, "team org was not created in step 1b");
+  test("2. User A invites User B and can read the invitation token", async ({
+    page,
+  }) => {
+    expect(teamOrgId, "step 1 must have created the team org").not.toBeNull();
     await loginAs(page, USER_A_EMAIL, USER_A_PW);
     await switchToOrgById(page, teamOrgId!);
 
-    await page.goto("/settings?tab=organization");
+    await openOrgSubTab(page, "Members");
 
-    // Click the Invitations sub-tab inside the Organization tab. Per 12-05-
-    // SUMMARY, the sub-tabs are <button> with text Members / Invitations /
-    // Settings inside the Organization tab panel.
-    await page.click('button:has-text("Members")'); // ensure Org tab is mounted first
-    await page.click('button:has-text("Invitations")').catch(() => {
-      // If Invitations sub-tab doesn't render as a separate button (older
-      // implementation), fall through; MembersTab carries the invite form.
-    });
-
-    // Invite form selector (12-05-SUMMARY): form[aria-label="Invite member"]
-    // + input#invite-email. The MembersTab.tsx renders the form inline when
-    // owner.
     const inviteForm = page.locator('form[aria-label="Invite member"]');
-    if (await inviteForm.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await page.fill("input#invite-email", USER_B_EMAIL);
-      // Default role select; choose scientist explicitly when present.
-      await page.selectOption('select[name="role"], select[aria-label*="role" i]', "scientist").catch(() => undefined);
-      await inviteForm.locator('button[type="submit"]').click();
-    } else {
-      // Fallback for form-uses-no-aria-label deployments.
-      await page.fill('input[type="email"]', USER_B_EMAIL);
-      await page.click('button:has-text("Send invitation"), button:has-text("Invite")');
-    }
+    await expect(inviteForm, "owner sees the invite form").toBeVisible({
+      timeout: 15_000,
+    });
+    await page.fill("#invite-email", USER_B_EMAIL);
+    await page.selectOption("#invite-role", "scientist");
+    await inviteForm.getByRole("button", { name: "Send invitation" }).click();
 
-    // Confirm the invitation row landed.
-    await expect(page.getByText(USER_B_EMAIL)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByRole("status")).toContainText(
+      `Invitation sent to ${USER_B_EMAIL}`,
+      { timeout: 15_000 },
+    );
 
-    // Pull the token from the owner-only list endpoint (Plan 12-06 bug-fix
-    // returns `token` for the owner). If null, fall back to whatever the
-    // test infra supplies via PHASE12_INVITE_TOKEN env (manual paste).
+    // The pending row shows up on the Invitations sub-tab.
+    await page.getByRole("button", { name: "Invitations", exact: true }).click();
+    await expect(page.getByText(USER_B_EMAIL)).toBeVisible({ timeout: 10_000 });
+
     inviteToken = await fetchInviteToken(page, teamOrgId!, USER_B_EMAIL);
-    if (!inviteToken && process.env.PHASE12_INVITE_TOKEN) {
-      inviteToken = process.env.PHASE12_INVITE_TOKEN;
-    }
-    expect(inviteToken, "invitation token should be discoverable").toBeTruthy();
+    expect(inviteToken, "owner-only list returns the bearer token").toBeTruthy();
   });
 
   test("3. User B accepts the invitation", async ({ browser }) => {
-    test.skip(!inviteToken, "no invitation token captured in step 2");
+    expect(inviteToken, "step 2 must have captured a token").toBeTruthy();
 
-    // Fresh context = fresh cookies. User B logs in independently of A.
-    userBContext = await browser.newContext();
+    // Fresh context = fresh cookies, so B is independent of A. newContext()
+    // does not inherit the project's `use` options, so baseURL and the
+    // pre-dismissed cookie consent have to be passed explicitly.
+    userBContext = await browser.newContext({
+      baseURL: FLAG_ON_URL,
+      storageState: consentState(FLAG_ON_URL),
+    });
     const page = await userBContext.newPage();
 
     await loginAs(page, USER_B_EMAIL, USER_B_PW);
-    await page.goto(`/invitations/accept?token=${encodeURIComponent(inviteToken!)}`);
-
-    // AcceptInvitation.tsx surfaces "Join {orgName} as {role}" + Accept
-    // button when the email matches. Per 12-05-SUMMARY the button text is
-    // "Accept invitation".
-    await expect(page.getByText(new RegExp(ORG_NAME, "i"))).toBeVisible({
-      timeout: 10_000,
-    });
-    await page.getByRole("button", { name: /accept invitation/i }).click();
-
-    // After accept, AcceptInvitation pre-seeds localStorage + navigates to
-    // /jobs (Plan 12-05 deviation Rule 2). Confirm we land on /jobs and
-    // that the active org is the team org.
-    await page.waitForURL(/\/jobs/, { timeout: 10_000 });
-    const activeOrgId = await page.evaluate(
-      (key) => localStorage.getItem(key),
-      ORG_STORAGE_KEY,
+    await page.goto(
+      `/invitations/accept?token=${encodeURIComponent(inviteToken!)}`,
     );
-    expect(activeOrgId).toBe(teamOrgId);
+
+    await expect(
+      page.getByRole("heading", { name: `Join ${ORG_NAME}` }),
+    ).toBeVisible({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Accept invitation" }).click();
+
+    await page.waitForURL(/\/jobs/, { timeout: 15_000 });
+    expect(await readStoredOrgId(page)).toBe(teamOrgId);
   });
 
   test("4. User A sees User B in the members list", async ({ page }) => {
-    test.skip(!teamOrgId, "no team org");
     await loginAs(page, USER_A_EMAIL, USER_A_PW);
     await switchToOrgById(page, teamOrgId!);
+    await openOrgSubTab(page, "Members");
 
-    await page.goto("/settings?tab=organization");
-    await page.click('button:has-text("Members")');
-
-    await expect(page.getByText(USER_B_EMAIL)).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(USER_B_EMAIL)).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.locator(`select[aria-label="Role for ${USER_B_EMAIL}"]`),
+    ).toHaveValue("scientist");
   });
 
-  test("5. User B launches a smoke job in the team org", async () => {
-    test.skip(!userBContext || !teamOrgId, "step 3 didn't establish user B context");
-
+  test("5. User B reads the team-org job list", async () => {
+    expect(userBContext, "step 3 must have established user B").not.toBeNull();
     const page = await userBContext!.newPage();
-    await page.goto("/jobs");
-
-    // The chat-driven launch flow requires multi-turn agent interaction; the
-    // smoke job here is created via API call so we exercise org-scoping
-    // without depending on the agent. Backend treats this as a normal job
-    // submission with X-Org-Id: teamOrgId. If the backend lacks a
-    // /jobs/launch_smoke debug endpoint, this test is informational rather
-    // than load-bearing for the assertion below.
-    const launched = await page.evaluate(
-      async ([orgId]) => {
-        const r = await fetch("/api/jobs/launch_smoke", {
-          method: "POST",
-          credentials: "include",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Org-Id": orgId,
-          },
-          body: JSON.stringify({ tool: "rfdiffusion", preset: "smoke" }),
-        });
-        return { ok: r.ok, status: r.status };
-      },
-      [teamOrgId!],
-    );
-
-    if (!launched.ok && launched.status === 404) {
-      // Debug endpoint not deployed; skip the assertion. Operator can run
-      // the chat flow manually for the same coverage.
-      test.skip(true, "/jobs/launch_smoke debug endpoint not available; chat-launch coverage manual");
-    }
-
-    await page.goto("/jobs");
-    // Either the jobs table renders with at least one row, or the empty
-    // state still appears (if the smoke endpoint is a no-op stub).
-    await expect(
-      page.locator("table tbody tr").or(page.getByText(/no jobs/i)),
-    ).toBeVisible({ timeout: 10_000 });
-  });
-
-  test("6. User A sees jobs in the team org scope", async ({ page }) => {
-    test.skip(!teamOrgId, "no team org");
-    await loginAs(page, USER_A_EMAIL, USER_A_PW);
     await switchToOrgById(page, teamOrgId!);
-    await page.goto("/jobs");
 
-    // Either a table is visible (with launched-by column populated) or the
-    // empty state. The point is that the org-scoped read works without 403
-    // and renders the Launched by column for non-personal orgs.
-    await expect(
-      page.locator("table").or(page.getByText(/no jobs/i)),
-    ).toBeVisible({ timeout: 10_000 });
-
-    // If a job row exists, the "Launched by" header should be visible for
-    // non-personal orgs (Plan 12-05 conditional column).
-    const launchedByHeader = page.getByRole("columnheader", {
-      name: /launched by/i,
-    });
-    if ((await page.locator("table tbody tr").count()) > 0) {
-      await expect(launchedByHeader).toBeVisible();
-    }
+    // A fresh org has no jobs. What is under test is that the org-scoped read
+    // succeeds for a member: JobHistoryPage renders this empty state only on
+    // `!loading && !error`, so a 403 or 500 on GET /jobs shows the error text
+    // instead and this assertion fails.
+    await expect(page.getByText("No jobs yet")).toBeVisible({ timeout: 15_000 });
   });
 
-  test("7. User A views billing as owner", async ({ page }) => {
-    test.skip(!teamOrgId, "no team org");
-    await loginAs(page, USER_A_EMAIL, USER_A_PW);
-    await switchToOrgById(page, teamOrgId!);
-    await page.goto("/settings?tab=billing");
-
-    // Owner should see either the manage-portal CTA, the billing content,
-    // or (in CI without Stripe keys) an error message -- never the
-    // "ask your owner" gate text.
-    const ownerVisible = page.getByRole("button", { name: /manage payment method/i })
-      .or(page.getByText(/payment method/i))
-      .or(page.locator(".text-destructive"));
-    await expect(ownerVisible.first()).toBeVisible({ timeout: 10_000 });
-    await expect(
-      page.getByText(/billing is managed by your organization owner/i),
-    ).toHaveCount(0);
-  });
-
-  test("8. User B sees the non-owner billing gate", async () => {
-    test.skip(!userBContext || !teamOrgId, "user B context unavailable");
-
+  test("6. User B sees the non-owner billing gate", async () => {
     const page = await userBContext!.newPage();
     await switchToOrgById(page, teamOrgId!);
     await page.goto("/settings?tab=billing");
 
     await expect(
-      page.getByText(/billing is managed by your organization owner/i),
-    ).toBeVisible({ timeout: 10_000 });
-    // The owner's email should be surfaced in the gate copy.
+      page.getByText("Billing is managed by your organization owner."),
+    ).toBeVisible({ timeout: 15_000 });
+    // The gate names the owner so the member knows who to ask.
     await expect(page.getByText(USER_A_EMAIL)).toBeVisible();
   });
 
-  test("9. Last-owner-trigger blocks removing the sole owner", async ({ page }) => {
-    test.skip(!teamOrgId, "no team org");
+  test("7. User A is not gated out of billing as owner", async ({ page }) => {
     await loginAs(page, USER_A_EMAIL, USER_A_PW);
     await switchToOrgById(page, teamOrgId!);
+    await page.goto("/settings?tab=billing");
 
-    // Demote attempt: have user A try to demote themselves to scientist via
-    // the role select. With only one owner the protect_last_owner trigger
-    // raises check_violation; backend translates to 400; UI surfaces the
-    // toast/error per 12-05-SUMMARY MembersTab notes.
-    await page.goto("/settings?tab=organization");
-    await page.click('button:has-text("Members")');
-
-    const selfRoleSelect = page.locator(`select[aria-label="Role for ${USER_A_EMAIL}"]`);
-    if (await selfRoleSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await selfRoleSelect.selectOption("scientist");
-      // The backend returns 400 "Cannot remove or demote last owner ...".
-      await expect(
-        page.getByText(/cannot.*last owner|remove.*last owner|transfer ownership/i),
-      ).toBeVisible({ timeout: 5_000 });
-    } else {
-      // If the select isn't visible (single-owner UX might hide it as
-      // protection), confirm the protective copy is visible somewhere.
-      await expect(
-        page.getByText(/transfer ownership/i),
-      ).toBeVisible({ timeout: 5_000 });
-    }
-  });
-
-  test("10. User A transfers ownership to User B", async ({ page }) => {
-    test.skip(!teamOrgId, "no team org");
-    await loginAs(page, USER_A_EMAIL, USER_A_PW);
-    await switchToOrgById(page, teamOrgId!);
-
-    await page.goto("/settings?tab=organization");
-    await page.click('button:has-text("Members")');
-    await page.click('button:has-text("Transfer ownership")');
-
-    // Transfer dialog: target user + new self role.
-    await page.selectOption('select[name="target_user"], select[aria-label*="target" i]', { label: USER_B_EMAIL });
-    await page.selectOption('select[name="new_self_role"], select[aria-label*="self role" i]', "scientist");
-    await page.click('button:has-text("Confirm transfer"), button:has-text("Transfer")');
-
-    // Confirmation toast / success copy.
+    // CI has no Stripe keys, so the owner view legitimately renders either
+    // billing content or an error — the assertion is that it is never the
+    // non-owner gate.
     await expect(
-      page.getByText(/transferred|now an owner|ownership has been transferred/i),
-    ).toBeVisible({ timeout: 5_000 });
+      page.getByText("Billing is managed by your organization owner."),
+    ).toHaveCount(0, { timeout: 15_000 });
   });
 
-  test("11. User B is now the owner -- billing portal visible", async () => {
-    test.skip(!userBContext || !teamOrgId, "user B context unavailable");
+  test("8. the last owner cannot demote themselves", async ({ page }) => {
+    await loginAs(page, USER_A_EMAIL, USER_A_PW);
+    await switchToOrgById(page, teamOrgId!);
+    await openOrgSubTab(page, "Members");
 
+    const selfRole = page.locator(
+      `select[aria-label="Role for ${USER_A_EMAIL}"]`,
+    );
+    await expect(selfRole).toBeVisible({ timeout: 15_000 });
+    await selfRole.selectOption("scientist");
+
+    // protect_last_owner raises check_violation; the backend maps it to 400
+    // and MembersTab surfaces the detail in a role="alert" banner.
+    await expect(page.getByRole("alert")).toContainText(/last owner/i, {
+      timeout: 15_000,
+    });
+  });
+
+  test("9. User A transfers ownership to User B", async ({ page }) => {
+    await loginAs(page, USER_A_EMAIL, USER_A_PW);
+    await switchToOrgById(page, teamOrgId!);
+    await openOrgSubTab(page, "Members");
+
+    await page
+      .getByRole("button", { name: "Transfer ownership", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await dialog.locator("#transfer-target").selectOption({ label: USER_B_EMAIL });
+    await dialog.locator("#transfer-new-self-role").selectOption("scientist");
+    await dialog
+      .getByRole("button", { name: "Transfer ownership", exact: true })
+      .click();
+
+    // handleTransfer reloads on success. A is a scientist afterwards, so the
+    // owner-only affordances are gone.
+    await expect(
+      page.locator('form[aria-label="Invite member"]'),
+    ).toHaveCount(0, { timeout: 20_000 });
+    await expect(
+      page.locator(`select[aria-label="Role for ${USER_A_EMAIL}"]`),
+    ).toHaveCount(0);
+    // Non-owners see their role as plain text, so A's own row now reads
+    // scientist (MembersTab renders <span>{m.role}</span> off isOwner).
+    await expect(
+      page.getByRole("row").filter({ hasText: USER_A_EMAIL }),
+    ).toContainText("scientist");
+  });
+
+  test("10. User B is the owner and reaches billing", async () => {
     const page = await userBContext!.newPage();
     await switchToOrgById(page, teamOrgId!);
     await page.goto("/settings?tab=billing");
 
-    // No longer gated by the non-owner copy.
     await expect(
-      page.getByText(/billing is managed by your organization owner/i),
-    ).toHaveCount(0, { timeout: 10_000 });
-
-    const ownerVisible = page.getByRole("button", { name: /manage payment method/i })
-      .or(page.getByText(/payment method/i))
-      .or(page.locator(".text-destructive"));
-    await expect(ownerVisible.first()).toBeVisible({ timeout: 10_000 });
+      page.getByText("Billing is managed by your organization owner."),
+    ).toHaveCount(0, { timeout: 15_000 });
+    // Owner-only affordance, and B is now the owner.
+    await openOrgSubTab(page, "Members");
+    await expect(page.locator('form[aria-label="Invite member"]')).toBeVisible({
+      timeout: 15_000,
+    });
   });
 
   test.afterAll(async () => {
-    // Cleanup: close the user B context. The team org row is left in the
-    // database under the timestamped name `E2E Acme <ts>` so re-runs do not
-    // collide on the `name_not_blank` CHECK constraint; the operator can
-    // periodically purge `WHERE name LIKE 'E2E Acme %'` if desired.
-    await userAContext?.close();
+    // The org row is left behind under the timestamped name `E2E Acme <ts>` so
+    // re-runs never collide; purge with
+    // DELETE FROM public.organizations WHERE name LIKE 'E2E Acme %' if the
+    // local database gets noisy.
     await userBContext?.close();
   });
 });

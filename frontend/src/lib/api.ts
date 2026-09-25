@@ -7,8 +7,11 @@
  *
  * Phase 12 (Plan 12-05): every request also carries an `X-Org-Id` header
  * sourced from localStorage["kendrew.activeOrgId"] except for the opt-out
- * list of routes that legitimately have no active-org context.
+ * list of routes that legitimately have no active-org context, and except
+ * when lib/features.ts has resolved organizations_enabled=false.
  */
+
+import { organizationsEnabledSync } from "./features";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
@@ -173,8 +176,11 @@ export async function api<T = unknown>(
     }
   }
 
-  // Attach X-Org-Id header on org-scoped routes (Plan 12-05).
-  if (shouldSendOrgHeader(path, method)) {
+  // Attach X-Org-Id header on org-scoped routes (Plan 12-05). Skipped once
+  // the /health probe has resolved organizations_enabled=false, so an id left
+  // in localStorage by an earlier flag-on session cannot scope requests after
+  // the flag goes off. null (probe unresolved) keeps the stored-id behaviour.
+  if (organizationsEnabledSync() !== false && shouldSendOrgHeader(path, method)) {
     try {
       const activeOrgId = localStorage.getItem(ACTIVE_ORG_STORAGE_KEY);
       if (activeOrgId) {

@@ -38,16 +38,19 @@ async def process_pending_deletions(ctx: dict | None = None) -> int:
     # constants route through proper asyncpg parameter binding.
     #
     # Phase 12 cutover: stripe_customer_id moved from public.users to
-    # public.organizations. Each user's personal org holds the billing
-    # customer that was previously on the user row, so we JOIN through
-    # organization_memberships → organizations WHERE is_personal=true.
+    # public.organizations. Each user's personal org holds the billing customer
+    # that was previously on the user row; public.user_stripe_customer resolves
+    # it (and still falls back to the deprecated user column).
+    #
+    # It has to be a scalar, not a join: joining public.organization_memberships
+    # here returns one row PER MEMBERSHIP, so a user in two team orgs would be
+    # hard-deleted three times in one run and counted three times in the return
+    # value, with only one of those passes carrying their Stripe customer.
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT u.id, u.email, o.stripe_customer_id
+            """SELECT u.id, u.email,
+                      public.user_stripe_customer(u.id) AS stripe_customer_id
                FROM public.users u
-               LEFT JOIN public.organization_memberships om ON om.user_id = u.id
-               LEFT JOIN public.organizations o
-                 ON o.id = om.organization_id AND o.is_personal = true
                WHERE u.deletion_requested_at IS NOT NULL
                  AND u.deletion_requested_at < NOW() - ($1 || ' days')::interval""",
             str(GRACE_PERIOD_DAYS),

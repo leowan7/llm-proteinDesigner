@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import HTTPException, status
-
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,7 @@ def generate_invitation_token() -> str:
 
 def expires_default() -> datetime:
     """Return a timezone-aware UTC expiry timestamp (now + 7 days)."""
-    return datetime.now(timezone.utc) + timedelta(days=_DEFAULT_TTL_DAYS)
+    return datetime.now(UTC) + timedelta(days=_DEFAULT_TTL_DAYS)
 
 
 async def accept_invitation(
@@ -94,7 +93,7 @@ async def accept_invitation(
                     status_code=status.HTTP_410_GONE,
                     detail="Invitation has been revoked",
                 )
-            if invite["expires_at"] < datetime.now(timezone.utc):
+            if invite["expires_at"] < datetime.now(UTC):
                 raise HTTPException(
                     status_code=status.HTTP_410_GONE,
                     detail="Invitation has expired",

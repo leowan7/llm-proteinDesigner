@@ -1,14 +1,16 @@
 """Phase 12 Plan 12-03 — webhook handler routes billing to the org's customer.
 
 Covers ORG-04:
-- The webhook completion path resolves the Stripe customer via JOIN through
-  jobs.organization_id -> organizations.stripe_customer_id (NOT through
-  users.stripe_customer_id which is the pre-cutover path)
-- When the org has no stripe_customer_id (e.g. team org that hasn't set up
-  Stripe yet), the meter event is skipped silently rather than throwing
+- The webhook completion path resolves the Stripe customer from
+  jobs.organization_id via public.org_stripe_customer() (NOT by reading
+  users.stripe_customer_id itself, which is the pre-cutover path)
+- When resolution yields no customer (e.g. team org that hasn't set up Stripe
+  yet), the meter event is skipped silently rather than throwing
 
-These tests inspect the SQL that the webhook handler emits and assert on the
-JOIN path, then assert record_gpu_usage is called with the resolved customer.
+These tests inspect the SQL that the webhook handler emits and assert it goes
+through the resolver, then assert record_gpu_usage is called with the resolved
+customer. What the resolver itself returns for a legacy-only payer is SQL and
+is proven in tests/integration/test_flag_off_rolling_window.py.
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 os.environ.setdefault("TESTING", "true")
 
 
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.asyncio
 
 
 # Match the existing test_router.py timing: 5 min ago -> 300 gpu_seconds.
-NOW_UTC = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+NOW_UTC = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.UTC)
 STARTED_AT = NOW_UTC - datetime.timedelta(minutes=5)
 
 
@@ -41,12 +42,17 @@ def _completed_payload() -> bytes:
 
 
 def _build_pool_capturing_billing(stripe_customer_id: str | None):
-    """Build a pool whose fetchrow on the JOIN query returns the given customer.
+    """Build a pool whose customer resolution returns the given customer.
 
-    Captures all queries so the test can assert the JOIN SQL is the one used
-    by the billing-resolution step.
+    Captures all queries so the test can assert the billing-resolution step
+    goes through public.org_stripe_customer().
     """
     captured = {"queries": []}
+
+    async def _fetchval(query, *args):
+        captured["queries"].append(query)
+        # The billing-resolution step is the only fetchval on this path.
+        return stripe_customer_id
 
     async def _fetchrow(query, *args):
         captured["queries"].append(query)
@@ -62,9 +68,6 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
         # Second fetchrow: terminal-state guard
         if "SELECT status FROM public.jobs WHERE id" in query:
             return {"status": "running"}
-        # Third fetchrow: the billing-resolution JOIN
-        if "JOIN public.organizations" in query:
-            return {"stripe_customer_id": stripe_customer_id}
         # email lookup at the end
         if "FROM auth.users" in query:
             return {"email": "launcher@acme.bio"}
@@ -75,6 +78,7 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
 
     conn = AsyncMock()
     conn.fetchrow = _fetchrow
+    conn.fetchval = _fetchval
     conn.execute = _execute
 
     ctx = AsyncMock()
@@ -86,9 +90,9 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
     return pool, captured
 
 
-async def test_webhook_completion_resolves_customer_via_org_join():
-    """ORG-04: webhook handler reads organizations.stripe_customer_id by JOIN
-    through jobs.organization_id, then meters against that customer."""
+async def test_webhook_completion_resolves_customer_via_org_resolver():
+    """ORG-04: webhook handler resolves the customer from jobs.organization_id
+    through public.org_stripe_customer(), then meters against it."""
     from httpx import ASGITransport, AsyncClient
 
     pool, captured = _build_pool_capturing_billing(stripe_customer_id="cus_org_xxx")
@@ -110,7 +114,6 @@ async def test_webhook_completion_resolves_customer_via_org_join():
 
         # Build a minimal app with just the webhook router mounted.
         from fastapi import FastAPI
-
         from webhooks.router import router as webhooks_router
 
         app = FastAPI()
@@ -122,11 +125,15 @@ async def test_webhook_completion_resolves_customer_via_org_join():
 
     assert r.status_code == 200
 
-    # The JOIN query must be the one used for billing resolution.
-    join_queries = [q for q in captured["queries"] if "JOIN public.organizations" in q]
-    assert join_queries, f"Expected JOIN public.organizations query; got: {captured['queries']}"
-    # And it must scope through jobs.organization_id
-    assert "j.organization_id" in join_queries[0]
+    # Billing resolution must go through the resolver function, scoped by the
+    # job's organization_id.
+    resolver_queries = [
+        q for q in captured["queries"] if "public.org_stripe_customer" in q
+    ]
+    assert resolver_queries, (
+        f"Expected public.org_stripe_customer query; got: {captured['queries']}"
+    )
+    assert "j.organization_id" in resolver_queries[0]
 
     # record_gpu_usage called with the org-resolved customer
     assert mock_meter.called
@@ -135,8 +142,8 @@ async def test_webhook_completion_resolves_customer_via_org_join():
 
 
 async def test_webhook_completion_skips_billing_if_org_has_no_customer():
-    """A team org that hasn't yet set up Stripe — JOIN returns NULL
-    stripe_customer_id; no meter event."""
+    """A team org that hasn't yet set up Stripe — the resolver returns NULL;
+    no meter event."""
     from httpx import ASGITransport, AsyncClient
 
     pool, _ = _build_pool_capturing_billing(stripe_customer_id=None)
@@ -156,7 +163,6 @@ async def test_webhook_completion_skips_billing_if_org_has_no_customer():
         mock_provider.return_value = MagicMock(terminate_pod=AsyncMock())
 
         from fastapi import FastAPI
-
         from webhooks.router import router as webhooks_router
 
         app = FastAPI()

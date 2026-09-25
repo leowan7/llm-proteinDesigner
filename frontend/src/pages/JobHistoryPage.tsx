@@ -73,11 +73,20 @@ export function JobHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-  const { activeOrg } = useOrgContext();
+  const { enabled: orgsEnabled, activeOrg } = useOrgContext();
 
-  // Resolve current user so "Launched by" can render "You" on own rows.
+  // Show the "Launched by" column for org-scoped views (any non-personal
+  // active org) so the user can tell teammates' jobs apart from their own.
+  // Off with the feature flag off: the table renders exactly today's columns.
+  const showLaunchedBy =
+    orgsEnabled && activeOrg !== null && !activeOrg.is_personal;
+
+  // Resolve current user so "Launched by" can render "You" on own rows. Only
+  // fetched when the column is actually shown, so a flag-off page load issues
+  // no request the single-tenant app did not already make.
   useEffect(() => {
     let cancelled = false;
+    if (!showLaunchedBy) return () => {};
     api<MeResponse>("/auth/me")
       .then((u) => {
         if (!cancelled) setCurrentUserId(u.user_id);
@@ -88,11 +97,7 @@ export function JobHistoryPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
-
-  // Show the "Launched by" column for org-scoped views (any non-personal
-  // active org) so the user can tell teammates' jobs apart from their own.
-  const showLaunchedBy = activeOrg !== null && !activeOrg.is_personal;
+  }, [showLaunchedBy]);
 
   // Status filter: null means "All"
   const [statusFilter, setStatusFilter] = useState<string | null>(null);

@@ -34,10 +34,10 @@ export function InvitationsTab({ orgId }: InvitationsTabProps) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setLoadError(null);
     try {
       const rows = await fetchPendingInvitations(orgId);
       setInvitations(rows);
+      setLoadError(null);
     } catch (err) {
       setLoadError(
         err instanceof Error ? err.message : "Failed to load invitations.",
@@ -45,8 +45,11 @@ export function InvitationsTab({ orgId }: InvitationsTabProps) {
     }
   }, [orgId]);
 
+  // Chained off a resolved promise rather than called straight: every
+  // setState in refresh() then runs inside a promise callback, not inside
+  // the effect body (react-hooks/set-state-in-effect).
   useEffect(() => {
-    void refresh();
+    void Promise.resolve().then(refresh);
   }, [refresh]);
 
   async function handleRevoke(invite: InvitationRow) {

@@ -39,6 +39,9 @@ import { useOrgContext } from "./OrganizationContext";
 import { fetchMembers } from "@/lib/organizations";
 
 const baseCtx = {
+  // MembersTab only renders inside the org routes, which are themselves gated
+  // on the flag, so every case here is the flag-on shape.
+  enabled: true,
   orgs: [
     { id: "org-1", name: "Acme", role: "owner" as const, is_personal: false },
   ],

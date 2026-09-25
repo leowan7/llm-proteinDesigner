@@ -2,10 +2,11 @@
  * OrganizationSwitcher — header dropdown for switching the active org.
  *
  * Behavior:
- *   - Reads {orgs, activeOrg, setActiveOrg, loading} from OrgContext.
- *   - Renders null while loading or when the user has 0 or 1 org (solo /
- *     single-tenant fallback). This preserves the existing single-user UX
- *     unchanged for users who never create a team.
+ *   - Reads {enabled, orgs, activeOrg, setActiveOrg, loading} from OrgContext.
+ *   - Renders null when the organizations feature flag is off, while loading,
+ *     or when the user has 0 or 1 org (solo / single-tenant fallback). This
+ *     preserves the existing single-user UX unchanged for users who never
+ *     create a team.
  *   - With 2+ orgs, renders a DropdownMenu trigger showing the active org's
  *     name plus a "Personal" suffix when is_personal=true.
  *   - Menu items: every org with its role label; checkmark column on the
@@ -36,8 +37,9 @@ function formatRole(role: OrgRole): string {
 }
 
 export function OrganizationSwitcher() {
-  const { orgs, activeOrg, setActiveOrg, loading } = useOrgContext();
+  const { enabled, orgs, activeOrg, setActiveOrg, loading } = useOrgContext();
 
+  if (!enabled) return null;
   if (loading) return null;
   if (orgs.length <= 1) return null;
 

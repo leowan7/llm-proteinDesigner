@@ -19,16 +19,14 @@ import logging
 from datetime import datetime
 
 import resend
-
 from config import settings
-
 
 logger = logging.getLogger(__name__)
 
 resend.api_key = settings.resend_api_key
 
 
-async def _send_email_safely(params: "resend.Emails.SendParams", purpose: str) -> None:
+async def _send_email_safely(params: resend.Emails.SendParams, purpose: str) -> None:
     """Send an email via Resend, swallowing any error with a warning log."""
     if not settings.resend_api_key:
         logger.info("Skipping %s email: RESEND_API_KEY not configured", purpose)

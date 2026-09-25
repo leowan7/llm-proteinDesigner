@@ -6,7 +6,6 @@ JWT in the access_token HTTP-only cookie.
 """
 
 import stripe
-from auth.dependencies import get_current_user
 from auth.org_dependencies import require_role
 from config import settings
 from db.connection import get_db_pool

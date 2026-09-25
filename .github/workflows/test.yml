@@ -66,6 +66,26 @@ jobs:
           COOKIE_SECURE: "false"
           CSRF_SECRET: "ci-csrf-secret"
 
+      # tests/integration is excluded from the run above because it needs a
+      # real database. This one file does, and is the SQL half of the flag-off
+      # landing: the BEFORE INSERT trigger that keeps an old replica's
+      # org-column-less job INSERT legal during the rolling deploy, and the two
+      # Stripe resolvers' fallback to the deprecated users.stripe_customer_id.
+      # `supabase start` above has already applied every migration, so the
+      # schema here is the schema merging this PR pushes to production.
+      # Deliberately not the whole directory: the other org files in it have
+      # never executed (they insert public.users rows with no auth.users row,
+      # violating the FK) and are out of scope for this PR.
+      - name: Run the flag-off rolling-window DB tests
+        run: python -m pytest tests/integration/test_flag_off_rolling_window.py -v
+        env:
+          TESTING: "true"
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          COOKIE_SECURE: "false"
+          CSRF_SECRET: "ci-csrf-secret"
+          SUPABASE_INTEGRATION_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -225,19 +245,62 @@ jobs:
           COOKIE_SECURE: "false"
           CSRF_SECRET: "ci-csrf-secret"
 
-      - name: Seed E2E test user (auth + public.users with tos accepted)
+      # Phase 12: a second backend with ORGANIZATIONS_ENABLED=true, so
+      # frontend/e2e/organizations.spec.ts runs with the feature on while every
+      # other spec keeps running against the flag-OFF backend on :8000. That
+      # flag-off run is the coverage that proves the landing does not change
+      # single-tenant behaviour, so it is not traded away.
+      # Both processes share this runner's Supabase and Redis; the org routes
+      # are additive, so the flag-off backend is unaffected by their presence.
+      - name: Start flag-on backend (organizations enabled)
+        run: |
+          cd backend && uvicorn main:app --host 0.0.0.0 --port 8001 &
+          echo "Waiting for flag-on backend..."
+          for i in $(seq 1 20); do
+            if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
+              echo "Flag-on backend ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+        env:
+          TESTING: "true"
+          ORGANIZATIONS_ENABLED: "true"
+          SUPABASE_URL: http://127.0.0.1:54321
+          SUPABASE_SERVICE_KEY: ${{ env.LOCAL_SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_JWT_SECRET: ${{ env.LOCAL_SUPABASE_JWT_SECRET }}
+          SUPABASE_ANON_KEY: ${{ env.LOCAL_SUPABASE_ANON_KEY }}
+          REDIS_URL: redis://localhost:6379/0
+          COOKIE_SECURE: "false"
+          CSRF_SECRET: "ci-csrf-secret"
+          # The flag-on frontend is served from :5174 (playwright.config.ts) and
+          # calls this API cross-origin with credentials.
+          CORS_ORIGINS: '["http://localhost:5174"]'
+
+      - name: Seed E2E test users (auth + public.users with tos accepted)
         # Two-stage seed:
         # 1. POST /auth/v1/admin/users to create the auth user (or 422 if exists)
         # 2. Upsert public.users with tos_version = COOKIES/TOS current value so
         #    the ReAcceptanceModal (frontend AuthenticatedLayout) doesn't pop
         #    up after login and block every clicks-on-app test.
+        #
+        # Three accounts: the long-standing single-user account, plus the two
+        # the Phase 12 teams spec needs (one invites, the other accepts).
+        # Neither -e2e account gets a personal org here -- they are created
+        # through the GoTrue admin API, not POST /auth/signup -- so the spec
+        # also exercises the lazy personal-org path in
+        # backend/auth/org_dependencies.py.
         run: |
           python3 - <<'PY'
           import json, os, urllib.request, urllib.error
           base = os.environ["SUPABASE_URL"]
           svc  = os.environ["SUPABASE_SERVICE_KEY"]
           tos  = "2026-04-23"  # must match backend/config.py tos_current_version
-          email, password = "test@example.com", "Password123!"
+          ACCOUNTS = [
+              ("test@example.com", "Password123!"),
+              ("usera-e2e@example.com", "TestPassword123!"),
+              ("userb-e2e@example.com", "TestPassword123!"),
+          ]
           headers = {"apikey": svc, "Authorization": f"Bearer {svc}", "Content-Type": "application/json"}
 
           def req(method, url, body=None):
@@ -249,55 +312,63 @@ jobs:
               except urllib.error.HTTPError as e:
                   return e.code, json.loads(e.read().decode() or "{}")
 
-          # Stage 1: create auth user (or note it exists)
-          code, body = req("POST", f"{base}/auth/v1/admin/users",
-                           {"email": email, "password": password, "email_confirm": True})
-          print(f"create_user: HTTP {code} {body}")
+          def seed(email, password):
+              # Stage 1: create auth user (or note it exists)
+              code, body = req("POST", f"{base}/auth/v1/admin/users",
+                               {"email": email, "password": password, "email_confirm": True})
+              print(f"create_user({email}): HTTP {code} {body}")
 
-          # Look up the user id either way (GoTrue admin list + client-side filter)
-          uid = None
-          if code == 200 and body.get("id"):
-              uid = body["id"]  # created fresh -> id is in the body
-          else:
-              code2, body2 = req("GET", f"{base}/auth/v1/admin/users?per_page=200")
-              users = body2.get("users") if isinstance(body2, dict) else body2
-              for u in (users or []):
-                  if u.get("email", "").lower() == email:
-                      uid = u["id"]
-                      break
-          if not uid:
-              raise SystemExit(f"could not locate seeded user id; list response: {body2 if 'body2' in dir() else body}")
-          print(f"resolved uid={uid}")
+              # Look up the user id either way (GoTrue admin list + client-side filter)
+              uid = None
+              body2 = None
+              if code == 200 and body.get("id"):
+                  uid = body["id"]  # created fresh -> id is in the body
+              else:
+                  _code2, body2 = req("GET", f"{base}/auth/v1/admin/users?per_page=200")
+                  users = body2.get("users") if isinstance(body2, dict) else body2
+                  for u in (users or []):
+                      if u.get("email", "").lower() == email:
+                          uid = u["id"]
+                          break
+              if not uid:
+                  raise SystemExit(
+                      f"could not locate seeded user id for {email}; "
+                      f"list response: {body2 if body2 is not None else body}"
+                  )
+              print(f"resolved uid={uid}")
 
-          # Stage 2: upsert public.users with TOS accepted
-          rest_headers = {**headers, "Prefer": "resolution=merge-duplicates,return=representation"}
-          row = {"id": uid, "email": email,
-                 "tos_accepted_at": "2026-05-26T00:00:00Z", "tos_version": tos}
-          r = urllib.request.Request(f"{base}/rest/v1/users", method="POST",
-                                      headers=rest_headers, data=json.dumps(row).encode())
-          try:
-              with urllib.request.urlopen(r) as resp:
-                  print(f"upsert_users: HTTP {resp.status} {resp.read().decode()[:300]}")
-          except urllib.error.HTTPError as e:
-              # Fail the job HERE. This used to print and carry on, so a broken
-              # fixture surfaced ~6 minutes later as three unrelated-looking
-              # Playwright click timeouts instead of one obvious seed error.
-              raise SystemExit(
-                  f"seed failed: upsert public.users -> HTTP {e.code} "
-                  f"{e.read().decode()[:300]}"
-              ) from e
+              # Stage 2: upsert public.users with TOS accepted
+              rest_headers = {**headers, "Prefer": "resolution=merge-duplicates,return=representation"}
+              row = {"id": uid, "email": email,
+                     "tos_accepted_at": "2026-05-26T00:00:00Z", "tos_version": tos}
+              r = urllib.request.Request(f"{base}/rest/v1/users", method="POST",
+                                          headers=rest_headers, data=json.dumps(row).encode())
+              try:
+                  with urllib.request.urlopen(r) as resp:
+                      print(f"upsert_users: HTTP {resp.status} {resp.read().decode()[:300]}")
+              except urllib.error.HTTPError as e:
+                  # Fail the job HERE. This used to print and carry on, so a broken
+                  # fixture surfaced ~6 minutes later as three unrelated-looking
+                  # Playwright click timeouts instead of one obvious seed error.
+                  raise SystemExit(
+                      f"seed failed for {email}: upsert public.users -> HTTP {e.code} "
+                      f"{e.read().decode()[:300]}"
+                  ) from e
 
-          # Read back rather than trusting the write: the modal is driven by
-          # tos_version specifically, and a silently-partial upsert would put us
-          # right back where we started.
-          code, body = req("GET", f"{base}/rest/v1/users?id=eq.{uid}&select=tos_version")
-          got = (body[0].get("tos_version") if isinstance(body, list) and body else None)
-          if got != tos:
-              raise SystemExit(
-                  f"seed verify failed: tos_version={got!r}, expected {tos!r}. "
-                  "The ReAcceptanceModal would block every app test."
-              )
-          print(f"seed verified: tos_version={got}")
+              # Read back rather than trusting the write: the modal is driven by
+              # tos_version specifically, and a silently-partial upsert would put us
+              # right back where we started.
+              code, body = req("GET", f"{base}/rest/v1/users?id=eq.{uid}&select=tos_version")
+              got = (body[0].get("tos_version") if isinstance(body, list) and body else None)
+              if got != tos:
+                  raise SystemExit(
+                      f"seed verify failed for {email}: tos_version={got!r}, expected {tos!r}. "
+                      "The ReAcceptanceModal would block every app test."
+                  )
+              print(f"seed verified: {email} tos_version={got}")
+
+          for account_email, account_password in ACCOUNTS:
+              seed(account_email, account_password)
           PY
         env:
           SUPABASE_URL: http://127.0.0.1:54321

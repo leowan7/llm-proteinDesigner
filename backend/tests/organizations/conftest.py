@@ -13,13 +13,12 @@ from __future__ import annotations
 import os
 import secrets
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 import pytest_asyncio
-
 
 SUPABASE_DB_URL = os.environ.get("SUPABASE_INTEGRATION_DB_URL", "")
 
@@ -96,7 +95,7 @@ async def invitation_factory(db_pool: asyncpg.Pool) -> AsyncIterator[Callable]:
 
     async def _create(org_id, email: str, role: str, invited_by) -> dict:
         token = secrets.token_urlsafe(32)
-        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+        expires_at = datetime.now(UTC) + timedelta(days=7)
         row = await db_pool.fetchrow(
             """INSERT INTO public.organization_invitations
                    (organization_id, email, role, token, invited_by, expires_at)

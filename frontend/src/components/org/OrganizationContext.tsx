@@ -15,10 +15,14 @@
  *      org, and helpers to refresh after mutations + switch active org.
  *   4. setActiveOrg() writes localStorage and triggers a full reload so all
  *      in-flight queries + SSE streams re-fetch under the new org's scope.
- *   5. Single-tenant fallback: if the backend returns 4xx for
- *      /organizations/mine (feature flag off), expose orgs=[] and don't
- *      block render; api() naturally skips the X-Org-Id header when no id
- *      is stored.
+ *   5. Flag-off landing: organizationsEnabled() probes /health first. When
+ *      the backend reports organizations_enabled=false the provider skips
+ *      /organizations/mine entirely, exposes enabled=false with orgs=[], and
+ *      clears any active-org id left in localStorage by an earlier flag-on
+ *      session, so no request carries a stale X-Org-Id header. Every org UI
+ *      surface reads `enabled` and renders the single-tenant view when it is
+ *      false. A 4xx from /organizations/mine with the flag on degrades the
+ *      same way (orgs=[]) rather than blocking render.
  *   6. Logout helper clearActiveOrgOnLogout() removes the stored id so a
  *      different user signing in on the same browser starts fresh.
  */
@@ -30,6 +34,7 @@ import {
   useEffect,
   useState,
 } from "react";
+import { organizationsEnabled } from "@/lib/features";
 import {
   fetchMyOrgs,
   type OrgResponse,
@@ -39,6 +44,11 @@ import {
 const STORAGE_KEY = "kendrew.activeOrgId";
 
 interface OrgContextValue {
+  /**
+   * True only when the backend reports organizations_enabled=true. Every org
+   * UI surface gates on this so a flag-off deploy renders as single-tenant.
+   */
+  enabled: boolean;
   /** All orgs the current user is a member of. Empty when feature flag off. */
   orgs: OrgResponse[];
   /** The id of the active org, or null when no orgs / feature off. */
@@ -104,6 +114,7 @@ function resolveActiveOrgId(
 }
 
 export function OrgProvider({ children }: { children: React.ReactNode }) {
+  const [enabled, setEnabled] = useState(false);
   const [orgs, setOrgs] = useState<OrgResponse[]>([]);
   const [activeOrgId, setActiveOrgIdState] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -111,16 +122,23 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
+      const flagOn = await organizationsEnabled();
+      setEnabled(flagOn);
       let list: OrgResponse[] = [];
-      try {
-        list = await fetchMyOrgs();
-      } catch (err) {
-        // Single-tenant fallback: feature flag may be off, returning 404.
-        // Leave orgs empty so the rest of the app keeps working as a single
-        // user. We log for visibility; we do not bubble the error.
-        console.warn("Organizations feature unavailable:", err);
-        list = [];
+      if (flagOn) {
+        try {
+          list = await fetchMyOrgs();
+        } catch (err) {
+          // Flag on but the call failed. Leave orgs empty so the rest of the
+          // app keeps working as a single user. We log for visibility; we do
+          // not bubble the error.
+          console.warn("Organizations feature unavailable:", err);
+          list = [];
+        }
       }
+      // With an empty list resolveActiveOrgId() returns null, which clears any
+      // stored id below — that is what keeps a flag-off deploy from sending a
+      // stale X-Org-Id header.
       setOrgs(list);
       const stored = readStoredActiveOrgId();
       const resolved = resolveActiveOrgId(list, stored);
@@ -148,6 +166,7 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
   const role = activeOrg?.role ?? null;
 
   const value: OrgContextValue = {
+    enabled,
     orgs,
     activeOrgId,
     activeOrg,
@@ -171,12 +190,12 @@ export function OrgProvider({ children }: { children: React.ReactNode }) {
  *     fetchMyOrgs() returns nothing (handled by the provider too, but a hook
  *     consumed outside the provider should still degrade gracefully)
  *
- * Components that render inside this fallback treat orgs=[] as "single
- * tenant" and the gating decisions (`role !== "owner"`, `activeOrg !==
- * null`) all skip their org-specific branches. This is exactly the
+ * Components that render inside this fallback see enabled=false and orgs=[],
+ * so every gating decision skips its org-specific branch. This is the
  * pre-Plan-12-05 behavior for a solo user.
  */
 const FALLBACK_ORG_CONTEXT: OrgContextValue = {
+  enabled: false,
   orgs: [],
   activeOrgId: null,
   activeOrg: null,

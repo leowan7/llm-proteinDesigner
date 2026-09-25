@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import asyncpg
 import pytest
 
-
 os.environ.setdefault("TESTING", "true")
 
 
@@ -25,10 +24,9 @@ pytestmark = pytest.mark.asyncio
 
 
 def _build_app(caller_id: str = "user-caller", role: str = "owner", org_id: str = "org-1"):
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
+    from fastapi import FastAPI
     from organizations.router import router as orgs_router
 
     app = FastAPI()

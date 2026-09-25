@@ -7,9 +7,13 @@
  *   3. signed out + valid token → "Sign in" + "Create account" CTAs with token
  *   4. invalid token → reason-specific message (expired/revoked/etc.)
  *
+ * Plus the flag-off landing: with organizations_enabled=false the page
+ * renders nothing and calls neither /invitations/preview nor /auth/me.
+ *
  * Strategy: mock previewInvitation() to return the desired preview shape,
- * and stub api() so the /auth/me probe resolves to either the signed-in
- * user (and we control the email) or rejects as 401.
+ * stub api() so the /auth/me probe resolves to either the signed-in user
+ * (and we control the email) or rejects as 401, and mock @/lib/features so
+ * the /health flag probe is controlled rather than fetched.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -22,6 +26,13 @@ import { ApiError } from "@/lib/api";
 vi.mock("@/lib/organizations", () => ({
   previewInvitation: vi.fn(),
   acceptInvitation: vi.fn(),
+}));
+
+const featureFlag = vi.hoisted(() => ({ orgs: true }));
+vi.mock("@/lib/features", () => ({
+  organizationsEnabled: async () => featureFlag.orgs,
+  organizationsEnabledSync: () => featureFlag.orgs,
+  useOrganizationsEnabled: () => featureFlag.orgs,
 }));
 
 vi.mock("@/lib/api", async () => {
@@ -47,6 +58,7 @@ describe("AcceptInvitation", () => {
   beforeEach(() => {
     vi.mocked(previewInvitation).mockReset();
     vi.mocked(api).mockReset();
+    featureFlag.orgs = true;
   });
 
   afterEach(() => {
@@ -158,5 +170,16 @@ describe("AcceptInvitation", () => {
       vi.mocked(previewInvitation).mockReset();
       vi.mocked(api).mockReset();
     }
+  });
+
+  it("renders nothing and calls no endpoint when the flag is off", async () => {
+    featureFlag.orgs = false;
+
+    const { container } = renderAt("/invitations/accept?token=abc");
+
+    // Nothing to await: the page short-circuits before any request.
+    expect(container.textContent).toBe("");
+    expect(vi.mocked(previewInvitation)).not.toHaveBeenCalled();
+    expect(vi.mocked(api)).not.toHaveBeenCalled();
   });
 });

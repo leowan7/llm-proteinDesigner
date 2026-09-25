@@ -10,7 +10,6 @@ for the main_async tests so the CLI can be exercised without a real DB.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import io
 import json
 from contextlib import redirect_stdout
@@ -21,7 +20,6 @@ import pytest
 import stripe
 
 from scripts import stamp_stripe_org_metadata as m
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -222,7 +220,7 @@ async def test_exit_code_one_on_any_failure():
             rc = await m.main_async(args)
     assert rc == 1, "exit code must be 1 when any row failed"
     # The last line of stdout is the summary; preceding line is the failed row.
-    lines = [l for l in buf.getvalue().splitlines() if l.strip()]
+    lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
     summary = json.loads(lines[-1])
     assert summary["counts"]["failed"] == 1
     assert summary["total"] == 1

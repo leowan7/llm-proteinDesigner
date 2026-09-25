@@ -147,29 +147,19 @@ async def signup(request: Request, body: SignUpRequest, response: Response):
 
     # Phase 12: Auto-create a personal organization for the new user so all
     # downstream paths (jobs, billing, RLS) always have an org context.
-    # The INSERT runs as service_role with the new user's explicit UUID
-    # (NOT auth.uid(), which is NULL pre-login). is_personal=TRUE marks this
-    # as the lazily-billed default org; stripe_customer_id stays NULL until
-    # the first billing interaction (lazy creation in get_or_create_customer).
-    # Naming follows the 12-01 backfill convention: "{email_local} (Personal)".
+    # personal_org_for is find-or-create (see
+    # supabase/migrations/20260605000003_personal_org_tolerance.sql), so a
+    # retried signup cannot leave this user with two personal orgs -- which
+    # would let billing read stripe_customer_id off the wrong one.
+    # Best-effort here and not fatal to signup: the same function backs the
+    # no-X-Org-Id fallback in auth/org_dependencies.py and the BEFORE INSERT
+    # trigger on public.jobs, so a failure here is recovered on first use.
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            async with conn.transaction():
-                email_local = body.email.split("@", 1)[0] or "Personal"
-                personal_name = f"{email_local} (Personal)"
-                org_row = await conn.fetchrow(
-                    """INSERT INTO public.organizations (name, is_personal, created_by)
-                       VALUES ($1, TRUE, $2)
-                       RETURNING id""",
-                    personal_name, new_user_id,
-                )
-                await conn.execute(
-                    """INSERT INTO public.organization_memberships (organization_id, user_id, role)
-                       VALUES ($1, $2, 'owner'::public.org_role)
-                       ON CONFLICT DO NOTHING""",
-                    org_row["id"], new_user_id,
-                )
+            await conn.fetchval(
+                "SELECT public.personal_org_for($1::uuid)", new_user_id
+            )
     except Exception as exc:  # pragma: no cover - personal-org bootstrap is best-effort
         logger.warning(
             "Signup succeeded for user %s but personal org bootstrap failed: %s",

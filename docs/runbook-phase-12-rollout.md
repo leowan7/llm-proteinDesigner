@@ -6,15 +6,44 @@
 
 ---
 
+## Read this first: the merge is Step 2
+
+This runbook used to assume the operator applies the Phase 12 migrations by
+hand, after the code had been sitting on the trunk for a while. Two pieces of
+deploy config make that false:
+
+- `railway.toml` sets `preDeployCommand = supabase db push --db-url $MIGRATION_DB_URL --yes`.
+  Merging to `master` therefore applies every pending migration to the
+  production database before the new backend takes traffic. **The merge is
+  Step 2.** There is no window in which the code is on trunk and the schema is
+  not migrated.
+- Vercel deploys `master` on push, so the frontend ships in the same merge.
+  Every organization surface gates on the backend's own
+  `organizations_enabled`, read at runtime from `/health`
+  (`frontend/src/lib/features.ts`), so it ships dark and the app renders
+  exactly as it does today until Step 5.
+
+Step numbering changed with that: the old Step 6 ("deploy frontend") is gone,
+because the frontend deploys in Step 2 and switches on in Step 5 with no
+deploy of its own. Steps 7/8/9 of the old draft are now Steps 6/7/8. The
+branch is `master`, not `main`.
+
+The drop-column migration `20260606000001_drop_users_stripe_customer_id.sql`
+is **deliberately not in the Phase 12 PR**, precisely because merging applies
+migrations: it ships as its own PR, and merging that PR is Step 8.
+
+---
+
 ## Pre-Flight Checklist
 
-Before starting, confirm every item below:
+Before merging, confirm every item below:
 
-- [ ] All Phase 12 plans 12-01..12-05 have shipped to `master` on `llm-proteinDesigner`
-- [ ] Backend is currently deployed to Railway with `ORGANIZATIONS_ENABLED=false`
+- [ ] The Phase 12 PR is green on CI and approved
+- [ ] The PR's diff contains `20260605000001`, `20260605000002` and `20260605000003`, and **not** `20260606000001_drop_users_stripe_customer_id.sql`
+- [ ] Railway has `ORGANIZATIONS_ENABLED` unset or `false` on the backend service (the default in `backend/config.py` is `False`)
 - [ ] Stripe test-mode key is available: `sk_test_...` exported as `STRIPE_TEST_SECRET_KEY`
 - [ ] Stripe live-mode key is available in Railway env: `STRIPE_SECRET_KEY`
-- [ ] Supabase CLI is installed locally and `DATABASE_URL` (pooler URL) is exported
+- [ ] Supabase CLI is installed locally and `DATABASE_URL` (pooler URL) is exported, for the verify queries
 - [ ] Monitoring dashboards open: Sentry, Stripe Dashboard, UptimeRobot
 - [ ] Slack channel `#kendrew-alerts` available for the operator
 - [ ] Have read RESEARCH §12.1 (the 9-step table) and §12.4 (rollback)
@@ -24,49 +53,92 @@ Before starting, confirm every item below:
 
 ## Rollout Steps
 
-The sequence below mirrors RESEARCH §12.1 exactly. Each step has a verify command; do not advance until the verify passes.
+Each step has a verify command; do not advance until the verify passes.
 
-### Step 1 — Verify backend is deployed flag-off
+### Step 1 — Verify production is flag-off before the merge
 
-The current production backend must NOT have org routes mounted yet. The orgs router only mounts when `settings.organizations_enabled = True` (Plan 12-02).
+The currently deployed backend must not have org routes mounted. The orgs
+router only mounts when `settings.organizations_enabled = True`
+(`backend/main.py`).
 
 ```bash
 curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
-# expect: false
+# expect: false, or null on a backend that predates Phase 12
 ```
 
-If this returns `true` or the field is missing, STOP. The Phase 12 backend has either already been flipped (skip to Step 5 verification) or never deployed.
+If this returns `true`, the flag has already been flipped — stop and find out
+by whom before merging anything.
 
-### Step 2 — Apply Phase 12 SQL migrations (12-01 + 12-03 schema)
+### Step 2 — Merge the Phase 12 PR (this applies the migrations)
 
-Two migrations land in this step:
+Merging is the deploy. In order, automatically:
 
-- `20260605000001_organizations.sql` (Plan 12-01) — new tables, RLS helpers, last-owner trigger, personal-org backfill, jobs RLS rewrite
-- `20260605000002_jobs_created_by.sql` (Plan 12-03) — `jobs.created_by_user_id` column
+1. Railway builds the backend image and runs the predeploy:
+   `supabase db push --db-url $MIGRATION_DB_URL --yes`. Three migrations apply:
+   - `20260605000001_organizations.sql` — organizations, memberships,
+     invitations, RLS helpers, last-owner trigger, personal-org backfill,
+     `jobs.organization_id` (NOT NULL), jobs RLS rewrite
+   - `20260605000002_jobs_created_by.sql` — `jobs.created_by_user_id` (NOT NULL)
+   - `20260605000003_personal_org_tolerance.sql` — `personal_org_for()`, the
+     `jobs` BEFORE INSERT trigger that fills both new columns, and the two
+     Stripe-customer resolvers
+2. A failed predeploy aborts the rollout (`railway.toml` comment), and the old
+   replicas keep serving. `supabase db push` applies one file per transaction,
+   so a mid-sequence failure leaves the earlier files applied — check which
+   before retrying.
+3. With `numReplicas = 2` the old and new replicas overlap for the length of
+   the deploy. Old replicas insert jobs without the two new columns; migration
+   `…000003`'s trigger fills them, and signups that create a `public.users`
+   row with no personal org get one lazily on first use. This is covered by
+   `backend/tests/integration/test_flag_off_rolling_window.py`.
+4. Vercel deploys the frontend from `master`. It renders single-tenant because
+   `/health` still reports `organizations_enabled: false`.
 
-Railway predeploy runs migrations automatically (Phase 11 D-06). To trigger manually from a developer laptop:
-
-```bash
-cd /path/to/llm-proteinDesigner
-supabase db push --db-url "$DATABASE_URL" --yes
-```
-
-Verify in Supabase Studio (SQL editor) that the new tables exist, the backfill ran, and `jobs.organization_id` is populated for every row:
+Verify the schema, in Supabase Studio (SQL editor):
 
 ```sql
 SELECT
   (SELECT count(*) FROM public.users)                                AS user_count,
   (SELECT count(*) FROM public.organizations WHERE is_personal)      AS personal_org_count,
-  (SELECT count(*) FROM public.organization_memberships
-   WHERE role = 'owner')                                             AS owner_membership_count,
-  (SELECT count(*) FROM public.jobs WHERE organization_id IS NULL)   AS unstamped_jobs;
+  (SELECT count(*) FROM public.organization_memberships m
+     JOIN public.organizations o ON o.id = m.organization_id
+   WHERE m.role = 'owner' AND o.is_personal)                         AS personal_owner_count,
+  (SELECT count(*) FROM public.jobs WHERE organization_id IS NULL)   AS unstamped_jobs,
+  (SELECT count(*) FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'users'
+     AND column_name = 'stripe_customer_id')                         AS legacy_column_present;
 ```
 
-**Expected:** `user_count == personal_org_count == owner_membership_count` (every user has exactly one personal org owned by themselves) AND `unstamped_jobs == 0` (every existing job was attached to its user's personal org). If any of these fail, DO NOT proceed — investigate.
+**Expected:** `user_count == personal_org_count == personal_owner_count`
+(every user has exactly one personal org, owned by themselves),
+`unstamped_jobs == 0` (every existing job was attached to its user's personal
+org) and `legacy_column_present == 1`. That last one is the check that the
+drop-column migration did not ride along in this PR; if it reads 0, stop —
+Step 3 and the rolling-deploy fallback both depend on the column.
+
+Then confirm the app still looks like it did:
+
+```bash
+curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
+# expect: false
+
+# In the browser, signed in as any existing account:
+# - No org switcher in the header
+# - No Organization tab in Settings
+# - No "Launched by" column in job history
+# - Jobs list, job launch, and the billing tab all behave as before
+```
 
 ### Step 3 — Stamp Stripe metadata (test mode first)
 
-Plan 12-04 shipped `backend/scripts/stamp_stripe_org_metadata.py`. Run it against Stripe test mode as a rehearsal before touching live customers.
+`backend/scripts/stamp_stripe_org_metadata.py` copies `organization_id` and
+`kendrew_org_name` onto each Stripe customer. Run it against Stripe test mode
+as a rehearsal before touching live customers.
+
+Nothing is broken while this is unstamped: with the flag off, customer
+resolution goes through `public.org_stripe_customer()`, which falls back to
+the deprecated `public.users.stripe_customer_id`. The stamp is what makes the
+metadata queryable in the Stripe Dashboard and what Step 8 gates on.
 
 ```bash
 cd backend
@@ -79,7 +151,9 @@ STRIPE_TEST_SECRET_KEY=$STRIPE_TEST_SECRET_KEY \
   | tee /tmp/stamp-test-live-$(date +%F).jsonl
 ```
 
-Inspect the JSONL: every row should have `outcome: modified` (first run) or `outcome: skipped-already-tagged` (re-run). The trailing summary line should report `counts.failed == 0`.
+Inspect the JSONL: every row should have `outcome: modified` (first run) or
+`outcome: skipped-already-tagged` (re-run). The trailing summary line should
+report `counts.failed == 0`.
 
 Then prod:
 
@@ -104,76 +178,114 @@ python scripts/verify_stripe_org_metadata.py \
   | tee /tmp/verify-prod-$(date +%F).json
 ```
 
-Both must exit code 0. Non-zero exit = mismatches detected; the JSON output lists up to 25 mismatched rows. **DO NOT advance to Step 5 until both verify runs are clean.** This is the gate Plan 12-06's drop-column migration depends on.
+Both must exit code 0. Non-zero exit = mismatches detected; the JSON output
+lists up to 25 mismatched rows. **DO NOT advance to Step 5 until both verify
+runs are clean.** This is the gate the Step 8 drop-column migration depends
+on.
 
-### Step 5 — Flip the feature flag
+### Step 5 — Flip the feature flag (backend and frontend, one switch)
 
-In Railway dashboard, set `ORGANIZATIONS_ENABLED=true` on the backend service. Redeploy.
-
-Verify the flag landed:
+In the Railway dashboard, set `ORGANIZATIONS_ENABLED=true` on the backend
+service. Redeploy.
 
 ```bash
 curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
 # expect: true
 ```
 
-The backend now mounts the orgs router and all org-scoped routes (`/jobs/*`, `/billing/*`, `/organizations/*`, `/invitations/*`) enforce `get_active_org` and `require_role`.
+The backend now mounts the orgs router, and org-scoped routes (`/jobs/*`,
+`/billing/*`, `/organizations/*`, `/invitations/*`) enforce `get_active_org`
+and `require_role`.
 
-### Step 6 — Deploy frontend
-
-Push frontend changes to `main`; Vercel auto-deploys.
-
-Verify a multi-org test account sees the org switcher:
+The frontend needs no deploy. Each page load probes `/health` once
+(`frontend/src/lib/features.ts`) and `OrgProvider` exposes the result as
+`enabled`; the switcher, the Settings Organization tab, the job-history
+"Launched by" column, `/organizations/new` and the invitation-accept page all
+read it. A browser with the app already open picks the flag up on its next
+load, so hard-refresh before checking:
 
 ```bash
-# In the browser (signed in as a user with 2+ org memberships):
-# - Header should show the org switcher button
-# - Settings page should show the Organization tab
-# - Job history should show the "Launched by" column for non-personal orgs
+# In the browser, signed in as a user with 2+ org memberships:
+# - Header shows the org switcher
+# - Settings shows the Organization tab
+# - Job history shows "Launched by" for non-personal orgs
 ```
 
-For a single-tenant test account (only personal org), the switcher should be hidden and the Settings Organization tab should be hidden — preserving pre-Phase-12 UX byte-for-byte (Plan 12-05 decision).
+For a single-tenant account (personal org only) the switcher and the Settings
+Organization tab both stay hidden: each gates on the active org being
+non-personal as well as on the flag (`frontend/src/pages/SettingsPage.tsx`,
+`frontend/src/components/org/OrganizationSwitcher.tsx`). Pre-Phase-12 UX is
+preserved (Plan 12-05 decision).
 
-### Step 7 — Smoke test the full teams flow
+Because the frontend reads the flag at runtime, **flipping the flag back to
+`false` is also the frontend rollback** — see the Rollback table.
 
-Walk through the happy path manually OR run the Playwright E2E (`frontend/e2e/organizations.spec.ts`) against the prod-like environment:
+### Step 6 — Smoke test the full teams flow
+
+Walk through the happy path manually OR run the Playwright E2E
+(`frontend/e2e/organizations.spec.ts`, the `chromium-orgs` project) against a
+prod-like environment:
 
 1. Sign in as user A.
-2. Verify the personal org is the default active org (org switcher shows "Personal" or hidden if only one).
+2. Verify the personal org is the default active org (switcher shows
+   "Personal", or is hidden if that is the only org).
 3. Navigate to `/organizations/new`. Create a team org "E2E Acme".
-4. Navigate to `/settings?tab=organization` → Invitations sub-tab → invite `user-b@example.com` as scientist.
-5. Confirm the invite email landed in user B's inbox (Resend Dashboard or test inbox).
+4. Navigate to `/settings?tab=organization` → Invitations sub-tab → invite
+   `user-b@example.com` as scientist.
+5. Confirm the invite email landed in user B's inbox (Resend Dashboard or test
+   inbox).
 6. As user B, click the accept URL, complete the accept flow, land in `/jobs`.
 7. As user B, launch a small smoke job (any tool, smallest preset).
-8. As user A, switch to E2E Acme in the header switcher. Confirm the new job appears in `/jobs` with `Launched by: user-b@example.com`.
-9. As user A, navigate to `/settings?tab=billing`. Confirm the Stripe portal CTA renders (owner).
-10. As user B, navigate to `/settings?tab=billing`. Confirm the "Billing is managed by your organization owner" copy renders (non-owner gate).
-11. As user A, navigate to Members → Transfer ownership to user B (self-demote to scientist).
+8. As user A, switch to E2E Acme in the header switcher. Confirm the new job
+   appears in `/jobs` with `Launched by: user-b@example.com`.
+9. As user A, navigate to `/settings?tab=billing`. Confirm the Stripe portal
+   CTA renders (owner).
+10. As user B, navigate to `/settings?tab=billing`. Confirm the "Billing is
+    managed by your organization owner" copy renders (non-owner gate).
+11. As user A, navigate to Members → Transfer ownership to user B
+    (self-demote to scientist).
 12. As user B, refresh → Billing tab now shows the portal CTA (new owner).
 13. Clean up: as user B, delete the org (or leave it in test data).
 
-If any step surfaces an unexpected error, STOP. Do not advance to Step 8 with broken state.
+A new team org has no Stripe customer of its own, and
+`public.org_stripe_customer()` deliberately does not fall back to the
+creator's personal customer for a non-personal org. So a team org's first GPU
+job meters nothing until an owner adds a payment method. That is intended —
+the alternative is charging a personal card for team usage.
 
-### Step 8 — 24-hour watch
+If any step surfaces an unexpected error, STOP. Do not start the watch with
+broken state.
+
+### Step 7 — 24-hour watch
 
 Leave production running for at least 24 hours. Monitor:
 
 - **Sentry:** zero org-related 5xx (filter `route:/organizations/*` and `route:/invitations/*`)
 - **Stripe Dashboard:** every meter event since the flag flip lands on a customer whose `metadata.organization_id` is populated
-- **GPU spend alerts:** no unbilled completed jobs (cross-reference webhook handler logs against Stripe events)
-- **UptimeRobot:** /health endpoint stays green
-- **User feedback:** any reports of "I can't see my jobs" or "billing is gone" → investigate immediately
+- **GPU spend alerts:** no unbilled completed jobs (cross-reference the RunPod completion handler's logs against Stripe events)
+- **UptimeRobot:** /health stays green
+- **User feedback:** any report of "I can't see my jobs" or "billing is gone" → investigate immediately
 
-**Do NOT proceed to Step 9 if any of the above show issues.** If issues appear, follow the Rollback table below.
+**Do NOT proceed to Step 8 if any of the above show issues.** If issues
+appear, follow the Rollback table below.
 
-### Step 9 — Drop the deprecated column
+### Step 8 — Merge the drop-column PR
 
-Once 24 hours have elapsed with no incidents, apply the final migration:
+Once 24 hours have elapsed with no incidents, merge the separate PR carrying
+`20260606000001_drop_users_stripe_customer_id.sql`. Railway's predeploy
+applies it, exactly as in Step 2 — there is no manual `supabase db push`.
 
-```bash
-cd /path/to/llm-proteinDesigner
-supabase db push --db-url "$DATABASE_URL" --yes
-# picks up 20260606000001_drop_users_stripe_customer_id.sql
+Before merging it, confirm no customer id exists only on the legacy column.
+The drop PR must copy any stragglers onto their personal org first; if this
+query returns rows, that copy has not happened and merging loses those ids:
+
+```sql
+SELECT u.id, u.email
+FROM public.users u
+JOIN public.organizations o ON o.created_by = u.id AND o.is_personal
+WHERE u.stripe_customer_id IS NOT NULL
+  AND o.stripe_customer_id IS DISTINCT FROM u.stripe_customer_id;
+-- expect: 0 rows
 ```
 
 Verify the column is gone:
@@ -195,7 +307,13 @@ SELECT obj_description('public.users'::regclass, 'pg_class');
 -- Should mention "Phase 12: Stripe customer_id moved to public.organizations"
 ```
 
-After Step 9, Phase 12 rollout is COMPLETE. The deprecated column is gone; the system runs entirely on the org-scoped path.
+The drop PR must also delete the legacy leg of `public.org_stripe_customer()`
+and `public.user_stripe_customer()`, and the
+`test_users_stripe_customer_id_column_still_exists` guard in
+`backend/tests/integration/test_flag_off_rolling_window.py`, which exists to
+fail if the drop lands early.
+
+After Step 8, Phase 12 rollout is COMPLETE.
 
 ---
 
@@ -203,30 +321,36 @@ After Step 9, Phase 12 rollout is COMPLETE. The deprecated column is gone; the s
 
 | Failure Mode | Detection | Rollback Procedure |
 |--------------|-----------|--------------------|
-| Migration fails mid-transaction (Step 2) | `supabase db push` exits non-zero | Postgres rolls back automatically. Investigate logs in Supabase Studio. No data loss; re-run the migration after fixing. |
-| Stamp script reports any `outcome: failed` (Step 3 prod) | JSONL row with `outcome: failed` | Inspect the row's `error` field. Common cause: a Stripe customer was manually deleted out-of-band. Fix the DB row (set `stripe_customer_id = NULL` if the customer no longer exists; org will lazily create a new one), re-run. |
-| Verify script exits non-zero (Step 4) | non-zero exit + JSON `mismatch_count > 0` | Re-run the stamp script to fix the rows; if metadata is being manually edited in Stripe Dashboard, audit who. Do NOT advance to Step 5 until clean. |
-| Backend org code returns 5xx after flag flip (Step 5) | Sentry alerts, UptimeRobot drops | Railway rollback to the previous backend deploy (5 deploys retained per Phase 11). The pre-12-02 backend reads `users.stripe_customer_id` which is STILL present in the DB (deprecated, not dropped) — so the legacy path keeps working. Then debug, redeploy, retry Step 5. |
-| Stripe meter events landing on wrong customer (Step 8 watch) | Stripe Dashboard customer view shows wrong meter aggregation | Railway rollback (same as above). The customer-id move is reversible because the source value is still in `users.stripe_customer_id`. Re-run stamp script with corrected metadata after fixing the bug. |
-| Frontend org switcher broken (Step 6) | Manual smoke or user reports | Vercel rollback to the previous frontend deploy (independent of backend; the backend keeps serving the orgs API). The pre-12-05 frontend ignores the org-aware response fields and works against the single-tenant code path. |
-| Drop-column migration applied prematurely (Step 9 before 24h watch) | After-the-fact discovery | Forward-only recovery: create a new migration that re-adds `users.stripe_customer_id`, backfill from `organizations.stripe_customer_id WHERE organization_memberships.role = 'owner'`. Painful but recoverable. **Prevention: respect Step 8 timing.** |
+| Predeploy migration fails (Step 2) | Railway deploy shows a failed predeploy; the rollout aborts | Old replicas keep serving. `supabase db push` runs one file per transaction, so check which of the three applied (`SELECT version FROM supabase_migrations.schema_migrations ORDER BY version DESC LIMIT 5`) before re-running. No data loss. |
+| Jobs fail to insert during the deploy window (Step 2) | 5xx on launch, or `NotNullViolation` on `jobs.organization_id` / `jobs.created_by_user_id` in Sentry | Means `20260605000003` did not apply while `…000001`/`…000002` did. Apply it immediately (`supabase db push`); it is additive and safe to run alone. |
+| Stamp script reports any `outcome: failed` (Step 3 prod) | JSONL row with `outcome: failed` | Inspect the row's `error` field. Common cause: a Stripe customer was manually deleted out-of-band. Fix the DB row (set `stripe_customer_id = NULL` if the customer no longer exists; the org will lazily create a new one), re-run. |
+| Verify script exits non-zero (Step 4) | non-zero exit + JSON `mismatch_count > 0` | Re-run the stamp script to fix the rows; if metadata is being manually edited in the Stripe Dashboard, audit who. Do NOT advance to Step 5 until clean. |
+| Org routes return 5xx after the flag flip (Step 5) | Sentry alerts, UptimeRobot drops | Set `ORGANIZATIONS_ENABLED=false` in Railway and redeploy. The router unmounts, and the frontend re-reads `/health` on the next page load and renders single-tenant again — no Vercel rollback needed. Then debug and retry Step 5. |
+| Org UI broken but the API is fine (Step 5/6) | Manual smoke or user reports | Same single switch: flag off in Railway. Only if the breakage is in a surface that does **not** gate on the flag does a Vercel rollback to the pre-merge deploy become necessary. |
+| Stripe meter events landing on the wrong customer (Step 7 watch) | Stripe Dashboard customer view shows wrong meter aggregation | Flag off (as above), which restores personal-org scope for every user. The customer-id move is reversible because the source value is still in `users.stripe_customer_id` until Step 8. Re-run the stamp script with corrected metadata after fixing the bug. |
+| Drop-column migration merged early (Step 8 before the watch) | After-the-fact discovery; `test_users_stripe_customer_id_column_still_exists` fails in CI first if it is added to the Phase 12 PR | Forward-only recovery: a new migration re-adds `users.stripe_customer_id` and backfills from `organizations.stripe_customer_id` for each user's personal org. Painful but recoverable. **Prevention: keep that migration in its own PR and respect Step 7 timing.** |
 
 ### Decisive Rollback Gate
 
-**Do NOT apply `20260606000001_drop_users_stripe_customer_id.sql` (Step 9) until at least 24 hours of clean production data with the new code path.** This is the point of no return for clean Railway rollback. After this migration runs, restoring `users.stripe_customer_id` requires a forward migration and a backfill — there is no automatic path back.
+**Do NOT merge `20260606000001_drop_users_stripe_customer_id.sql` (Step 8)
+until at least 24 hours of clean production data with the new code path.**
+This is the point of no return for a clean flag-off rollback: while the column
+exists, both Stripe resolvers fall back to it, so flipping the flag off is
+always safe. After it is dropped, restoring it requires a forward migration
+and a backfill — there is no automatic path back.
 
 ---
 
 ## Post-Rollout
 
-After Step 9 succeeds:
+After Step 8 succeeds:
 
 - [ ] Update `.planning/STATE.md`: Phase 12 status → Complete
 - [ ] Update `.planning/ROADMAP.md`: Phase 12 → Verified with date
 - [ ] Update `.planning/REQUIREMENTS.md`: ORG-01..ORG-08 → Validated
-- [ ] Remove `ORGANIZATIONS_ENABLED` from Railway env once the next backend deploy hard-codes the org path (no longer flag-gated). Until then, leave at `true`.
+- [ ] Remove `ORGANIZATIONS_ENABLED` from Railway env once a later backend deploy hard-codes the org path (no longer flag-gated) and the frontend stops probing for it. Until then, leave at `true`.
 - [ ] Tag the release: `git tag v1.0-phase-12 && git push --tags`
-- [ ] Email Stripe-Dashboard-savvy stakeholder a sample customer page link so they can verify metadata visibility
+- [ ] Email a Stripe-Dashboard-savvy stakeholder a sample customer page link so they can verify metadata visibility
 - [ ] Archive `/tmp/stamp-*.jsonl` and `/tmp/verify-*.json` artifacts to the team drive for compliance
 
 ---
@@ -240,7 +364,10 @@ After Step 9 succeeds:
 - Plan 12-05 (frontend org context + switcher + invites): `.planning/phases/12-teams-and-organizations/12-05-PLAN.md`
 - Plan 12-06 (this runbook + drop migration + E2E): `.planning/phases/12-teams-and-organizations/12-06-PLAN.md`
 - Research: `.planning/phases/12-teams-and-organizations/12-RESEARCH.md` §12.1 (ordering) + §12.4 (rollback)
+- Deploy config that makes the merge Step 2: `railway.toml`
+- Runtime feature probe: `frontend/src/lib/features.ts`, consumed by `frontend/src/components/org/OrganizationContext.tsx`
+- Rolling-window coverage: `backend/tests/integration/test_flag_off_rolling_window.py`, `backend/tests/organizations/test_flag_off_single_user.py`
 - Stamp script: `backend/scripts/stamp_stripe_org_metadata.py`
 - Verify script: `backend/scripts/verify_stripe_org_metadata.py`
-- Drop migration: `supabase/migrations/20260606000001_drop_users_stripe_customer_id.sql`
+- Drop migration (its own PR, Step 8): not on `master` yet. The file is written; it sits in backup commit `c4c5a0d` on `origin/backup/phases-12-13-wip` and lands as `supabase/migrations/20260606000001_drop_users_stripe_customer_id.sql`
 - Playwright E2E: `frontend/e2e/organizations.spec.ts`

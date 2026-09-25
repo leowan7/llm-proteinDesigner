@@ -72,7 +72,8 @@ export interface JobData {
  * Plan 12-05: jobs are now org-scoped, so the list response includes
  * `created_by_user_id` and `created_by_email` populated by Plan 12-03's
  * backend cutover. Existing single-tenant jobs were backfilled to the
- * job-owner's user id + email by migration 20260604000002.
+ * job-owner's user id by supabase/migrations/20260605000002_jobs_created_by.sql
+ * (the email is joined from public.users at read time).
  */
 export interface JobListItem {
   id: string;

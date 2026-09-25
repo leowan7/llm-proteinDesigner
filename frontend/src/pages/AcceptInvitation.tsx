@@ -22,6 +22,12 @@
  * active org.
  *
  * /auth/me also has no active-org dependency (in the opt-out list as /auth/*).
+ *
+ * This route sits outside <OrgProvider>, so the organizations feature flag is
+ * read straight from lib/features.ts. With the flag off the page renders
+ * nothing and issues no request: the backend does not mount /invitations/*
+ * without the flag, and an unregistered path renders blank on a single-tenant
+ * deploy (App.tsx has no catch-all route).
  */
 
 import { useEffect, useState } from "react";
@@ -29,6 +35,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { useOrgContext } from "@/components/org/OrganizationContext";
+import { useOrganizationsEnabled } from "@/lib/features";
 import { api, ApiError } from "@/lib/api";
 import {
   acceptInvitation,
@@ -76,6 +83,7 @@ export function AcceptInvitation() {
   // fallback case but work correctly when the user already had an active
   // org context from a previous authenticated session in the same tab.
   const orgCtx = useOrgContext();
+  const orgsEnabled = useOrganizationsEnabled();
 
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [me, setMe] = useState<MeResponse | null | "loading">("loading");
@@ -85,11 +93,13 @@ export function AcceptInvitation() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!token) {
-      setError("Missing invitation token. Open the link from your invitation email.");
-      setMe(null);
-      return () => {};
-    }
+    // null = flag probe unresolved, false = feature off. Either way, do not
+    // call /invitations/* or /auth/me.
+    if (orgsEnabled !== true) return () => {};
+    // No token: nothing to fetch. The missing-token message is rendered
+    // below rather than pushed into state, so this effect never calls
+    // setState synchronously.
+    if (!token) return () => {};
 
     previewInvitation(token)
       .then((p) => {
@@ -123,7 +133,21 @@ export function AcceptInvitation() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, [orgsEnabled, token]);
+
+  // Flag off: render nothing, same as any unregistered route.
+  if (orgsEnabled === false) return null;
+
+  if (!token) {
+    return (
+      <Frame>
+        <h1 className="font-display text-2xl">Invitation</h1>
+        <p className="text-sm text-destructive">
+          Missing invitation token. Open the link from your invitation email.
+        </p>
+      </Frame>
+    );
+  }
 
   if (error) {
     return (

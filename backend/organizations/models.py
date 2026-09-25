@@ -13,7 +13,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, EmailStr, Field, StringConstraints
 
-
 # Mirrors public.org_role in supabase/migrations/20260605000001_organizations.sql.
 OrgRoleLiteral = Literal["owner", "scientist", "viewer"]
 SelfDowngradeRoleLiteral = Literal["scientist", "viewer"]

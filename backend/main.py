@@ -127,8 +127,10 @@ app.include_router(admin_router)
 # 12-04 land (RESEARCH §12.1 step 5).
 if settings.organizations_enabled:
     from organizations.router import (
-        router as orgs_router,
         invitations_router,
+    )
+    from organizations.router import (
+        router as orgs_router,
     )
     app.include_router(orgs_router)
     app.include_router(invitations_router)

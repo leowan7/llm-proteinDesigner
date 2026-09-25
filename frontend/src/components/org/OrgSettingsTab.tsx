@@ -165,7 +165,6 @@ export function OrgSettingsTab({ orgId }: OrgSettingsTabProps) {
               value={deleteConfirm}
               onChange={(e) => setDeleteConfirm(e.target.value)}
               placeholder={activeOrg?.name ?? ""}
-              autoFocus
               aria-label="Type organization name to confirm"
             />
             {deleteError && (

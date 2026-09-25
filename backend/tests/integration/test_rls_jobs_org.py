@@ -39,7 +39,7 @@ async def _act_as(conn: asyncpg.Connection, user_id: uuid.UUID) -> None:
     """
     claims = json.dumps({"sub": str(user_id), "role": "authenticated"})
     # request.jwt.claims is the GUC Supabase's auth.uid() reads from.
-    await conn.execute(f"SELECT set_config('request.jwt.claims', $1, true)", claims)
+    await conn.execute("SELECT set_config('request.jwt.claims', $1, true)", claims)
     await conn.execute("SET LOCAL ROLE authenticated")
 
 

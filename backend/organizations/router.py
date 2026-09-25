@@ -24,16 +24,14 @@ import datetime as _dt
 import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-
 import asyncpg
-
 from auth.dependencies import get_current_user
 from auth.org_dependencies import get_active_org, require_role
 from config import settings
 from db.connection import get_db_pool
-from organizations import models, notifications, service
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from organizations import models, notifications, service
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +527,7 @@ async def preview_invitation(token: str = Query(...)):
             "reason": "already_accepted",
             "organization_name": row["organization_name"],
         }
-    if row["expires_at"] < _dt.datetime.now(_dt.timezone.utc):
+    if row["expires_at"] < _dt.datetime.now(_dt.UTC):
         return {
             "valid": False,
             "reason": "expired",

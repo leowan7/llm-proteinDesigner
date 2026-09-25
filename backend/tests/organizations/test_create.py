@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # Mount the org router even though main.app was imported with the flag off.
 # We build a fresh isolated FastAPI app per test.
 os.environ.setdefault("TESTING", "true")
@@ -35,9 +34,8 @@ pytestmark = pytest.mark.asyncio
 
 def _build_app(user_id: str = "user-abc"):
     """Build a minimal FastAPI app with the org router mounted and auth overridden."""
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
+    from fastapi import FastAPI
     from organizations.router import router as orgs_router
 
     app = FastAPI()

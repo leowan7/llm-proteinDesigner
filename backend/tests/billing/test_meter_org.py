@@ -3,9 +3,15 @@
 Covers ORG-04:
 - record_gpu_usage passes the org-resolved customer through to the Stripe
   Billing Meter API
-- get_or_create_customer UPDATEs public.organizations (not public.users) when
-  a new Stripe customer is created
+- get_or_create_customer resolves the existing customer through
+  public.org_stripe_customer() and UPDATEs public.organizations (not
+  public.users) when a new Stripe customer is created
 - Stripe metadata stamps organization_id + kendrew_org_name
+
+The resolver's own fallback to the deprecated public.users.stripe_customer_id
+is SQL, so it is proven at the DB layer in
+tests/integration/test_flag_off_rolling_window.py, not here; these tests only
+prove the call site asks the resolver rather than reading one column itself.
 """
 from __future__ import annotations
 
@@ -13,7 +19,6 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 os.environ.setdefault("TESTING", "true")
 
@@ -45,18 +50,18 @@ async def test_get_or_create_customer_writes_org_table():
     and stamps Stripe metadata with organization_id + kendrew_org_name."""
     from billing.stripe_client import get_or_create_customer
 
-    captured = {"fetchrow_queries": [], "execute_queries": []}
+    captured = {"fetchval_queries": [], "execute_queries": []}
 
-    async def _fetchrow(query, *args):
-        captured["fetchrow_queries"].append(query)
-        return None  # No existing customer
+    async def _fetchval(query, *args):
+        captured["fetchval_queries"].append(query)
+        return None  # Neither the org nor the legacy user column has a customer
 
     async def _execute(query, *args):
         captured["execute_queries"].append((query, args))
         return "OK"
 
     pool = AsyncMock()
-    pool.fetchrow = _fetchrow
+    pool.fetchval = _fetchval
     pool.execute = _execute
 
     with patch("billing.stripe_client.stripe.Customer.create") as mock_create:
@@ -70,9 +75,13 @@ async def test_get_or_create_customer_writes_org_table():
 
     assert result == "cus_new_xxx"
 
-    # The SELECT must read public.organizations (not public.users)
-    assert any("FROM public.organizations" in q for q in captured["fetchrow_queries"])
-    assert not any("FROM public.users" in q for q in captured["fetchrow_queries"])
+    # The read must go through the resolver, which covers both the org column
+    # and the deprecated users column during the rolling-deploy window. Reading
+    # organizations.stripe_customer_id directly would mint a second Stripe
+    # customer for a payer whose id an old replica wrote to the legacy column.
+    assert any(
+        "public.org_stripe_customer" in q for q in captured["fetchval_queries"]
+    ), captured["fetchval_queries"]
 
     # The UPDATE must write public.organizations
     update_queries = [q for q, _ in captured["execute_queries"] if "UPDATE" in q]
@@ -87,19 +96,19 @@ async def test_get_or_create_customer_writes_org_table():
 
 
 async def test_get_or_create_customer_returns_existing_id_without_stripe_call():
-    """When public.organizations.stripe_customer_id is already populated,
-    skip the Stripe API call and return the cached ID."""
+    """When the resolver returns a customer, skip the Stripe API call and
+    return that ID."""
     from billing.stripe_client import get_or_create_customer
 
-    async def _fetchrow(query, *args):
-        # Pretend the org already has a Stripe customer
-        return {"stripe_customer_id": "cus_org_existing"}
+    async def _fetchval(query, *args):
+        # Pretend the resolver found a customer (on the org or the legacy column)
+        return "cus_org_existing"
 
     async def _execute(query, *args):
         return "OK"
 
     pool = AsyncMock()
-    pool.fetchrow = _fetchrow
+    pool.fetchval = _fetchval
     pool.execute = _execute
 
     with patch("billing.stripe_client.stripe.Customer.create") as mock_create:

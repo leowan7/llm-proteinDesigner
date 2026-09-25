@@ -45,14 +45,14 @@ def _make_ctx(conn):
     return ctx
 
 
-def _make_router_pool(job_row, cust_row, owner_row=None):
+def _make_router_pool(job_row, stripe_customer_id, owner_row=None):
     """Build the router+service shared pool mock.
 
     acquire() call sequence (router then service):
       1. router ownership check — fetchrow SELECT id WHERE id=? AND user_id=?
       2. service job fetch — fetchrow full job row
       3. service UPDATE gpu_cost_usd — returns "UPDATE 1"
-      4. service customer fetch — fetchrow stripe_customer_id
+      4. service customer resolution — fetchval public.org_stripe_customer()
     """
     if owner_row is None:
         owner_row = {"id": "job-owned"}
@@ -67,7 +67,7 @@ def _make_router_pool(job_row, cust_row, owner_row=None):
     exec_conn.execute = AsyncMock(return_value="UPDATE 1")
 
     cust_conn = AsyncMock()
-    cust_conn.fetchrow = AsyncMock(return_value=cust_row)
+    cust_conn.fetchval = AsyncMock(return_value=stripe_customer_id)
 
     pool = AsyncMock()
     pool.acquire = MagicMock(side_effect=[
@@ -104,7 +104,7 @@ class TestJobCancellation:
             "started_at": started_at,
             "user_id": "user-abc",
         }
-        router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_test"})
+        router_pool = _make_router_pool(job_row, "cus_test")
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()
@@ -144,7 +144,7 @@ class TestJobCancellation:
             "started_at": started_at,
             "user_id": "user-abc",
         }
-        router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_test"})
+        router_pool = _make_router_pool(job_row, "cus_test")
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()
@@ -187,7 +187,7 @@ class TestJobCancellation:
             "started_at": started_at,
             "user_id": "user-abc",
         }
-        router_pool = _make_router_pool(job_row, {"stripe_customer_id": "cus_partial"})
+        router_pool = _make_router_pool(job_row, "cus_partial")
 
         mock_provider = AsyncMock()
         mock_provider.cancel_job = AsyncMock()

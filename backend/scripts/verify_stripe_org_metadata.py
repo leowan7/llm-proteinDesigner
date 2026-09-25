@@ -31,8 +31,7 @@ import stripe
 sys.path.insert(0, "/app")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from config import settings  # noqa: E402  # import after sys.path setup
-
+from config import settings  # import after sys.path setup
 
 logger = logging.getLogger("verify_stripe_org_metadata")
 

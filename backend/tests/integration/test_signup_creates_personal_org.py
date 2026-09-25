@@ -20,7 +20,6 @@ import uuid
 import asyncpg
 import pytest
 
-
 SUPABASE_DB_URL = os.environ.get("SUPABASE_INTEGRATION_DB_URL", "")
 
 pytestmark = [

@@ -150,7 +150,7 @@ function AccountTab({ initialSettings, onSaved }: AccountTabProps) {
 // ---------------------------------------------------------------------------
 
 function BillingTab() {
-  const { role, activeOrgId, activeOrg } = useOrgContext();
+  const { enabled: orgsEnabled, role, activeOrgId, activeOrg } = useOrgContext();
   const [payment, setPayment] = useState<PaymentMethod | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -162,7 +162,11 @@ function BillingTab() {
   // payment portal — backend /billing/* returns 403 to anyone except the
   // active org's owner. We pre-empt the 403 in the UI for polish.
   const nonOwnerGated =
-    role !== null && role !== "owner" && activeOrg !== null && !activeOrg.is_personal;
+    orgsEnabled &&
+    role !== null &&
+    role !== "owner" &&
+    activeOrg !== null &&
+    !activeOrg.is_personal;
 
   // Resolve owner email for the non-owner gate copy.
   useEffect(() => {
@@ -514,8 +518,8 @@ function NotificationsTab({ initialPrefs, onSaved }: NotificationsTabProps) {
 
 /** Tabs surfaced by SettingsPage. "privacy" scaffold added in Plan 10-06;
  *  Plan 10-04 fills in the Privacy tab content (Export + Delete buttons).
- *  "organization" added in Plan 12-05 — shown only when activeOrg is non-null
- *  and not the user's personal org. */
+ *  "organization" added in Plan 12-05 — shown only when the organizations
+ *  feature flag is on and activeOrg is a non-personal org. */
 const VALID_SETTINGS_TABS = [
   "account",
   "billing",
@@ -589,8 +593,9 @@ function OrganizationTab() {
 export function SettingsPage() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { activeOrg } = useOrgContext();
-  const showOrgTab = activeOrg !== null && !activeOrg.is_personal;
+  const { enabled: orgsEnabled, activeOrg } = useOrgContext();
+  const showOrgTab =
+    orgsEnabled && activeOrg !== null && !activeOrg.is_personal;
 
   // Plan 10-06: deep-link support for /settings?tab=<name>. Hardens the
   // cancel-deletion email link from Plan 10-04 Task 3 — invalid values fall

@@ -5,10 +5,13 @@
  *   - Hidden when orgs.length <= 1 (solo user / single-tenant fallback).
  *   - Rendered when orgs.length >= 2.
  *   - Clicking a non-active item writes localStorage and triggers reload.
+ *   - Hidden, and /organizations/mine never called, when the backend reports
+ *     organizations_enabled=false.
  *
  * Strategy: mock fetchMyOrgs() at the @/lib/organizations boundary so the
  * provider resolves synchronously and the switcher sees the controlled
- * orgs list.
+ * orgs list, and mock @/lib/features so the /health flag probe is
+ * controlled rather than fetched.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -20,6 +23,13 @@ import { OrgProvider } from "./OrganizationContext";
 
 vi.mock("@/lib/organizations", () => ({
   fetchMyOrgs: vi.fn(),
+}));
+
+const featureFlag = vi.hoisted(() => ({ orgs: true }));
+vi.mock("@/lib/features", () => ({
+  organizationsEnabled: async () => featureFlag.orgs,
+  organizationsEnabledSync: () => featureFlag.orgs,
+  useOrganizationsEnabled: () => featureFlag.orgs,
 }));
 
 import { fetchMyOrgs } from "@/lib/organizations";
@@ -63,6 +73,7 @@ describe("OrganizationSwitcher", () => {
       value: originalLocation,
     });
     vi.mocked(fetchMyOrgs).mockReset();
+    featureFlag.orgs = true;
   });
 
   it("renders nothing when the user has only one org", async () => {
@@ -113,5 +124,26 @@ describe("OrganizationSwitcher", () => {
 
     expect(localStorage.getItem(STORAGE_KEY)).toBe("a1");
     expect(reloadMock).toHaveBeenCalled();
+  });
+
+  it("renders nothing and skips /organizations/mine when the flag is off", async () => {
+    // The flag-off landing: Vercel ships this bundle before Leo flips
+    // ORGANIZATIONS_ENABLED, so the switcher must stay invisible and the
+    // provider must not call an unmounted backend route.
+    featureFlag.orgs = false;
+    localStorage.setItem(STORAGE_KEY, "a1");
+    vi.mocked(fetchMyOrgs).mockResolvedValue([
+      { id: "p1", name: "Personal", role: "owner", is_personal: true },
+      { id: "a1", name: "Acme", role: "scientist", is_personal: false },
+    ]);
+
+    const { container } = renderSwitcher();
+
+    await waitFor(() => {
+      // Provider settled: the stale active-org id has been cleared.
+      expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    });
+    expect(vi.mocked(fetchMyOrgs)).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("");
   });
 });

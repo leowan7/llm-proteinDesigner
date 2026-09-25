@@ -4,6 +4,13 @@ Cross-checks the X-Org-Id header against organization_memberships so a client
 cannot freely impersonate an org. The JWT identifies the user; the user must
 hold a membership row in the requested org.
 
+When the header is absent the caller's personal org is used. That is what makes
+a flag-off deploy behave exactly as pre-Phase-12: the orgs router only mounts
+when settings.organizations_enabled is true (main.py), so with the flag off a
+client has no endpoint to learn an org id from and would otherwise send no
+header. Every route that Phase 12 moved onto require_role -- all of /jobs, all
+of /billing, /user/usage -- would then answer 400 for every existing customer.
+
 NOT mounted on routes that legitimately have no active org context
 (/auth/*, /organizations/mine, /invitations/*).
 
@@ -19,11 +26,10 @@ from __future__ import annotations
 
 from typing import Literal
 
+from db.connection import get_db_pool
 from fastapi import Depends, Header, HTTPException, status
 
 from auth.dependencies import get_current_user
-from db.connection import get_db_pool
-
 
 OrgRole = Literal["owner", "scientist", "viewer"]
 
@@ -38,17 +44,28 @@ async def get_active_org(
     cross-checks it against ``public.organization_memberships`` for the
     authenticated user. Returns the tuple ``(org_id, role)``.
 
+    With no ``X-Org-Id`` header, falls back to the caller's personal
+    organization via ``public.personal_org_for`` (find-or-create, defined in
+    supabase/migrations/20260605000003_personal_org_tolerance.sql), and returns
+    it as ``owner`` -- the role every personal-org membership row carries, set
+    by the 20260605000001 backfill, by the signup bootstrap in
+    backend/auth/router.py, and by personal_org_for itself.
+
+    The fallback creates the org when it is missing rather than 404-ing, because
+    a user signed up by an old replica during the rolling deploy has a
+    public.users row and no org yet.
+
     Raises:
-        HTTPException 400: ``X-Org-Id`` header is missing.
         HTTPException 403: Authenticated user is not a member of the
             requested organization.
     """
-    if not x_org_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Org-Id header required for this endpoint",
-        )
     pool = await get_db_pool()
+    if not x_org_id:
+        async with pool.acquire() as conn:
+            org_id = await conn.fetchval(
+                "SELECT public.personal_org_for($1::uuid)", user_id
+            )
+        return str(org_id), "owner"
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT role::text AS role FROM public.organization_memberships "

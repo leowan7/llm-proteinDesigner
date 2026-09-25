@@ -19,7 +19,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 os.environ.setdefault("TESTING", "true")
 
 
@@ -32,10 +31,9 @@ def _build_app(active_role: str = "scientist", user_id: str = "user-B", org_id: 
     Overrides get_current_user + get_active_org so require_role resolves to
     org_id without touching the membership table.
     """
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
+    from fastapi import FastAPI
     from jobs.router import router as jobs_router
     from middleware.rate_limit import limiter as _limiter
 
@@ -98,8 +96,8 @@ async def test_member_b_sees_member_a_jobs_in_same_org():
             "tool": "bindcraft",
             "status": "complete",
             "name": "B-targets-IL6R",
-            "created_at": datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc),
-            "completed_at": datetime.datetime(2026, 6, 1, 13, 0, 0, tzinfo=datetime.timezone.utc),
+            "created_at": datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.UTC),
+            "completed_at": datetime.datetime(2026, 6, 1, 13, 0, 0, tzinfo=datetime.UTC),
             "gpu_cost_usd": 0.42,
             "candidate_count": "5",
             "session_id": None,
@@ -132,7 +130,7 @@ async def test_response_includes_created_by_user_id_and_email():
             "tool": "rfdiffusion",
             "status": "complete",
             "name": "test",
-            "created_at": datetime.datetime(2026, 6, 1, 0, 0, 0, tzinfo=datetime.timezone.utc),
+            "created_at": datetime.datetime(2026, 6, 1, 0, 0, 0, tzinfo=datetime.UTC),
             "completed_at": None,
             "gpu_cost_usd": None,
             "candidate_count": None,

@@ -99,10 +99,16 @@ async def list_users(
         cursor_clause = f"AND u.created_at {op} $3"
 
     # Phase 12 cutover: stripe_customer_id moved from public.users to
-    # public.organizations. Each user's personal org holds the billing
-    # customer that was previously on the user row, so payment_status is
-    # derived from a JOIN through organization_memberships → organizations
-    # WHERE is_personal=true.
+    # public.organizations. Each user's personal org holds the billing customer
+    # that was previously on the user row, so payment_status is derived from
+    # public.user_stripe_customer(u.id).
+    #
+    # Deliberately a scalar rather than a JOIN through
+    # organization_memberships: that join emits one row per membership, and
+    # because only the personal org survives the is_personal predicate the
+    # GROUP BY produced a second group with a NULL customer -- listing any user
+    # who belongs to a team org twice, once as payment_status "none", and
+    # spending LIMIT rows on the duplicate.
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -111,19 +117,16 @@ async def list_users(
                     u.email,
                     u.display_name,
                     u.created_at,
-                    o.stripe_customer_id,
+                    public.user_stripe_customer(u.id) AS stripe_customer_id,
                     a.last_sign_in_at AS last_login,
                     COUNT(DISTINCT j.id) AS job_count,
                     COALESCE(SUM(j.gpu_cost_usd) FILTER (WHERE j.status = 'complete'), 0) AS total_spend
                FROM public.users u
                LEFT JOIN auth.users a ON a.id = u.id
                LEFT JOIN public.jobs j ON j.user_id = u.id
-               LEFT JOIN public.organization_memberships om ON om.user_id = u.id
-               LEFT JOIN public.organizations o
-                 ON o.id = om.organization_id AND o.is_personal = true
                WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
                {cursor_clause}
-               GROUP BY u.id, u.email, u.display_name, u.created_at, o.stripe_customer_id, a.last_sign_in_at
+               GROUP BY u.id, u.email, u.display_name, u.created_at, a.last_sign_in_at
                ORDER BY {order_clause}
                LIMIT $2""",
             email,
@@ -135,18 +138,15 @@ async def list_users(
                     u.email,
                     u.display_name,
                     u.created_at,
-                    o.stripe_customer_id,
+                    public.user_stripe_customer(u.id) AS stripe_customer_id,
                     a.last_sign_in_at AS last_login,
                     COUNT(DISTINCT j.id) AS job_count,
                     COALESCE(SUM(j.gpu_cost_usd) FILTER (WHERE j.status = 'complete'), 0) AS total_spend
                FROM public.users u
                LEFT JOIN auth.users a ON a.id = u.id
                LEFT JOIN public.jobs j ON j.user_id = u.id
-               LEFT JOIN public.organization_memberships om ON om.user_id = u.id
-               LEFT JOIN public.organizations o
-                 ON o.id = om.organization_id AND o.is_personal = true
                WHERE ($1::text IS NULL OR u.email ILIKE '%' || $1 || '%')
-               GROUP BY u.id, u.email, u.display_name, u.created_at, o.stripe_customer_id, a.last_sign_in_at
+               GROUP BY u.id, u.email, u.display_name, u.created_at, a.last_sign_in_at
                ORDER BY {order_clause}
                LIMIT $2""",
             email,

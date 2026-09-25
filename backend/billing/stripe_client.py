@@ -7,7 +7,11 @@ executor if you need to call from async context without blocking the event loop.
 Key design decisions:
 - Phase 12: stripe_customer_id lives on public.organizations (not public.users).
   Personal orgs (one per user, auto-created at signup) hold the customer ID that
-  used to live on public.users.stripe_customer_id.
+  used to live on public.users.stripe_customer_id. Reads go through
+  public.org_stripe_customer(), which still falls back to the deprecated
+  public.users.stripe_customer_id -- an old replica mid-rolling-deploy writes
+  only that column, and creating a second Stripe customer for a user who has
+  just added a card is a billing failure, not a cosmetic one.
 - record_gpu_usage uses Stripe Billing Meters API (not legacy Usage Records).
   The 'value' field in the meter event payload MUST be a string, not an int.
 - check_payment_method inspects invoice_settings.default_payment_method,
@@ -35,6 +39,15 @@ async def get_or_create_customer(
     user, auto-created at signup) hold the customer ID that used to live on
     public.users.stripe_customer_id.
 
+    Resolution goes through public.org_stripe_customer (migration
+    20260605000003 section 4), which reads organizations.stripe_customer_id and
+    falls back to the personal org creator's deprecated
+    public.users.stripe_customer_id. An existing payer therefore never gets a
+    second Stripe customer, even in the window where an old replica wrote only
+    the legacy column. A resolved legacy id is NOT copied onto the org here;
+    the copy belongs to the drop-column deploy (runbook step 9), because a
+    write here would race the same old replica.
+
     Args:
         email: Billing contact email (owner's email or org's billing_email).
         org_id: Organization UUID.
@@ -44,12 +57,11 @@ async def get_or_create_customer(
     Returns:
         Stripe customer ID (cus_...).
     """
-    row = await pool.fetchrow(
-        "SELECT stripe_customer_id FROM public.organizations WHERE id = $1",
-        org_id,
+    existing = await pool.fetchval(
+        "SELECT public.org_stripe_customer($1::uuid)", org_id,
     )
-    if row and row["stripe_customer_id"]:
-        return row["stripe_customer_id"]
+    if existing:
+        return existing
     customer = stripe.Customer.create(
         email=email,
         metadata={

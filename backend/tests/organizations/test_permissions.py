@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 os.environ.setdefault("TESTING", "true")
 
 
@@ -28,11 +27,11 @@ def _build_app(active_role: str | None, user_id: str = "user-test", org_id: str 
     """Build an isolated FastAPI app with the org + invitations routers and
     the auth + active-org dependencies overridden.
     """
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
-    from organizations.router import router as orgs_router, invitations_router
+    from fastapi import FastAPI
+    from organizations.router import invitations_router
+    from organizations.router import router as orgs_router
 
     app = FastAPI()
     app.include_router(orgs_router)
@@ -169,11 +168,10 @@ def _build_jobs_app(active_role: str, user_id: str = "user-rl", org_id: str = "o
     Mirrors `_build_app` above but for the routes whose require_role gates
     Plan 12-03 wired up. Skips rate limiting so the matrix runs deterministically.
     """
-    from fastapi import FastAPI
-
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
     from billing.router import router as billing_router
+    from fastapi import FastAPI
     from jobs.router import router as jobs_router
     from middleware.rate_limit import limiter as _limiter
 
