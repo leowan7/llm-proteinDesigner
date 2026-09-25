@@ -422,6 +422,22 @@ async def create_invitation(
     token = service.generate_invitation_token()
     expires_at = service.expires_default()
     async with pool.acquire() as conn:
+        # An EXPIRED invitation still satisfies organization_invitations_one_pending
+        # -- the predicate is (accepted_at IS NULL AND revoked_at IS NULL), and
+        # expires_at > now() cannot join it because now() is not IMMUTABLE. Retire
+        # the dead ones here so the owner's natural next move, sending it again,
+        # works instead of returning the 409 below for an invitation nobody can
+        # still accept.
+        await conn.execute(
+            """UPDATE public.organization_invitations
+                   SET revoked_at = now()
+                 WHERE organization_id = $1
+                   AND lower(email) = lower($2)
+                   AND accepted_at IS NULL
+                   AND revoked_at IS NULL
+                   AND expires_at <= now()""",
+            org_id, body.email,
+        )
         try:
             invite_row = await conn.fetchrow(
                 """INSERT INTO public.organization_invitations
@@ -432,8 +448,9 @@ async def create_invitation(
             )
         except asyncpg.exceptions.UniqueViolationError:
             # organization_invitations_one_pending (migration 20260605000003
-            # section 6) allows one LIVE invitation per address. Revoke the
-            # open one first to change its role.
+            # section 6) allows one LIVE invitation per address. Only an
+            # unexpired one can reach here, given the sweep above. Revoke it
+            # first to change its role.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="That address already has a pending invitation.",

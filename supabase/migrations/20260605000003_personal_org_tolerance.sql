@@ -225,7 +225,7 @@ GRANT EXECUTE ON FUNCTION public.user_stripe_customer(UUID) TO service_role;
 -- user_id -> public.users; see 20260605000001 lines 49-50). Every user is the
 -- sole owner of their personal org, so without the guard below:
 --
---   * DELETE FROM auth.users (backend/user/deletion.py:123, the GDPR hard
+--   * DELETE FROM auth.users (backend/user/deletion.py:197, the GDPR hard
 --     delete) cascades public.users -> the personal-org membership -> raise.
 --     R2 objects and the Stripe customer are already purged by then, so the
 --     account would be stuck pending and the cron would retry it forever.
@@ -236,9 +236,17 @@ GRANT EXECUTE ON FUNCTION public.user_stripe_customer(UUID) TO service_role;
 --
 -- Postgres runs a CASCADE as a separate DELETE statement issued from the
 -- parent's internal AFTER trigger, so by the time this BEFORE trigger sees the
--- child row the parent row is already gone from the current snapshot. A
--- missing parent is therefore an exact test for "this row is going away with
--- its parent" and leaves a direct DELETE of a sole owner still refused.
+-- child row the parent row is already gone from the current snapshot. A missing
+-- parent is therefore an exact test for "this row is going away with its
+-- parent", and a direct DELETE of a sole owner is still refused.
+--
+-- The tolerance is deliberately asymmetric. A missing ORGANIZATION is enough on
+-- its own: the org is being deleted, so it has no future in which an owner
+-- could matter. A missing USER is only enough for a PERSONAL org. A shared org
+-- outlives the user, and with zero owners nothing could ever administer it
+-- again, so that case still raises -- backend/user/deletion.py hands those orgs
+-- over before it deletes the auth row, and this is the backstop that makes any
+-- other path fail loudly instead of stranding the org.
 CREATE OR REPLACE FUNCTION public.protect_last_owner()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -246,10 +254,25 @@ AS $$
 DECLARE
     remaining_owners INT;
 BEGIN
-    IF TG_OP = 'DELETE' AND (
-           NOT EXISTS (SELECT 1 FROM public.organizations WHERE id = OLD.organization_id)
-        OR NOT EXISTS (SELECT 1 FROM public.users WHERE id = OLD.user_id)
-       )
+    -- The org itself is going away, so there is no owner left to protect.
+    IF TG_OP = 'DELETE'
+       AND NOT EXISTS (SELECT 1 FROM public.organizations WHERE id = OLD.organization_id)
+    THEN
+        RETURN OLD;
+    END IF;
+
+    -- Only the USER is going away. A personal org has exactly one member, so
+    -- its owner leaving strands nobody. A SHARED org would be left with zero
+    -- owners, and no owner-only route or memberships_write_owners RLS policy
+    -- would have a satisfiable caller ever again -- so shared orgs fall through
+    -- to the check below on purpose. backend/user/deletion.py promotes an heir
+    -- (or deletes the emptied org) before the cascade reaches here; this branch
+    -- is what makes a path that skipped that step fail loudly instead of
+    -- silently breaking the invariant.
+    IF TG_OP = 'DELETE'
+       AND NOT EXISTS (SELECT 1 FROM public.users WHERE id = OLD.user_id)
+       AND EXISTS (SELECT 1 FROM public.organizations
+                    WHERE id = OLD.organization_id AND is_personal)
     THEN
         RETURN OLD;
     END IF;
@@ -274,7 +297,9 @@ $$;
 
 COMMENT ON FUNCTION public.protect_last_owner() IS
     'Refuses to remove or demote an organization''s last owner, except when the '
-    'membership row is disappearing with its own parent org or user row.';
+    'membership row is disappearing with its own parent org, or with its own '
+    'user row out of a PERSONAL org. A shared org is still protected when only '
+    'the user row is deleted.';
 
 
 -- ----------------------------------------------------------------------------

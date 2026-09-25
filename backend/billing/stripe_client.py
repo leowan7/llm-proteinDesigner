@@ -56,9 +56,23 @@ async def get_or_create_customer(
     would not see this customer, would create its own, and would attach the
     card to the customer nobody meters (railway.toml numReplicas = 2 keeps both
     versions serving for the length of a deploy). The legacy write is a
-    compare-and-set: if an old replica got there first its id wins and is
-    adopted onto the org, so the card and the meter always land on the same
-    customer. The whole leg goes away with the column in the drop-column PR
+    compare-and-set, so the ordering "old replica wrote first" is safe: its id
+    wins and is adopted onto the org, putting the card and the meter on one
+    customer.
+
+    The REVERSE ordering is not closed here. If this function writes X and an
+    old replica -- which read NULL before that write -- then creates its own
+    customer Y and blind-writes it over the legacy column, the org meters X
+    while the card sits on Y. The losing write lives in already-deployed code,
+    and the card is attached inside Stripe rather than through this module, so
+    no change here can prevent it. It is left DETECTABLE instead: the two
+    columns disagree, which the runbook's 24-hour watch query looks for
+    (docs/runbook-phase-12-rollout.md step 7), and the repair is to point the
+    org at the customer holding the payment method. A first-write-wins guard on
+    the legacy column would be worse -- both columns would read X while the card
+    still sat on an unreferenced Y, removing the only signal. The window is one
+    Stripe customer-create inside one rolling deploy, for a user who had no
+    customer yet; the whole leg goes away with the column in the drop-column PR
     (runbook step 8).
 
     Args:
@@ -104,7 +118,11 @@ async def get_or_create_customer(
     )
     if legacy and legacy != customer.id:
         # An old replica created its own customer between our read and our
-        # write. It holds the payment method, so it wins.
+        # write, and won the compare-and-set. Adopt its id rather than keep
+        # ours: pre-Phase-12 code can only ever see the legacy column, so a
+        # card added by that replica goes to ITS customer, and the org has to
+        # meter the same one. Our freshly created customer is left unused in
+        # Stripe with no payment method and no usage.
         await pool.execute(
             "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
             legacy, org_id,

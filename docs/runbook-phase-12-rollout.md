@@ -150,6 +150,10 @@ curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
 # - Jobs list, job launch, and the billing tab all behave as before
 ```
 
+Finally, run the **Stripe customer reconciliation** query from Step 7 once. The
+rolling deploy in this step is the only window in which it can find anything,
+and finding it now is much cheaper than finding it on a customer's invoice.
+
 ### Step 3 — Stamp Stripe metadata (test mode first)
 
 `backend/scripts/stamp_stripe_org_metadata.py` copies `organization_id` and
@@ -291,6 +295,36 @@ Leave production running for at least 24 hours. Monitor:
 - **GPU spend alerts:** no unbilled completed jobs (cross-reference the RunPod completion handler's logs against Stripe events)
 - **UptimeRobot:** /health stays green
 - **User feedback:** any report of "I can't see my jobs" or "billing is gone" → investigate immediately
+- **Stripe customer reconciliation:** run the query below. It must return zero
+  rows.
+
+```sql
+-- A personal org whose Stripe customer disagrees with its owner's deprecated
+-- public.users.stripe_customer_id. Only the merge's rolling deploy can create
+-- this: an old replica that read the legacy column as NULL before the new code
+-- wrote it goes on to create its own customer and blind-write it, so the org
+-- meters one customer while the card was attached to the other. See
+-- backend/billing/stripe_client.py get_or_create_customer.
+SELECT o.id            AS organization_id,
+       u.id            AS user_id,
+       u.email,
+       o.stripe_customer_id AS metered_customer,
+       u.stripe_customer_id AS legacy_customer
+  FROM public.organizations o
+  JOIN public.users u ON u.id = o.created_by
+ WHERE o.is_personal
+   AND o.stripe_customer_id IS NOT NULL
+   AND u.stripe_customer_id IS NOT NULL
+   AND o.stripe_customer_id <> u.stripe_customer_id;
+```
+
+**If it returns a row:** open both customers in the Stripe dashboard. The one
+holding the payment method is the real one. Point the org at it
+(`UPDATE public.organizations SET stripe_customer_id = '<cus_with_card>',
+updated_at = now() WHERE id = '<org_id>'`), set the legacy column to the same
+value, and check whether any meter events landed on the loser (they must be
+re-sent or credited). Do not proceed to Step 8 with a row outstanding — the
+drop-column migration removes the evidence.
 
 **Do NOT proceed to Step 8 if any of the above show issues.** If issues
 appear, follow the Rollback table below.

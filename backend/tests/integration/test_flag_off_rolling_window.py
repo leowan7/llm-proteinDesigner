@@ -34,8 +34,10 @@ SUPABASE_INTEGRATION_DB_URL.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncpg
 import pytest
@@ -442,16 +444,16 @@ async def test_deleting_an_org_is_not_blocked_by_its_last_owner(pool, make_user)
     ) == 0
 
 
-async def test_deleting_a_user_is_not_blocked_by_a_sole_owned_org(pool, make_user):
+async def test_deleting_a_user_is_not_blocked_by_their_personal_org(pool, make_user):
     """The GDPR hard delete must survive the same cascade.
 
     backend/user/deletion.py deletes the auth.users row, which cascades to
     public.users and from there to organization_memberships. This is
-    flag-independent: it runs for every existing single-tenant customer whose
-    personal org made them its sole owner.
+    flag-independent: it runs for every existing single-tenant customer, whose
+    personal org made them its sole owner. A personal org has exactly one
+    member, so its owner leaving strands nobody and the trigger tolerates it.
     """
     user_id, _ = await make_user()
-    org_id = await _sole_owner_org(pool, user_id)
     personal_id = await pool.fetchval("SELECT public.personal_org_for($1)", user_id)
 
     try:
@@ -467,11 +469,36 @@ async def test_deleting_a_user_is_not_blocked_by_a_sole_owned_org(pool, make_use
     finally:
         # organizations.created_by is ON DELETE SET NULL, so once the user row
         # is gone the make_user fixture's created_by cleanup matches nothing and
-        # these two orgs would outlive the test.
+        # this org would outlive the test.
         await pool.execute(
-            "DELETE FROM public.organizations WHERE id = ANY($1::uuid[])",
-            [org_id, personal_id],
+            "DELETE FROM public.organizations WHERE id = $1", personal_id,
         )
+
+
+async def test_a_raw_auth_delete_is_refused_while_a_shared_org_needs_an_owner(
+    pool, make_user,
+):
+    """The tolerance stops at personal orgs, on purpose.
+
+    A SHARED org left with zero owners has no satisfiable caller for any
+    owner-only route or for the memberships_write_owners RLS policy, ever again,
+    and no API can repair it. So a delete path that did not hand the org over
+    first has to fail here rather than break that invariant quietly. The
+    supported path is execute_hard_delete, covered below.
+    """
+    owner_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, owner_id)
+
+    try:
+        with pytest.raises(asyncpg.exceptions.CheckViolationError):
+            await pool.execute("DELETE FROM auth.users WHERE id = $1", owner_id)
+
+        # The failed statement rolled back, so the user is still there.
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.users WHERE id = $1", owner_id,
+        ) == 1
+    finally:
+        await pool.execute("DELETE FROM public.organizations WHERE id = $1", org_id)
 
 
 async def test_removing_the_last_owner_directly_is_still_refused(pool, make_user):
@@ -554,3 +581,238 @@ async def test_a_settled_invitation_does_not_block_a_re_invite(pool, make_user):
     )
     third = await _invite(pool, org_id, email, user_id)
     assert third not in (first, second)
+
+
+# ---------------------------------------------------------------------------
+# execute_hard_delete: the supported delete path hands organizations over first
+# ---------------------------------------------------------------------------
+
+
+async def _add_member(pool, org_id, user_id, role="member", created_at=None):
+    await pool.execute(
+        "INSERT INTO public.organization_memberships "
+        "(organization_id, user_id, role, created_at) "
+        "VALUES ($1, $2, $3::public.org_role, COALESCE($4, now()))",
+        org_id, user_id, role, created_at,
+    )
+
+
+async def _hard_delete_then_cascade(pool, user_id, email):
+    """Run the real execute_hard_delete, then the cascade it delegates.
+
+    R2, Stripe and the GoTrue admin API are the three calls that leave the
+    process, so they are the three that get patched. delete_auth_user is one of
+    them, and the DELETE it issues is what makes the trigger fire -- so this
+    runs that DELETE itself, in the same place in the sequence, unpatched
+    against the real schema.
+    """
+    from user import deletion
+
+    with patch.object(deletion, "get_db_pool", AsyncMock(return_value=pool)), \
+         patch.object(deletion, "list_and_delete_user_objects", MagicMock(return_value=0)), \
+         patch.object(deletion, "send_deletion_completed_email", AsyncMock()), \
+         patch.object(deletion, "delete_auth_user", MagicMock()) as auth_delete:
+        await deletion.execute_hard_delete(str(user_id), email, None)
+
+    assert auth_delete.call_count == 1, (
+        "execute_hard_delete returned before the auth delete, so the hand-over "
+        "under test never ran"
+    )
+    await pool.execute("DELETE FROM auth.users WHERE id = $1", user_id)
+
+
+async def test_hard_delete_promotes_the_longest_standing_member_of_a_shared_org(
+    pool, make_user,
+):
+    """A team org the leaver solely owned keeps working, with a new owner.
+
+    Without the hand-over the cascade takes the only owner's membership with it
+    and leaves the org with members but no owner: every owner-only route 403s
+    for everyone, and memberships_write_owners can never be satisfied again.
+    The heir is the longest-standing remaining member, ordered by (created_at,
+    user_id) so two members added at the same instant still resolve to one
+    answer.
+    """
+    owner_id, owner_email = await make_user()
+    senior_id, _ = await make_user()
+    junior_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, owner_id)
+    await _add_member(
+        pool, org_id, junior_id,
+        created_at=datetime.datetime(2026, 3, 1, tzinfo=datetime.UTC),
+    )
+    await _add_member(
+        pool, org_id, senior_id,
+        created_at=datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
+    )
+    personal_id = await pool.fetchval("SELECT public.personal_org_for($1)", owner_id)
+    job = await _insert_job_like_an_old_replica(pool, owner_id)
+    assert job["organization_id"] == personal_id
+
+    await pool.execute(
+        "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1", owner_id,
+    )
+    try:
+        await _hard_delete_then_cascade(pool, owner_id, owner_email)
+
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
+        ) == 1, "the shared org must survive its owner"
+        assert await pool.fetchval(
+            "SELECT role::text FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, senior_id,
+        ) == "owner"
+        assert await pool.fetchval(
+            "SELECT role::text FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, junior_id,
+        ) == "member", "only one heir is promoted"
+        # The personal org carries the email local part in its name, so leaving
+        # it behind would mean PII surviving a GDPR erasure.
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organizations WHERE id = $1", personal_id,
+        ) == 0
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.jobs WHERE user_id = $1", owner_id,
+        ) == 0
+    finally:
+        await pool.execute("DELETE FROM public.organizations WHERE id = $1", org_id)
+
+
+async def test_hard_delete_removes_an_org_the_leaver_was_alone_in(pool, make_user):
+    """Nothing to hand over: a one-member org goes with its only member.
+
+    Promotion finds no heir here, so the org would otherwise be left with zero
+    members AND zero owners -- unreachable, unrepairable, and still holding the
+    org name. Both the personal org and an unshared team org take this path.
+    """
+    owner_id, owner_email = await make_user()
+    org_id = await _sole_owner_org(pool, owner_id)
+    personal_id = await pool.fetchval("SELECT public.personal_org_for($1)", owner_id)
+
+    await pool.execute(
+        "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1", owner_id,
+    )
+    await _hard_delete_then_cascade(pool, owner_id, owner_email)
+
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organizations WHERE id = ANY($1::uuid[])",
+        [org_id, personal_id],
+    ) == 0
+
+
+async def test_hard_delete_leaves_an_org_that_has_another_owner_alone(pool, make_user):
+    """Two owners: the org needs neither a promotion nor a deletion."""
+    leaver_id, leaver_email = await make_user()
+    co_owner_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, leaver_id)
+    await _add_member(pool, org_id, co_owner_id, role="owner")
+
+    await pool.execute(
+        "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1", leaver_id,
+    )
+    try:
+        await _hard_delete_then_cascade(pool, leaver_id, leaver_email)
+
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organization_memberships "
+            "WHERE organization_id = $1",
+            org_id,
+        ) == 1, "only the leaver's membership goes"
+        assert await pool.fetchval(
+            "SELECT role::text FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, co_owner_id,
+        ) == "owner"
+    finally:
+        await pool.execute("DELETE FROM public.organizations WHERE id = $1", org_id)
+
+
+async def test_hard_delete_touches_no_org_when_the_user_cancelled(pool, make_user):
+    """The hand-over sits inside the late FOR UPDATE guard's transaction.
+
+    A user who cancels in the R2/Stripe window keeps their account, so they must
+    also keep their organizations -- a promotion or an org delete here would be
+    an unrecoverable side effect of a deletion that did not happen.
+    """
+    owner_id, owner_email = await make_user()
+    member_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, owner_id)
+    await _add_member(pool, org_id, member_id)
+
+    # deletion_requested_at stays NULL, so the step-0 guard aborts immediately.
+    from user import deletion
+
+    with patch.object(deletion, "get_db_pool", AsyncMock(return_value=pool)), \
+         patch.object(deletion, "list_and_delete_user_objects", MagicMock(return_value=0)), \
+         patch.object(deletion, "send_deletion_completed_email", AsyncMock()), \
+         patch.object(deletion, "delete_auth_user", MagicMock()) as auth_delete:
+        await deletion.execute_hard_delete(str(owner_id), owner_email, None)
+
+    assert auth_delete.call_count == 0
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
+    ) == 1
+    assert await pool.fetchval(
+        "SELECT role::text FROM public.organization_memberships "
+        "WHERE organization_id = $1 AND user_id = $2",
+        org_id, member_id,
+    ) == "member"
+
+
+async def test_an_expired_pending_invitation_blocks_the_index_until_swept(
+    pool, make_user,
+):
+    """Why create_invitation sweeps: expiry is invisible to the partial index.
+
+    expires_at > now() cannot join the predicate -- now() is not IMMUTABLE and a
+    partial index predicate must be -- so a long-dead invitation still holds the
+    one-live-invitation slot. The sweep in
+    backend/organizations/router.py create_invitation is what frees it.
+    """
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+    email = "expired@bindwave-test.local"
+
+    stale = await _invite(pool, org_id, email, user_id)
+    await pool.execute(
+        "UPDATE public.organization_invitations "
+        "SET expires_at = now() - interval '1 day' WHERE id = $1",
+        stale,
+    )
+
+    # Still blocking, even though nobody could accept it.
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await _invite(pool, org_id, email, user_id)
+
+    # The exact statement create_invitation issues, including the case-folded
+    # address match, frees the slot.
+    swept = await pool.execute(
+        """UPDATE public.organization_invitations
+              SET revoked_at = now()
+            WHERE organization_id = $1
+              AND lower(email) = lower($2)
+              AND accepted_at IS NULL
+              AND revoked_at IS NULL
+              AND expires_at <= now()""",
+        org_id, "EXPIRED@bindwave-test.local",
+    )
+    assert swept == "UPDATE 1", swept
+
+    fresh = await _invite(pool, org_id, email, user_id)
+    assert fresh != stale
+    # A live invitation is untouched by a second sweep, so re-inviting twice in
+    # a row still collides.
+    assert await pool.execute(
+        """UPDATE public.organization_invitations
+              SET revoked_at = now()
+            WHERE organization_id = $1
+              AND lower(email) = lower($2)
+              AND accepted_at IS NULL
+              AND revoked_at IS NULL
+              AND expires_at <= now()""",
+        org_id, email,
+    ) == "UPDATE 0"
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await _invite(pool, org_id, email, user_id)

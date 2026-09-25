@@ -501,3 +501,58 @@ async def test_invite_duplicate_pending_returns_409():
 
     assert r.status_code == 409, r.text
     assert "pending invitation" in r.json()["detail"]
+
+
+async def test_invite_retires_an_expired_pending_invitation_first():
+    """An expired invitation must not lock the address out of a re-invite.
+
+    organization_invitations_one_pending keys on (accepted_at IS NULL AND
+    revoked_at IS NULL) and cannot include expires_at > now(), because now() is
+    not IMMUTABLE and a partial index predicate has to be. So an expired row
+    still occupies the slot, and without the sweep the owner's obvious next
+    move -- send it again -- would 409 forever on an invitation nobody can
+    accept. The SQL itself is exercised against a real database in
+    backend/tests/integration/test_flag_off_rolling_window.py.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    pool, captured = _make_invite_pool(
+        invite_row={"id": uuid.uuid4()},
+        org_row={"name": "Acme Bio"},
+        user_row={"email": "owner@example.com"},
+    )
+
+    app = _build_app(active_role="owner")
+    with patch("organizations.router.get_db_pool", return_value=pool), \
+         patch("organizations.router.notifications.send_invitation_email", AsyncMock()):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/organizations/{ORG_1}/invitations",
+                json={"email": "Returning@Example.com", "role": "viewer"},
+                headers={"X-Org-Id": ORG_1},
+            )
+
+    assert r.status_code == 201, r.text
+    sweeps = [
+        (q, a) for q, a in captured["execute_calls"]
+        if "organization_invitations" in q and "revoked_at = now()" in q
+    ]
+    assert len(sweeps) == 1, captured["execute_calls"]
+    query, args = sweeps[0]
+    # Only dead rows, and only this address in this org.
+    assert "expires_at <= now()" in query
+    assert "accepted_at IS NULL" in query
+    assert "revoked_at IS NULL" in query
+    assert "lower(email) = lower($2)" in query
+    # Pydantic EmailStr lower-cases the DOMAIN but keeps the local part's case,
+    # which is why the sweep and the index both compare lower(email) rather than
+    # relying on the stored value being normalised.
+    assert args == (ORG_1, "Returning@example.com")
+    # It has to run before the INSERT, or the INSERT still hits the index.
+    insert_at = next(
+        i for i, (q, _) in enumerate(captured["fetchrow_calls"])
+        if "INSERT INTO public.organization_invitations" in q
+    )
+    assert insert_at >= 0
+    assert captured["fetchrow_calls"][insert_at][1][1] == "Returning@example.com"

@@ -12,7 +12,9 @@ Hard-delete order is deliberately R2 -> Stripe -> Supabase auth:
      NOT prevent the DB/auth row from being removed.
   3. ``auth.admin.delete_user`` is last so a failure there leaves a recoverable
      partial state (DB row present, R2 gone, Stripe detached) that the next cron
-     run can finish.
+     run can finish. Organization hand-over runs in the guard transaction
+     immediately before it, because the cascade destroys this user's membership
+     rows and a shared org must not be left ownerless.
 """
 import datetime  # noqa: F401  — exposed to callers that pass datetime-aware timestamps
 import logging
@@ -120,6 +122,78 @@ async def execute_hard_delete(
                     user_id,
                 )
                 return
+
+            # WR-08: hand over organizations BEFORE the cascade, in the same
+            # transaction as the guard above so a cancelled deletion changes
+            # nothing. public.users is deleted by cascade below, which takes this
+            # user's organization_memberships rows with it. For a SHARED org that
+            # this user solely owns, that would leave zero owners -- every
+            # owner-only route and the memberships_write_owners RLS policy would
+            # have no satisfiable caller for the rest of that org's life, and no
+            # API exists to repair it. protect_last_owner() only tolerates the
+            # user-gone cascade for personal orgs
+            # (20260605000003_personal_org_tolerance.sql:264-270), so an org
+            # missed here fails the delete loudly rather than being stranded.
+            promoted = await conn.fetch(
+                """WITH sole AS (
+                       SELECT m.organization_id
+                         FROM public.organization_memberships m
+                         JOIN public.organizations o ON o.id = m.organization_id
+                        WHERE m.user_id = $1::uuid
+                          AND m.role = 'owner'
+                          AND NOT o.is_personal
+                          AND NOT EXISTS (
+                              SELECT 1 FROM public.organization_memberships rival
+                               WHERE rival.organization_id = m.organization_id
+                                 AND rival.user_id <> $1::uuid
+                                 AND rival.role = 'owner')
+                   ), heir AS (
+                       SELECT DISTINCT ON (m.organization_id)
+                              m.organization_id, m.user_id
+                         FROM public.organization_memberships m
+                         JOIN sole s ON s.organization_id = m.organization_id
+                        WHERE m.user_id <> $1::uuid
+                        ORDER BY m.organization_id, m.created_at, m.user_id
+                   )
+                   UPDATE public.organization_memberships m
+                      SET role = 'owner'
+                     FROM heir h
+                    WHERE m.organization_id = h.organization_id
+                      AND m.user_id = h.user_id
+                RETURNING m.organization_id, m.user_id""",
+                user_id,
+            )
+            for row in promoted:
+                logger.info(
+                    "Hard-delete: org %s had no other owner, promoted member %s",
+                    row["organization_id"],
+                    row["user_id"],
+                )
+
+            # Any org whose ONLY member is this user goes with them. That is the
+            # personal org -- whose name embeds the email local part, so leaving
+            # it behind would survive the GDPR erasure as PII -- plus any team
+            # org the user never shared. Nothing is promoted here: the CTE above
+            # found no heir, because there is no other member.
+            emptied = await conn.fetch(
+                """DELETE FROM public.organizations o
+                    WHERE EXISTS (
+                              SELECT 1 FROM public.organization_memberships m
+                               WHERE m.organization_id = o.id
+                                 AND m.user_id = $1::uuid)
+                      AND NOT EXISTS (
+                              SELECT 1 FROM public.organization_memberships rival
+                               WHERE rival.organization_id = o.id
+                                 AND rival.user_id <> $1::uuid)
+                RETURNING o.id, o.is_personal""",
+                user_id,
+            )
+            for row in emptied:
+                logger.info(
+                    "Hard-delete: deleted sole-member org %s (personal=%s)",
+                    row["id"],
+                    row["is_personal"],
+                )
     delete_auth_user(user_id)
     logger.info("Hard-delete: Supabase auth user deleted %s", user_id)
 
