@@ -101,8 +101,10 @@ Merging is the deploy. In order, automatically:
    - `20260605000003_personal_org_tolerance.sql` — `personal_org_for()`, the
      `jobs` BEFORE INSERT trigger that fills both new columns, the two
      Stripe-customer resolvers, the `protect_last_owner` cascade guard (without
-     it the GDPR hard delete fails at the database, flag or no flag) and the
-     replacement of `no_duplicate_pending` with a pending-only unique index
+     it the GDPR hard delete fails at the database, flag or no flag), the
+     BEFORE INSERT/UPDATE guard that keeps a personal org to one member (the
+     premise that cascade guard relies on) and the replacement of
+     `no_duplicate_pending` with a pending-only unique index
 2. A failed predeploy aborts the rollout (`railway.toml` comment), and the old
    replicas keep serving. `supabase db push` applies one file per transaction,
    so a mid-sequence failure leaves the earlier files applied — check which

@@ -174,7 +174,7 @@ Independent grep audit against `backend/**/*.py` for `u\.stripe_customer_id|user
 | Pytest collection (organizations + integration) | `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` | 71 tests collected in 0.25s | PASS (prior verification) |
 | Migration grep enforcement (no LANGUAGE sql) | grep on 12-01 migration | zero matches | PASS |
 | LANGUAGE plpgsql occurrences in 12-01 | grep | 4 occurrences | PASS |
-| Playwright test count | grep `^\s*test\(` on organizations.spec.ts | 12 tests | PASS |
+| Playwright test count | grep `^\s*test\(` on organizations.spec.ts | 12 tests; 11 after the flag-off landing replaced the smoke-launch step, whose `/jobs/launch_smoke` endpoint exists in no branch, with a job-list read that runs | PASS |
 | Leftover live-code `users.stripe_customer_id` reads | Grep `backend/**/*.py` (5-alternation pattern) for `u\|users\.stripe_customer_id` / `users SET stripe_customer_id` / `users\(.*stripe_customer_id` / `FROM public\.users.*stripe_customer_id` | Only comments + intentional pre-migration invariant test remain (see "Goal Achievement" for full breakdown). Zero live-code reads. | PASS |
 | Runbook /health probe payload | Read main.py:178 + runbook lines 34, 116 | `organizations_enabled` is a top-level bool field in /health payload; runbook probes resolve | PASS |
 | deletion_cron tests | Leo-attested 4/4 pass after `ee1ff77` | 4/4 | PASS (Leo confirmed inline) |

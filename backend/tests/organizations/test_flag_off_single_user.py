@@ -3,14 +3,14 @@
 Phase 12 cut billing, jobs and ``/user/usage`` over to org scope
 unconditionally. ``settings.organizations_enabled`` gates only the
 orgs/invitations router mount and the ``/health`` field (backend/main.py:128,
-backend/main.py:177), so "flag off" is NOT the pre-Phase-12 code path: every one
+backend/main.py:179), so "flag off" is NOT the pre-Phase-12 code path: every one
 of those routes now resolves an organization before it does anything. These
 tests pin the flag-off behaviour of that resolution.
 
   * The orgs router is not mounted, so a client has no endpoint to learn an org
     id from and sends no ``X-Org-Id`` header.
   * With no header, ``get_active_org`` resolves the caller's personal org as
-    ``owner`` (backend/auth/org_dependencies.py:70-77), so listing jobs,
+    ``owner`` (backend/auth/org_dependencies.py:64-69), so listing jobs,
     launching a job, adding a card, checking out and reading usage all still
     answer 2xx for a user who has never seen an org UI.
   * The deletion cron and the GDPR export resolve the Stripe customer as a
