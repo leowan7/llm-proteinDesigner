@@ -69,6 +69,25 @@ curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
 If this returns `true`, the flag has already been flipped — stop and find out
 by whom before merging anything.
 
+Then check the one production data shape that can abort the migration.
+`20260605000001_organizations.sql` §2 declares `organizations.stripe_customer_id
+TEXT UNIQUE` and §8a copies each user's `public.users.stripe_customer_id` onto
+their personal org. That column was created without `UNIQUE`
+(`20260319000002_billing_and_results.sql`), so two users sharing one Stripe
+customer id would make the copy violate the new constraint, fail the
+`preDeployCommand`, and abort the rollout (see the Rollback table).
+
+```sql
+-- against production, read-only. Expect zero rows.
+SELECT stripe_customer_id, count(*)
+  FROM public.users
+ WHERE stripe_customer_id IS NOT NULL
+ GROUP BY 1 HAVING count(*) > 1;
+```
+
+Any rows: stop. Decide which user keeps the customer before merging — this is
+unresolved billing identity, not a migration problem.
+
 ### Step 2 — Merge the Phase 12 PR (this applies the migrations)
 
 Merging is the deploy. In order, automatically:
@@ -80,8 +99,10 @@ Merging is the deploy. In order, automatically:
      `jobs.organization_id` (NOT NULL), jobs RLS rewrite
    - `20260605000002_jobs_created_by.sql` — `jobs.created_by_user_id` (NOT NULL)
    - `20260605000003_personal_org_tolerance.sql` — `personal_org_for()`, the
-     `jobs` BEFORE INSERT trigger that fills both new columns, and the two
-     Stripe-customer resolvers
+     `jobs` BEFORE INSERT trigger that fills both new columns, the two
+     Stripe-customer resolvers, the `protect_last_owner` cascade guard (without
+     it the GDPR hard delete fails at the database, flag or no flag) and the
+     replacement of `no_duplicate_pending` with a pending-only unique index
 2. A failed predeploy aborts the rollout (`railway.toml` comment), and the old
    replicas keep serving. `supabase db push` applies one file per transaction,
    so a mid-sequence failure leaves the earlier files applied — check which
@@ -193,9 +214,13 @@ curl -sS https://app.bindwave.com/health | jq '.organizations_enabled'
 # expect: true
 ```
 
-The backend now mounts the orgs router, and org-scoped routes (`/jobs/*`,
-`/billing/*`, `/organizations/*`, `/invitations/*`) enforce `get_active_org`
-and `require_role`.
+The backend now mounts the orgs router. `/jobs/*`, `/billing/*` and
+`/user/usage` enforce `get_active_org`/`require_role` (header-scoped), and
+`/organizations/{org_id}/*` enforces `require_path_role` against the org in the
+path. `/invitations/accept` and `/invitations/preview` deliberately enforce
+neither: the caller is by definition not yet a member, so they are gated by the
+invitation token itself (`backend/organizations/router.py`, the
+"root-mounted, no active-org" section).
 
 The frontend needs no deploy. Each page load probes `/health` once
 (`frontend/src/lib/features.ts`) and `OrgProvider` exposes the result as
@@ -212,10 +237,11 @@ load, so hard-refresh before checking:
 ```
 
 For a single-tenant account (personal org only) the switcher and the Settings
-Organization tab both stay hidden: each gates on the active org being
-non-personal as well as on the flag (`frontend/src/pages/SettingsPage.tsx`,
-`frontend/src/components/org/OrganizationSwitcher.tsx`). Pre-Phase-12 UX is
-preserved (Plan 12-05 decision).
+Organization tab both stay hidden, by different tests: the Settings tab needs a
+non-personal active org (`frontend/src/pages/SettingsPage.tsx`, `showOrgTab`),
+and the switcher needs more than one org to switch between
+(`frontend/src/components/org/OrganizationSwitcher.tsx`, `orgs.length <= 1`).
+Both also require the flag. Pre-Phase-12 UX is preserved (Plan 12-05 decision).
 
 Because the frontend reads the flag at runtime, **flipping the flag back to
 `false` is also the frontend rollback** — see the Rollback table.
@@ -307,11 +333,16 @@ SELECT obj_description('public.users'::regclass, 'pg_class');
 -- Should mention "Phase 12: Stripe customer_id moved to public.organizations"
 ```
 
-The drop PR must also delete the legacy leg of `public.org_stripe_customer()`
-and `public.user_stripe_customer()`, and the
-`test_users_stripe_customer_id_column_still_exists` guard in
-`backend/tests/integration/test_flag_off_rolling_window.py`, which exists to
-fail if the drop lands early.
+The drop PR must also delete, in the same PR that drops the column:
+
+- the legacy leg of `public.org_stripe_customer()` and
+  `public.user_stripe_customer()`
+- the compare-and-set write to `public.users.stripe_customer_id` in
+  `backend/billing/stripe_client.py` `get_or_create_customer`, which exists
+  only to keep a rolling-deploy old replica on the same customer
+- the `test_users_stripe_customer_id_column_still_exists` guard in
+  `backend/tests/integration/test_flag_off_rolling_window.py`, which exists to
+  fail if the drop lands early
 
 After Step 8, Phase 12 rollout is COMPLETE.
 

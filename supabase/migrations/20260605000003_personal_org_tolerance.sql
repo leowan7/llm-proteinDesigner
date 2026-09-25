@@ -159,7 +159,7 @@ COMMENT ON FUNCTION public.jobs_fill_org_defaults() IS
 --
 -- These two readers COALESCE to the pre-Phase-12 column, which is why
 -- 20260606000001_drop_users_stripe_customer_id.sql must land in a LATER deploy:
--- see docs/runbook-phase-12-rollout.md step 9, which copies any remaining
+-- see docs/runbook-phase-12-rollout.md step 8, which copies any remaining
 -- values onto the orgs before dropping the column.
 --
 -- Read-only and SECURITY INVOKER: a SECURITY DEFINER version granted to
@@ -213,3 +213,87 @@ COMMENT ON FUNCTION public.user_stripe_customer(UUID) IS
 
 REVOKE EXECUTE ON FUNCTION public.user_stripe_customer(UUID) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.user_stripe_customer(UUID) TO service_role;
+
+
+-- ----------------------------------------------------------------------------
+-- 5. protect_last_owner must not fire on a cascading parent delete
+-- ----------------------------------------------------------------------------
+-- 20260605000001 section 5 raises check_violation whenever the last `owner`
+-- membership row of an organization disappears. Row triggers also fire for the
+-- DELETEs that a referential CASCADE performs, and organization_memberships
+-- cascades from BOTH parents (organization_id -> organizations,
+-- user_id -> public.users; see 20260605000001 lines 49-50). Every user is the
+-- sole owner of their personal org, so without the guard below:
+--
+--   * DELETE FROM auth.users (backend/user/deletion.py:123, the GDPR hard
+--     delete) cascades public.users -> the personal-org membership -> raise.
+--     R2 objects and the Stripe customer are already purged by then, so the
+--     account would be stuck pending and the cron would retry it forever.
+--     This happens with organizations_enabled = false: it is a schema rule,
+--     not a routing one.
+--   * DELETE FROM public.organizations (organizations/router.py delete_org)
+--     cascades its own memberships -> raise, so no org could ever be deleted.
+--
+-- Postgres runs a CASCADE as a separate DELETE statement issued from the
+-- parent's internal AFTER trigger, so by the time this BEFORE trigger sees the
+-- child row the parent row is already gone from the current snapshot. A
+-- missing parent is therefore an exact test for "this row is going away with
+-- its parent" and leaves a direct DELETE of a sole owner still refused.
+CREATE OR REPLACE FUNCTION public.protect_last_owner()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    remaining_owners INT;
+BEGIN
+    IF TG_OP = 'DELETE' AND (
+           NOT EXISTS (SELECT 1 FROM public.organizations WHERE id = OLD.organization_id)
+        OR NOT EXISTS (SELECT 1 FROM public.users WHERE id = OLD.user_id)
+       )
+    THEN
+        RETURN OLD;
+    END IF;
+
+    -- For UPDATE: only fire if the role was demoted FROM owner
+    IF (TG_OP = 'UPDATE' AND OLD.role = 'owner' AND NEW.role <> 'owner')
+       OR (TG_OP = 'DELETE' AND OLD.role = 'owner')
+    THEN
+        SELECT count(*) INTO remaining_owners
+        FROM public.organization_memberships
+        WHERE organization_id = OLD.organization_id
+          AND role = 'owner'
+          AND user_id <> OLD.user_id;
+        IF remaining_owners = 0 THEN
+            RAISE EXCEPTION 'Cannot remove or demote last owner of organization %', OLD.organization_id
+                USING ERRCODE = 'check_violation';
+        END IF;
+    END IF;
+    RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+COMMENT ON FUNCTION public.protect_last_owner() IS
+    'Refuses to remove or demote an organization''s last owner, except when the '
+    'membership row is disappearing with its own parent org or user row.';
+
+
+-- ----------------------------------------------------------------------------
+-- 6. no_duplicate_pending only ever applied to PENDING invitations
+-- ----------------------------------------------------------------------------
+-- 20260605000001 line 79 declares it as an unconditional
+-- UNIQUE (organization_id, email), so the second invitation ever sent to an
+-- address raises unique_violation even when the first was revoked or accepted
+-- and the member later removed. organizations/router.py create_invitation does
+-- a plain INSERT, so that surfaced as a 500. Replaced with the partial index
+-- the name always described. lower(email) matches the case-insensitive email
+-- comparison the accept path uses (organizations/service.py accept_invitation).
+ALTER TABLE public.organization_invitations
+    DROP CONSTRAINT IF EXISTS no_duplicate_pending;
+
+CREATE UNIQUE INDEX IF NOT EXISTS organization_invitations_one_pending
+    ON public.organization_invitations (organization_id, lower(email))
+    WHERE accepted_at IS NULL AND revoked_at IS NULL;
+
+COMMENT ON INDEX public.organization_invitations_one_pending IS
+    'At most one live invitation per (org, email). Revoked and accepted rows are '
+    'excluded so an address can be re-invited.';

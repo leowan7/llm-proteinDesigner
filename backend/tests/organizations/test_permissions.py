@@ -20,10 +20,16 @@ import pytest
 os.environ.setdefault("TESTING", "true")
 
 
+# organization_memberships.organization_id is uuid, so a fake org id has
+# to be one too: auth/org_dependencies.py rejects a non-uuid X-Org-Id
+# with 400 before any query runs.
+ORG_1 = "11111111-1111-4111-8111-111111111111"
+ORG_2 = "22222222-2222-4222-8222-222222222222"
+
 pytestmark = pytest.mark.asyncio
 
 
-def _build_app(active_role: str | None, user_id: str = "user-test", org_id: str = "org-1"):
+def _build_app(active_role: str | None, user_id: str = "user-test", org_id: str = ORG_1):
     """Build an isolated FastAPI app with the org + invitations routers and
     the auth + active-org dependencies overridden.
     """
@@ -50,8 +56,13 @@ def _build_app(active_role: str | None, user_id: str = "user-test", org_id: str 
     return app
 
 
-def _generic_pool():
-    """A pool that returns generic happy-path responses for any query."""
+def _generic_pool(caller_role: str = "owner"):
+    """A pool that returns generic happy-path responses for any query.
+
+    ``caller_role`` is what the membership lookup returns, which is where
+    require_path_role now reads the caller's role from: the role is a property
+    of the org in the PATH, not of the X-Org-Id header.
+    """
     new_id = uuid.uuid4()
 
     async def _execute(query, *args):
@@ -68,7 +79,7 @@ def _generic_pool():
         if "users" in query and "email" in query:
             return {"email": "owner@example.com"}
         if "organization_memberships" in query:
-            return {"role": "scientist"}
+            return {"role": caller_role}
         return None
 
     async def _fetch(query, *args):
@@ -98,38 +109,38 @@ def _generic_pool():
     "role,method,path,body,expected",
     [
         # Invitations — owner-only writes
-        ("owner", "POST", "/organizations/org-1/invitations",
+        ("owner", "POST", f"/organizations/{ORG_1}/invitations",
          {"email": "x@y.com", "role": "viewer"}, 201),
-        ("scientist", "POST", "/organizations/org-1/invitations",
+        ("scientist", "POST", f"/organizations/{ORG_1}/invitations",
          {"email": "x@y.com", "role": "viewer"}, 403),
-        ("viewer", "POST", "/organizations/org-1/invitations",
+        ("viewer", "POST", f"/organizations/{ORG_1}/invitations",
          {"email": "x@y.com", "role": "viewer"}, 403),
         # Transfer ownership — owner-only. Generic pool returns a membership
         # row for the target so the happy path returns 200.
-        ("owner", "POST", "/organizations/org-1/members/transfer",
+        ("owner", "POST", f"/organizations/{ORG_1}/members/transfer",
          {"target_user_id": "stranger", "new_self_role": "scientist"}, 200),
-        ("scientist", "POST", "/organizations/org-1/members/transfer",
+        ("scientist", "POST", f"/organizations/{ORG_1}/members/transfer",
          {"target_user_id": "stranger", "new_self_role": "scientist"}, 403),
-        ("viewer", "POST", "/organizations/org-1/members/transfer",
+        ("viewer", "POST", f"/organizations/{ORG_1}/members/transfer",
          {"target_user_id": "stranger", "new_self_role": "scientist"}, 403),
         # PATCH org name — owner-only
-        ("owner", "PATCH", "/organizations/org-1",
+        ("owner", "PATCH", f"/organizations/{ORG_1}",
          {"name": "Renamed"}, 200),
-        ("scientist", "PATCH", "/organizations/org-1",
+        ("scientist", "PATCH", f"/organizations/{ORG_1}",
          {"name": "Renamed"}, 403),
-        ("viewer", "PATCH", "/organizations/org-1",
+        ("viewer", "PATCH", f"/organizations/{ORG_1}",
          {"name": "Renamed"}, 403),
         # List members — any role
-        ("owner", "GET", "/organizations/org-1/members", None, 200),
-        ("scientist", "GET", "/organizations/org-1/members", None, 200),
-        ("viewer", "GET", "/organizations/org-1/members", None, 200),
+        ("owner", "GET", f"/organizations/{ORG_1}/members", None, 200),
+        ("scientist", "GET", f"/organizations/{ORG_1}/members", None, 200),
+        ("viewer", "GET", f"/organizations/{ORG_1}/members", None, 200),
     ],
 )
 async def test_permission_matrix(role, method, path, body, expected):
     """Per-row assertion: role X hitting endpoint Y -> status Z."""
     from httpx import ASGITransport, AsyncClient
 
-    pool = _generic_pool()
+    pool = _generic_pool(caller_role=role)
     app = _build_app(active_role=role)
 
     async def _capture_email(**kwargs):
@@ -139,7 +150,7 @@ async def test_permission_matrix(role, method, path, body, expected):
          patch("organizations.router.notifications.send_invitation_email", _capture_email):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            headers = {"X-Org-Id": "org-1"}
+            headers = {"X-Org-Id": ORG_1}
             if method == "GET":
                 r = await client.get(path, headers=headers)
             elif method == "POST":
@@ -269,3 +280,86 @@ async def test_cancel_job_blocks_viewer(role, expected):
     assert r.status_code == expected, (
         f"{role} POST /jobs/.../cancel expected {expected}, got {r.status_code}: {r.text}"
     )
+
+
+def _scoped_pool(memberships: dict[str, str]):
+    """Pool whose membership lookup answers per organization_id.
+
+    require_path_role passes the org id from the URL path, so a caller who owns
+    ORG_1 gets no row back when the path names ORG_2.
+    """
+    async def _fetchrow(query, *args):
+        if "organization_memberships" in query and "role::text" in query:
+            role = memberships.get(str(args[0]))
+            return {"role": role} if role else None
+        if "organizations" in query and "WHERE id" in query:
+            return {"name": "Victim Org", "is_personal": False, "id": uuid.uuid4()}
+        if "organization_memberships" in query:
+            return {"role": "scientist"}
+        return None
+
+    async def _execute(query, *args):
+        return "UPDATE 1"
+
+    async def _fetchval(query, *args):
+        return uuid.uuid4()
+
+    async def _fetch(query, *args):
+        return []
+
+    conn = AsyncMock()
+    conn.fetchrow = _fetchrow
+    conn.execute = _execute
+    conn.fetchval = _fetchval
+    conn.fetch = _fetch
+
+    txn = AsyncMock()
+    txn.__aenter__ = AsyncMock(return_value=None)
+    txn.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=txn)
+
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+
+    pool = AsyncMock()
+    pool.acquire = MagicMock(return_value=ctx)
+    return pool
+
+
+@pytest.mark.parametrize(
+    "method,path,body",
+    [
+        ("PATCH", f"/organizations/{ORG_2}", {"name": "Owned"}),
+        ("DELETE", f"/organizations/{ORG_2}", None),
+        ("PATCH", f"/organizations/{ORG_2}/members/victim-id", {"role": "viewer"}),
+        ("POST", f"/organizations/{ORG_2}/members/transfer",
+         {"target_user_id": "accomplice", "new_self_role": "scientist"}),
+        ("POST", f"/organizations/{ORG_2}/invitations",
+         {"email": "x@y.com", "role": "owner"}),
+        ("DELETE", f"/organizations/{ORG_2}/invitations/"
+                   "99999999-9999-4999-8999-999999999999", None),
+    ],
+)
+async def test_owner_of_one_org_cannot_write_to_another(method, path, body):
+    """Role is read from the org in the PATH, not from the X-Org-Id header.
+
+    The caller really is the owner of ORG_1, so the header check passes. If the
+    role gate reads the header's org instead of the path's, every route here
+    writes to an org the caller has no membership in.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    pool = _scoped_pool({ORG_1: "owner"})
+    app = _build_app(active_role="owner", org_id=ORG_1)
+
+    async def _capture_email(**kwargs):
+        return None
+
+    with patch("organizations.router.get_db_pool", return_value=pool),          patch("organizations.router.notifications.send_invitation_email", _capture_email):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.request(method, path, json=body, headers={"X-Org-Id": ORG_1})
+
+    assert r.status_code == 403, f"{method} {path} -> {r.status_code}: {r.text}"
+    assert "Not a member" in r.json()["detail"]

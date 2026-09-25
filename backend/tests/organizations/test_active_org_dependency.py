@@ -16,6 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
+# organization_memberships.organization_id is uuid, so a fake org id has
+# to be one too: auth/org_dependencies.py rejects a non-uuid X-Org-Id
+# with 400 before any query runs.
+ORG_1 = "11111111-1111-4111-8111-111111111111"
+ORG_2 = "22222222-2222-4222-8222-222222222222"
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -76,7 +82,7 @@ async def test_non_member_returns_403():
     pool = _make_pool(fetchrow_return=None)
     with patch("auth.org_dependencies.get_db_pool", return_value=pool):
         with pytest.raises(HTTPException) as exc_info:
-            await get_active_org(x_org_id="org-uuid", user_id="user-abc")
+            await get_active_org(x_org_id=ORG_1, user_id="user-abc")
     assert exc_info.value.status_code == 403
     assert "member" in exc_info.value.detail.lower()
 
@@ -87,8 +93,8 @@ async def test_owner_returns_role():
 
     pool = _make_pool(fetchrow_return={"role": "owner"})
     with patch("auth.org_dependencies.get_db_pool", return_value=pool):
-        result = await get_active_org(x_org_id="org-uuid", user_id="user-abc")
-    assert result == ("org-uuid", "owner")
+        result = await get_active_org(x_org_id=ORG_1, user_id="user-abc")
+    assert result == (ORG_1, "owner")
 
 
 async def test_scientist_returns_role():
@@ -97,8 +103,8 @@ async def test_scientist_returns_role():
 
     pool = _make_pool(fetchrow_return={"role": "scientist"})
     with patch("auth.org_dependencies.get_db_pool", return_value=pool):
-        result = await get_active_org(x_org_id="org-xyz", user_id="user-abc")
-    assert result == ("org-xyz", "scientist")
+        result = await get_active_org(x_org_id=ORG_2, user_id="user-abc")
+    assert result == (ORG_2, "scientist")
 
 
 async def test_viewer_returns_role():
@@ -107,8 +113,8 @@ async def test_viewer_returns_role():
 
     pool = _make_pool(fetchrow_return={"role": "viewer"})
     with patch("auth.org_dependencies.get_db_pool", return_value=pool):
-        result = await get_active_org(x_org_id="org-xyz", user_id="user-abc")
-    assert result == ("org-xyz", "viewer")
+        result = await get_active_org(x_org_id=ORG_2, user_id="user-abc")
+    assert result == (ORG_2, "viewer")
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +127,8 @@ async def test_require_role_owner_allows_owner():
     from auth.org_dependencies import require_role
 
     dep = require_role("owner")
-    org_id = await dep(active=("org-1", "owner"))
-    assert org_id == "org-1"
+    org_id = await dep(active=(ORG_1, "owner"))
+    assert org_id == ORG_1
 
 
 async def test_require_role_owner_rejects_scientist():
@@ -131,7 +137,7 @@ async def test_require_role_owner_rejects_scientist():
 
     dep = require_role("owner")
     with pytest.raises(HTTPException) as exc_info:
-        await dep(active=("org-1", "scientist"))
+        await dep(active=(ORG_1, "scientist"))
     assert exc_info.value.status_code == 403
     assert "owner" in exc_info.value.detail
 
@@ -142,7 +148,7 @@ async def test_require_role_owner_rejects_viewer():
 
     dep = require_role("owner")
     with pytest.raises(HTTPException) as exc_info:
-        await dep(active=("org-1", "viewer"))
+        await dep(active=(ORG_1, "viewer"))
     assert exc_info.value.status_code == 403
 
 
@@ -151,8 +157,8 @@ async def test_require_role_owner_scientist_allows_both():
     from auth.org_dependencies import require_role
 
     dep = require_role("owner", "scientist")
-    assert await dep(active=("org-1", "owner")) == "org-1"
-    assert await dep(active=("org-1", "scientist")) == "org-1"
+    assert await dep(active=(ORG_1, "owner")) == ORG_1
+    assert await dep(active=(ORG_1, "scientist")) == ORG_1
 
 
 async def test_require_role_owner_scientist_rejects_viewer():
@@ -161,5 +167,5 @@ async def test_require_role_owner_scientist_rejects_viewer():
 
     dep = require_role("owner", "scientist")
     with pytest.raises(HTTPException) as exc_info:
-        await dep(active=("org-1", "viewer"))
+        await dep(active=(ORG_1, "viewer"))
     assert exc_info.value.status_code == 403

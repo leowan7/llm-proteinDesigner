@@ -3,7 +3,8 @@
 Two routers are exported:
 
 - ``router`` — prefix ``/organizations``, all org-scoped endpoints. Most use
-  ``Depends(require_role(...))`` to gate by role; a few (``/mine``, ``POST /``)
+  ``Depends(require_path_role(...))`` to gate by role in the org named by the
+  path; a few (``/mine``, ``POST /``)
   use just ``get_current_user`` because they exist BEFORE the caller has an
   active org context.
 - ``invitations_router`` — prefix ``/invitations``, holds ``/accept`` and
@@ -26,7 +27,10 @@ import logging
 
 import asyncpg
 from auth.dependencies import get_current_user
-from auth.org_dependencies import get_active_org, require_role
+from auth.org_dependencies import (
+    get_active_org,
+    require_path_role,
+)
 from config import settings
 from db.connection import get_db_pool
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -147,7 +151,7 @@ async def get_org(
 async def update_org(
     org_id: str,
     body: models.UpdateOrgRequest,
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ) -> models.OrgResponse:
     """Update the organization name. Owner-only."""
     pool = await get_db_pool()
@@ -172,7 +176,7 @@ async def update_org(
 @router.delete("/{org_id}")
 async def delete_org(
     org_id: str,
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ):
     """Delete an organization. Owner-only.
 
@@ -250,7 +254,7 @@ async def update_member_role(
     org_id: str,
     user_id: str,
     body: models.MemberRoleUpdate,
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ):
     """Owner updates another member's role.
 
@@ -267,7 +271,7 @@ async def update_member_role(
                    RETURNING role::text AS role""",
                 org_id, user_id, body.role,
             )
-    except asyncpg.exceptions.RaiseError as exc:
+    except asyncpg.exceptions.CheckViolationError as exc:
         # protect_last_owner trigger uses SQLSTATE 23514 (check_violation).
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -309,7 +313,7 @@ async def remove_member(
                    WHERE organization_id = $1 AND user_id = $2""",
                 org_id, user_id,
             )
-    except asyncpg.exceptions.RaiseError as exc:
+    except asyncpg.exceptions.CheckViolationError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
@@ -324,7 +328,7 @@ async def transfer_org_ownership(
     org_id: str,
     body: models.TransferRequest,
     user_id: str = Depends(get_current_user),
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ):
     """Owner transfers ownership to another member and self-demotes.
 
@@ -411,20 +415,29 @@ async def create_invitation(
     org_id: str,
     body: models.InviteRequest,
     user_id: str = Depends(get_current_user),
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ):
     """Owner creates an invitation token and emails it to ``body.email``."""
     pool = await get_db_pool()
     token = service.generate_invitation_token()
     expires_at = service.expires_default()
     async with pool.acquire() as conn:
-        invite_row = await conn.fetchrow(
-            """INSERT INTO public.organization_invitations
-                   (organization_id, email, role, token, invited_by, expires_at)
-               VALUES ($1, $2, $3::public.org_role, $4, $5, $6)
-               RETURNING id""",
-            org_id, body.email, body.role, token, user_id, expires_at,
-        )
+        try:
+            invite_row = await conn.fetchrow(
+                """INSERT INTO public.organization_invitations
+                       (organization_id, email, role, token, invited_by, expires_at)
+                   VALUES ($1, $2, $3::public.org_role, $4, $5, $6)
+                   RETURNING id""",
+                org_id, body.email, body.role, token, user_id, expires_at,
+            )
+        except asyncpg.exceptions.UniqueViolationError:
+            # organization_invitations_one_pending (migration 20260605000003
+            # section 6) allows one LIVE invitation per address. Revoke the
+            # open one first to change its role.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That address already has a pending invitation.",
+            ) from None
         org_row = await conn.fetchrow(
             "SELECT name FROM public.organizations WHERE id = $1", org_id,
         )
@@ -442,8 +455,8 @@ async def create_invitation(
         expires_at=expires_at,
     )
     # Return the token so the owner can build a copy-link in the UI without a
-    # second round-trip. The endpoint is gated by require_role("owner"), so
-    # only owners ever see the bearer credential. Plan 12-06 bug-fix.
+    # second round-trip. The endpoint is gated by require_path_role("owner"), so
+    # only owners of THIS org ever see the bearer credential. Plan 12-06 bug-fix.
     return {
         "id": str(invite_row["id"]),
         "email": body.email,
@@ -457,7 +470,7 @@ async def create_invitation(
 async def revoke_invitation(
     org_id: str,
     invite_id: str,
-    _org: str = Depends(require_role("owner")),
+    _org: str = Depends(require_path_role("owner")),
 ):
     """Owner revokes a pending invitation by stamping ``revoked_at``."""
     pool = await get_db_pool()

@@ -121,3 +121,81 @@ async def test_get_or_create_customer_returns_existing_id_without_stripe_call():
 
     assert result == "cus_org_existing"
     assert not mock_create.called  # Skipped Stripe entirely
+
+
+def _cas_pool(cas_result):
+    """Pool where the legacy compare-and-set returns ``cas_result``.
+
+    fetchval serves two different reads: org_stripe_customer() (no customer
+    yet) and the CAS against public.users, which returns non-NULL only when an
+    old replica won the race.
+    """
+    captured = {"fetchval": [], "execute": []}
+
+    async def _fetchval(query, *args):
+        captured["fetchval"].append((query, args))
+        if "public.org_stripe_customer" in query:
+            return None
+        return cas_result
+
+    async def _execute(query, *args):
+        captured["execute"].append((query, args))
+        return "OK"
+
+    pool = AsyncMock()
+    pool.fetchval = _fetchval
+    pool.execute = _execute
+    return pool, captured
+
+
+async def test_new_personal_org_customer_is_also_written_to_the_legacy_column():
+    """The rolling-deploy window needs both columns to name one customer.
+
+    Pre-Phase-12 code reads and writes public.users.stripe_customer_id only, so
+    a customer written to organizations alone is invisible to an old replica,
+    which would create a second one and attach the card to it. numReplicas = 2
+    (railway.toml) keeps both versions serving for the length of a deploy.
+    """
+    from billing.stripe_client import get_or_create_customer
+
+    pool, captured = _cas_pool(cas_result=None)
+    with patch("billing.stripe_client.stripe.Customer.create") as mock_create:
+        mock_create.return_value = MagicMock(id="cus_new_xxx")
+        result = await get_or_create_customer(
+            email="owner@acme.bio", org_id="org-uuid-123",
+            org_name="Acme Bio", pool=pool,
+        )
+
+    assert result == "cus_new_xxx"
+    legacy_writes = [
+        q for q, _ in captured["fetchval"] if "UPDATE public.users" in q
+    ]
+    assert len(legacy_writes) == 1, captured["fetchval"]
+    # Compare-and-set, not a blind write: it must not clobber an id an old
+    # replica already put there.
+    assert "u.stripe_customer_id IS NULL" in legacy_writes[0]
+    assert "o.is_personal" in legacy_writes[0]
+
+
+async def test_customer_created_by_an_old_replica_wins_and_is_adopted():
+    """Lost the race: the old replica's customer holds the card, so it wins.
+
+    Returning our own id instead would attach the payment method to one
+    customer and meter usage against the other.
+    """
+    from billing.stripe_client import get_or_create_customer
+
+    pool, captured = _cas_pool(cas_result="cus_old_replica")
+    with patch("billing.stripe_client.stripe.Customer.create") as mock_create:
+        mock_create.return_value = MagicMock(id="cus_ours")
+        result = await get_or_create_customer(
+            email="owner@acme.bio", org_id="org-uuid-123",
+            org_name="Acme Bio", pool=pool,
+        )
+
+    assert result == "cus_old_replica"
+    org_writes = [
+        args[0] for q, args in captured["execute"]
+        if "UPDATE public.organizations" in q
+    ]
+    assert org_writes[-1] == "cus_old_replica", org_writes

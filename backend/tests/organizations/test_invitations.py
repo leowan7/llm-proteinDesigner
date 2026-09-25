@@ -19,10 +19,16 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncpg
 import pytest
 
 os.environ.setdefault("TESTING", "true")
 
+
+# organization_memberships.organization_id is uuid, so a fake org id has
+# to be one too: auth/org_dependencies.py rejects a non-uuid X-Org-Id
+# with 400 before any query runs.
+ORG_1 = "11111111-1111-4111-8111-111111111111"
 
 pytestmark = pytest.mark.asyncio
 
@@ -32,7 +38,7 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 
 
-def _build_app(user_id: str = "user-owner", active_role: str | None = "owner", active_org_id: str = "org-1"):
+def _build_app(user_id: str = "user-owner", active_role: str | None = "owner", active_org_id: str = ORG_1):
     """Build a minimal FastAPI app with org + invitations routers and overrides."""
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
@@ -63,6 +69,8 @@ def _make_invite_pool(
     user_row=None,
     membership_execute_result="INSERT 0 1",
     accept_execute_result="UPDATE 1",
+    caller_role="owner",
+    insert_raises=None,
 ):
     """Build a pool that responds to the create-invite + accept-invite flows."""
     fetchrow_responses = [invite_row, org_row, user_row]
@@ -77,6 +85,13 @@ def _make_invite_pool(
 
     async def _fetchrow(query, *args):
         captured["fetchrow_calls"].append((query, args))
+        # require_path_role reads the caller's role straight from the DB before
+        # the handler body runs; answer it out of band so it does not consume a
+        # queued response meant for the handler.
+        if "organization_memberships" in query and "role::text" in query:
+            return {"role": caller_role} if caller_role else None
+        if insert_raises is not None and "INSERT INTO public.organization_invitations" in query:
+            raise insert_raises
         if fetchrow_responses:
             return fetchrow_responses.pop(0)
         return None
@@ -126,9 +141,9 @@ async def test_invite_creates_row_and_sends_email():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/invitations",
+                f"/organizations/{ORG_1}/invitations",
                 json={"email": "invitee@example.com", "role": "scientist"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
 
     assert r.status_code == 201, r.text
@@ -150,15 +165,15 @@ async def test_invite_as_scientist_returns_403():
     """Scientist cannot invite -> 403."""
     from httpx import ASGITransport, AsyncClient
 
-    pool, _ = _make_invite_pool()
+    pool, _ = _make_invite_pool(caller_role="scientist")
     app = _build_app(active_role="scientist")
     with patch("organizations.router.get_db_pool", return_value=pool):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/invitations",
+                f"/organizations/{ORG_1}/invitations",
                 json={"email": "x@y.com", "role": "viewer"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
     assert r.status_code == 403
 
@@ -167,15 +182,15 @@ async def test_invite_as_viewer_returns_403():
     """Viewer cannot invite -> 403."""
     from httpx import ASGITransport, AsyncClient
 
-    pool, _ = _make_invite_pool()
+    pool, _ = _make_invite_pool(caller_role="viewer")
     app = _build_app(active_role="viewer")
     with patch("organizations.router.get_db_pool", return_value=pool):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/invitations",
+                f"/organizations/{ORG_1}/invitations",
                 json={"email": "x@y.com", "role": "viewer"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
     assert r.status_code == 403
 
@@ -185,7 +200,7 @@ async def test_invite_as_viewer_returns_403():
 # ---------------------------------------------------------------------------
 
 
-def _accept_pool(invite_row, user_email_row=None, execute_log=None):
+def _accept_pool(invite_row, user_email_row=None, execute_log=None, still_member=True):
     """Pool tuned for the accept_invitation flow.
 
     Router queries users.email first, then service.accept_invitation queries
@@ -205,9 +220,14 @@ def _accept_pool(invite_row, user_email_row=None, execute_log=None):
             return fetchrow_responses.pop(0)
         return None
 
+    async def _fetchval(query, *args):
+        # accept_invitation's "are they still a member?" probe on a used token.
+        return still_member
+
     conn = AsyncMock()
     conn.execute = _execute
     conn.fetchrow = _fetchrow
+    conn.fetchval = _fetchval
 
     txn = AsyncMock()
     txn.__aenter__ = AsyncMock(return_value=None)
@@ -408,3 +428,76 @@ async def test_accept_idempotent_on_double_click():
 
     assert sc1 == 200 == sc2
     assert body1 == body2 == {"organization_id": str(org_id), "role": "scientist"}
+
+
+async def _accept_used_token(still_member: bool):
+    """POST /invitations/accept with an already-stamped invitation."""
+    from httpx import ASGITransport, AsyncClient
+
+    invite_row = {
+        "id": uuid.uuid4(),
+        "organization_id": uuid.uuid4(),
+        "email": "invitee@example.com",
+        "role": "scientist",
+        "expires_at": datetime.now(UTC) + timedelta(days=3),
+        "accepted_at": datetime.now(UTC) - timedelta(seconds=1),
+        "revoked_at": None,
+    }
+    pool, _ = _accept_pool(
+        invite_row=invite_row,
+        user_email_row={"email": "invitee@example.com"},
+        still_member=still_member,
+    )
+    app = _build_app(user_id="user-invitee", active_role=None)
+    with patch("organizations.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/invitations/accept", json={"token": "x" * 43})
+
+
+async def test_accept_used_token_after_removal_returns_410():
+    """A removed member cannot re-enter with the old invitation link.
+
+    accepted_at alone cannot decide this: the membership INSERT is ON CONFLICT
+    DO NOTHING, so replaying a used token would silently re-add someone the
+    owner removed. The membership probe is what tells the two apart.
+    """
+    r = await _accept_used_token(still_member=False)
+    assert r.status_code == 410, r.text
+    assert "already been used" in r.json()["detail"]
+
+
+async def test_accept_used_token_while_still_member_succeeds():
+    """Double-click: the second request lands after accepted_at is stamped."""
+    r = await _accept_used_token(still_member=True)
+    assert r.status_code == 200, r.text
+
+
+async def test_invite_duplicate_pending_returns_409():
+    """The one-pending-per-address index surfaces as 409, not 500.
+
+    organization_invitations_one_pending (migration 20260605000003) is a
+    partial UNIQUE index, so a second live invite to the same address raises
+    SQLSTATE 23505 out of the INSERT.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    assert asyncpg.exceptions.UniqueViolationError.sqlstate == "23505"
+    pool, _ = _make_invite_pool(
+        insert_raises=asyncpg.exceptions.UniqueViolationError(
+            "duplicate key value violates unique constraint "
+            '"organization_invitations_one_pending"'
+        ),
+    )
+    app = _build_app(active_role="owner")
+    with patch("organizations.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(
+                f"/organizations/{ORG_1}/invitations",
+                json={"email": "dupe@example.com", "role": "viewer"},
+                headers={"X-Org-Id": ORG_1},
+            )
+
+    assert r.status_code == 409, r.text
+    assert "pending invitation" in r.json()["detail"]

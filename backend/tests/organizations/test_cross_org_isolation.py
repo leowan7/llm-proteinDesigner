@@ -1,7 +1,7 @@
 """Phase 12 Plan 12-03 — X-Org-Id spoofing returns 403; cross-org reads return empty.
 
 Covers ORG-03 (cross-org isolation):
-- A user with no membership in org X who calls GET /jobs with X-Org-Id=org-X
+- A user with no membership in org X who calls GET /jobs with X-Org-Id=<an org they are not in>
   gets a 403 from get_active_org's membership cross-check
 - A user with a membership row succeeds
 - The X-Org-Id is re-validated on EVERY request (no caching)
@@ -19,6 +19,14 @@ import pytest
 
 os.environ.setdefault("TESTING", "true")
 
+
+# organization_memberships.organization_id is uuid, so every X-Org-Id here
+# has to be one: a value that is not gets 400 before the lookup runs
+# (test_malformed_x_org_id_returns_400_not_500 below).
+ORG_MINE = "11111111-1111-4111-8111-111111111111"
+ORG_NOT_MINE = "22222222-2222-4222-8222-222222222222"
+ORG_A = "33333333-3333-4333-8333-333333333333"
+ORG_B = "44444444-4444-4444-8444-444444444444"
 
 pytestmark = pytest.mark.asyncio
 
@@ -89,7 +97,7 @@ async def test_user_with_no_membership_in_org_x_gets_403_when_using_x_org_id():
          patch("jobs.router.get_db_pool", return_value=pool):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            r = await client.get("/jobs/", headers={"X-Org-Id": "org-X-not-mine"})
+            r = await client.get("/jobs/", headers={"X-Org-Id": ORG_NOT_MINE})
 
     assert r.status_code == 403, r.text
     assert "Not a member" in r.json()["detail"]
@@ -106,7 +114,7 @@ async def test_user_with_membership_in_org_x_succeeds_with_x_org_id():
          patch("jobs.router.get_db_pool", return_value=pool):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            r = await client.get("/jobs/", headers={"X-Org-Id": "org-X"})
+            r = await client.get("/jobs/", headers={"X-Org-Id": ORG_MINE})
 
     assert r.status_code == 200, r.text
     assert r.json() == {"jobs": [], "has_more": False}
@@ -116,8 +124,8 @@ async def test_changing_x_org_id_to_unauthorized_org_returns_403_per_request():
     """X-Org-Id is validated per request, not cached across requests."""
     from httpx import ASGITransport, AsyncClient
 
-    # First call: caller IS a member of org-A. Membership lookup returns scientist.
-    # Second call (same client): caller is NOT a member of org-B. Membership lookup returns None.
+    # First call: caller IS a member of ORG_A. Membership lookup returns scientist.
+    # Second call (same client): caller is NOT a member of ORG_B. Membership lookup returns None.
     call_count = {"n": 0}
 
     async def _fetchrow(query, *args):
@@ -151,10 +159,45 @@ async def test_changing_x_org_id_to_unauthorized_org_returns_403_per_request():
          patch("jobs.router.get_db_pool", return_value=pool):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            r1 = await client.get("/jobs/", headers={"X-Org-Id": "org-A"})
-            r2 = await client.get("/jobs/", headers={"X-Org-Id": "org-B"})
+            r1 = await client.get("/jobs/", headers={"X-Org-Id": ORG_A})
+            r2 = await client.get("/jobs/", headers={"X-Org-Id": ORG_B})
 
     assert r1.status_code == 200, r1.text
     assert r2.status_code == 403, r2.text
     # Confirm both requests touched the membership lookup (no caching).
     assert call_count["n"] == 2
+
+
+async def test_malformed_x_org_id_returns_400_not_500():
+    """A non-uuid X-Org-Id is a client error, not a crash.
+
+    organization_memberships.organization_id is uuid; binding a non-uuid string
+    to that parameter raises inside asyncpg, which surfaces as a 500. The
+    _as_uuid guard in auth/org_dependencies.py turns it into a 400 before any
+    query runs, so the pool below must never be touched.
+    """
+    from httpx import ASGITransport, AsyncClient
+
+    touched = {"n": 0}
+
+    async def _fetchrow(query, *args):
+        touched["n"] += 1
+        return {"role": "owner"}
+
+    conn = AsyncMock()
+    conn.fetchrow = _fetchrow
+    ctx = AsyncMock()
+    ctx.__aenter__ = AsyncMock(return_value=conn)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    pool = AsyncMock()
+    pool.acquire = MagicMock(return_value=ctx)
+
+    app = _build_app()
+    with patch("auth.org_dependencies.get_db_pool", return_value=pool),          patch("jobs.router.get_db_pool", return_value=pool):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.get("/jobs/", headers={"X-Org-Id": "org-X-not-mine"})
+
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == "Malformed X-Org-Id header"
+    assert touched["n"] == 0, "guard must reject before the membership lookup"

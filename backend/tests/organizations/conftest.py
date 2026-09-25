@@ -15,6 +15,7 @@ import secrets
 import uuid
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import asyncpg
 import pytest
@@ -26,6 +27,27 @@ pytestmark = pytest.mark.skipif(
     not SUPABASE_DB_URL,
     reason="Requires SUPABASE_INTEGRATION_DB_URL pointing at a local Supabase",
 )
+
+
+@pytest.fixture(autouse=True)
+def path_role_shares_the_router_pool():
+    """Let require_path_role see whatever pool a unit test patched into the router.
+
+    The path-scoped routes gate on Depends(require_path_role(...)), which does
+    its own membership lookup through auth.org_dependencies.get_db_pool — a
+    different module attribute from the organizations.router.get_db_pool that
+    these tests patch, and not reachable via dependency_overrides because the
+    factory returns a fresh closure per route. Delegating at call time keeps the
+    two in step without every test patching both.
+    """
+    import auth.org_dependencies as org_dependencies
+    import organizations.router as orgs_router
+
+    async def _delegate():
+        return await orgs_router.get_db_pool()
+
+    with patch.object(org_dependencies, "get_db_pool", _delegate):
+        yield
 
 
 @pytest_asyncio.fixture

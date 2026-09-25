@@ -13,6 +13,8 @@
  * not change single-tenant behaviour.
  */
 
+import { COOKIE_CONSENT_KEY } from "@/lib/cookieConsent";
+
 const env = (name: string, fallback: string): string =>
   process.env[name] ?? fallback;
 
@@ -26,10 +28,16 @@ export const FLAG_ON_URL = env("PHASE12_ORGS_BASE_URL", "http://localhost:5174")
 export const FLAG_ON_API = env("PHASE12_ORGS_API_BASE", "http://localhost:8001");
 
 /**
- * Pre-dismissed cookie consent for one origin, so the banner's Dialog overlay
- * does not intercept pointer events on clicks the tests issue against the app.
- * Schema must match `CookieConsentRecord` in src/lib/cookieConsent.ts, and
- * localStorage is origin-keyed, so each frontend origin needs its own entry.
+ * Pre-dismissed cookie consent for one origin. The banner is a fixed bar
+ * pinned to the bottom of the viewport (CookieConsentBanner.tsx), so while it
+ * is up it covers whatever sits in that strip; accepting up front keeps it out
+ * of the way of the long click chains these specs run.
+ *
+ * The key comes from the app rather than a literal: it was renamed
+ * kendrew.* -> bindwave.* by the rebrand, and playwright.config.ts went on
+ * seeding the old one, which made this pre-dismissal a no-op. Schema must match
+ * `CookieConsentRecord`, and localStorage is origin-keyed, so each frontend
+ * origin needs its own entry.
  */
 export function consentState(origin: string) {
   return {
@@ -39,7 +47,7 @@ export function consentState(origin: string) {
         origin,
         localStorage: [
           {
-            name: "kendrew.cookie_consent.v1",
+            name: COOKIE_CONSENT_KEY,
             value: JSON.stringify({
               version: "v1",
               accepted_at: "2026-01-01T00:00:00.000Z",

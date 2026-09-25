@@ -401,3 +401,156 @@ async def test_users_stripe_customer_id_column_still_exists(pool):
            WHERE table_schema = 'public' AND table_name = 'users'
              AND column_name = 'stripe_customer_id'""",
     ) == 1
+
+
+# ---------------------------------------------------------------------------
+# protect_last_owner must not block a cascading delete
+# ---------------------------------------------------------------------------
+
+
+async def _sole_owner_org(pool: asyncpg.Pool, user_id: uuid.UUID) -> uuid.UUID:
+    org_id = await pool.fetchval(
+        "INSERT INTO public.organizations (name, is_personal, created_by) "
+        "VALUES ('Cascade', FALSE, $1) RETURNING id",
+        user_id,
+    )
+    await pool.execute(
+        "INSERT INTO public.organization_memberships "
+        "(organization_id, user_id, role) VALUES ($1, $2, 'owner')",
+        org_id, user_id,
+    )
+    return org_id
+
+
+async def test_deleting_an_org_is_not_blocked_by_its_last_owner(pool, make_user):
+    """DELETE FROM public.organizations must cascade through its memberships.
+
+    Postgres runs a referential ON DELETE CASCADE as a separate DELETE issued
+    from the parent's internal AFTER trigger, so the membership's BEFORE DELETE
+    trigger fires while the organizations row is already gone. An unguarded
+    protect_last_owner counts one remaining owner, raises, and the org becomes
+    undeletable -- which is what DELETE /organizations/{id} does.
+    """
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+
+    await pool.execute("DELETE FROM public.organizations WHERE id = $1", org_id)
+
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organization_memberships "
+        "WHERE organization_id = $1", org_id,
+    ) == 0
+
+
+async def test_deleting_a_user_is_not_blocked_by_a_sole_owned_org(pool, make_user):
+    """The GDPR hard delete must survive the same cascade.
+
+    backend/user/deletion.py deletes the auth.users row, which cascades to
+    public.users and from there to organization_memberships. This is
+    flag-independent: it runs for every existing single-tenant customer whose
+    personal org made them its sole owner.
+    """
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+    personal_id = await pool.fetchval("SELECT public.personal_org_for($1)", user_id)
+
+    try:
+        await pool.execute("DELETE FROM auth.users WHERE id = $1", user_id)
+
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.users WHERE id = $1", user_id,
+        ) == 0
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organization_memberships WHERE user_id = $1",
+            user_id,
+        ) == 0
+    finally:
+        # organizations.created_by is ON DELETE SET NULL, so once the user row
+        # is gone the make_user fixture's created_by cleanup matches nothing and
+        # these two orgs would outlive the test.
+        await pool.execute(
+            "DELETE FROM public.organizations WHERE id = ANY($1::uuid[])",
+            [org_id, personal_id],
+        )
+
+
+async def test_removing_the_last_owner_directly_is_still_refused(pool, make_user):
+    """The cascade guard must not have turned the protection off.
+
+    Both parent rows are present here, so the trigger has to raise 23514 exactly
+    as it did before the guard.
+    """
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+
+    with pytest.raises(asyncpg.exceptions.CheckViolationError):
+        await pool.execute(
+            "DELETE FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, user_id,
+        )
+
+    with pytest.raises(asyncpg.exceptions.CheckViolationError):
+        await pool.execute(
+            "UPDATE public.organization_memberships "
+            "SET role = 'scientist'::public.org_role "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, user_id,
+        )
+
+
+# ---------------------------------------------------------------------------
+# One LIVE invitation per address, not one ever
+# ---------------------------------------------------------------------------
+
+
+async def _invite(pool: asyncpg.Pool, org_id, email: str, invited_by):
+    return await pool.fetchval(
+        """INSERT INTO public.organization_invitations
+               (organization_id, email, role, token, invited_by, expires_at)
+           VALUES ($1, $2, 'viewer', $3, $4, now() + interval '7 days')
+           RETURNING id""",
+        org_id, email, uuid.uuid4().hex, invited_by,
+    )
+
+
+async def test_a_second_live_invitation_to_one_address_is_rejected(pool, make_user):
+    """organization_invitations_one_pending is what makes the 409 reachable."""
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+    await _invite(pool, org_id, "dupe@bindwave-test.local", user_id)
+
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await _invite(pool, org_id, "dupe@bindwave-test.local", user_id)
+
+    # Same address, different case: the index is on lower(email), so this is
+    # the same person and must collide too.
+    with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+        await _invite(pool, org_id, "DUPE@bindwave-test.local", user_id)
+
+
+async def test_a_settled_invitation_does_not_block_a_re_invite(pool, make_user):
+    """Revoked and accepted invitations must not lock the address out forever.
+
+    The index is partial (accepted_at IS NULL AND revoked_at IS NULL). A plain
+    UNIQUE (organization_id, email) would mean a member who leaves can never be
+    invited back, and a mistyped role could never be corrected.
+    """
+    user_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, user_id)
+    email = "returning@bindwave-test.local"
+
+    first = await _invite(pool, org_id, email, user_id)
+    await pool.execute(
+        "UPDATE public.organization_invitations SET revoked_at = now() WHERE id = $1",
+        first,
+    )
+    second = await _invite(pool, org_id, email, user_id)
+    assert second != first
+
+    await pool.execute(
+        "UPDATE public.organization_invitations SET accepted_at = now() WHERE id = $1",
+        second,
+    )
+    third = await _invite(pool, org_id, email, user_id)
+    assert third not in (first, second)

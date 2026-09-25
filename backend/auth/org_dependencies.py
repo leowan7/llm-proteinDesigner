@@ -25,6 +25,7 @@ References:
 from __future__ import annotations
 
 from typing import Literal
+from uuid import UUID
 
 from db.connection import get_db_pool
 from fastapi import Depends, Header, HTTPException, status
@@ -32,6 +33,22 @@ from fastapi import Depends, Header, HTTPException, status
 from auth.dependencies import get_current_user
 
 OrgRole = Literal["owner", "scientist", "viewer"]
+
+
+def _as_uuid(value: str, what: str) -> UUID:
+    """Coerce a client-supplied org id to UUID, or 400.
+
+    organization_memberships.organization_id is a uuid column, so handing
+    asyncpg an unparseable string raises before any membership check runs and
+    the route answers 500. A malformed id is a bad request.
+    """
+    try:
+        return UUID(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Malformed {what}",
+        ) from None
 
 
 async def get_active_org(
@@ -70,7 +87,7 @@ async def get_active_org(
         row = await conn.fetchrow(
             "SELECT role::text AS role FROM public.organization_memberships "
             "WHERE organization_id = $1 AND user_id = $2",
-            x_org_id, user_id,
+            _as_uuid(x_org_id, "X-Org-Id header"), user_id,
         )
     if not row:
         raise HTTPException(
@@ -101,6 +118,48 @@ def require_role(*allowed: OrgRole):
     async def dep(active: tuple[str, OrgRole] = Depends(get_active_org)) -> str:
         org_id, role = active
         if role not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires one of: {', '.join(allowed)}",
+            )
+        return org_id
+
+    return dep
+
+
+def require_path_role(*allowed: OrgRole):
+    """Return a dependency that requires a role in the org named by the PATH.
+
+    ``require_role`` resolves the org from the ``X-Org-Id`` header, which is
+    the right scope for ``/jobs`` and ``/billing`` -- they act on whichever org
+    is active. It is the wrong scope for ``/organizations/{org_id}/...``, which
+    acts on the org in the path: every user is ``owner`` of their own personal
+    org, so a header-scoped ``require_role("owner")`` is satisfied by every
+    caller and says nothing about the org being modified. Use this for any
+    route that takes ``org_id`` in its path.
+
+    The dependency reads ``org_id`` straight from the path (FastAPI binds it by
+    name) and checks the caller's membership row for THAT org.
+
+    Raises:
+        HTTPException 400: ``org_id`` is not a UUID.
+        HTTPException 403: Caller is not a member of the path org, or holds
+            none of ``allowed`` in it.
+    """
+    async def dep(org_id: str, user_id: str = Depends(get_current_user)) -> str:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT role::text AS role FROM public.organization_memberships "
+                "WHERE organization_id = $1 AND user_id = $2",
+                _as_uuid(org_id, "organization id"), user_id,
+            )
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a member of this organization",
+            )
+        if row["role"] not in allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"Requires one of: {', '.join(allowed)}",

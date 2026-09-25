@@ -18,9 +18,13 @@ Key design decisions:
   which is set when a customer completes a Checkout setup session.
 """
 
+import logging
+
 import asyncpg
 import stripe
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Configure stripe at module import using the settings value.
 # Tests that mock stripe functions should patch after import.
@@ -44,9 +48,18 @@ async def get_or_create_customer(
     falls back to the personal org creator's deprecated
     public.users.stripe_customer_id. An existing payer therefore never gets a
     second Stripe customer, even in the window where an old replica wrote only
-    the legacy column. A resolved legacy id is NOT copied onto the org here;
-    the copy belongs to the drop-column deploy (runbook step 9), because a
-    write here would race the same old replica.
+    the legacy column.
+
+    A NEW customer for a personal org is written to both columns, because the
+    fallback only covers "old replica wrote first". Pre-Phase-12 code reads and
+    writes public.users.stripe_customer_id only, so without the second write it
+    would not see this customer, would create its own, and would attach the
+    card to the customer nobody meters (railway.toml numReplicas = 2 keeps both
+    versions serving for the length of a deploy). The legacy write is a
+    compare-and-set: if an old replica got there first its id wins and is
+    adopted onto the org, so the card and the meter always land on the same
+    customer. The whole leg goes away with the column in the drop-column PR
+    (runbook step 8).
 
     Args:
         email: Billing contact email (owner's email or org's billing_email).
@@ -73,6 +86,34 @@ async def get_or_create_customer(
         "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
         customer.id, org_id,
     )
+    legacy = await pool.fetchval(
+        """WITH cas AS (
+               UPDATE public.users u
+                  SET stripe_customer_id = $1
+                 FROM public.organizations o
+                WHERE o.id = $2::uuid AND o.is_personal
+                  AND u.id = o.created_by
+                  AND u.stripe_customer_id IS NULL
+            RETURNING u.id)
+           SELECT u.stripe_customer_id
+             FROM public.users u
+             JOIN public.organizations o ON o.created_by = u.id
+            WHERE o.id = $2::uuid AND o.is_personal
+              AND NOT EXISTS (SELECT 1 FROM cas)""",
+        customer.id, org_id,
+    )
+    if legacy and legacy != customer.id:
+        # An old replica created its own customer between our read and our
+        # write. It holds the payment method, so it wins.
+        await pool.execute(
+            "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
+            legacy, org_id,
+        )
+        logger.warning(
+            "get_or_create_customer: adopted legacy customer %s for org %s, "
+            "discarding freshly created %s", legacy, org_id, customer.id,
+        )
+        return legacy
     return customer.id
 
 

@@ -71,7 +71,8 @@ async def accept_invitation(
 
     Raises:
         HTTPException 404: Token does not exist.
-        HTTPException 410: Invitation has been revoked or has expired.
+        HTTPException 410: Invitation has been revoked, has expired, or was
+            already used by a caller who is no longer a member.
         HTTPException 409: Invitation email does not match the caller.
     """
     async with pool.acquire() as conn:
@@ -98,6 +99,22 @@ async def accept_invitation(
                     status_code=status.HTTP_410_GONE,
                     detail="Invitation has expired",
                 )
+            if invite["accepted_at"] is not None:
+                # A used token must not let a REMOVED member back in, but a
+                # double-click must still succeed: the second request arrives
+                # after the first stamped accepted_at. Tell them apart by the
+                # membership the first request created.
+                still_member = await conn.fetchval(
+                    """SELECT EXISTS (
+                           SELECT 1 FROM public.organization_memberships
+                            WHERE organization_id = $1 AND user_id = $2)""",
+                    invite["organization_id"], user_id,
+                )
+                if not still_member:
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail="Invitation has already been used",
+                    )
             if invite["email"].lower() != user_email.lower():
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

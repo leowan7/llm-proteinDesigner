@@ -3,6 +3,15 @@
 Proves the BEFORE UPDATE OR DELETE trigger blocks removal/demotion of the
 last owner with SQLSTATE 23514 (check_violation), and that promoting a
 second owner first allows the original owner to leave.
+
+asyncpg picks the exception class from the SQLSTATE, and ``USING ERRCODE =
+'check_violation'`` (20260605000003_personal_org_tolerance.sql:268) makes that
+CheckViolationError, not the RaiseError a bare RAISE EXCEPTION would give.
+
+This file is not in either pytest step of .github/workflows/test.yml and skips
+itself unless SUPABASE_INTEGRATION_DB_URL is set, so it has never run. The same
+three properties, plus the cascade cases, are covered by
+test_flag_off_rolling_window.py, which CI does run.
 """
 
 from __future__ import annotations
@@ -51,7 +60,7 @@ async def test_delete_last_owner_raises_check_violation():
     try:
         user_id, org_id = await _bootstrap_org_with_owner(pool, "delete")
         try:
-            with pytest.raises(asyncpg.exceptions.RaiseError) as exc_info:
+            with pytest.raises(asyncpg.exceptions.CheckViolationError) as exc_info:
                 await pool.execute(
                     "DELETE FROM public.organization_memberships "
                     "WHERE organization_id = $1 AND user_id = $2",
@@ -72,7 +81,7 @@ async def test_demote_last_owner_raises_check_violation():
     try:
         user_id, org_id = await _bootstrap_org_with_owner(pool, "demote")
         try:
-            with pytest.raises(asyncpg.exceptions.RaiseError) as exc_info:
+            with pytest.raises(asyncpg.exceptions.CheckViolationError) as exc_info:
                 await pool.execute(
                     "UPDATE public.organization_memberships "
                     "SET role = 'scientist'::public.org_role "

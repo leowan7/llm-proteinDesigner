@@ -18,10 +18,15 @@ import pytest
 os.environ.setdefault("TESTING", "true")
 
 
+# organization_memberships.organization_id is uuid, so a fake org id has
+# to be one too: auth/org_dependencies.py rejects a non-uuid X-Org-Id
+# with 400 before any query runs.
+ORG_1 = "11111111-1111-4111-8111-111111111111"
+
 pytestmark = pytest.mark.asyncio
 
 
-def _build_app(user_id: str = "owner-id", org_id: str = "org-1"):
+def _build_app(user_id: str = "owner-id", org_id: str = ORG_1):
     from auth.dependencies import get_current_user
     from auth.org_dependencies import get_active_org
     from fastapi import FastAPI
@@ -41,7 +46,7 @@ def _build_app(user_id: str = "owner-id", org_id: str = "org-1"):
     return app
 
 
-def _make_pool(target_membership_row=None):
+def _make_pool(target_membership_row=None, caller_id="owner-id", caller_role="owner"):
     captured = {"execute_calls": []}
 
     async def _execute(query, *args):
@@ -49,6 +54,11 @@ def _make_pool(target_membership_row=None):
         return "UPDATE 1"
 
     async def _fetchrow(query, *args):
+        # Two lookups hit organization_memberships with the same shape:
+        # require_path_role reads the CALLER's role, transfer_ownership reads
+        # the TARGET's row. They differ only by the user_id parameter.
+        if len(args) > 1 and args[1] == caller_id:
+            return {"role": caller_role} if caller_role else None
         return target_membership_row
 
     conn = AsyncMock()
@@ -79,9 +89,9 @@ async def test_transfer_promotes_target_then_demotes_self():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/members/transfer",
+                f"/organizations/{ORG_1}/members/transfer",
                 json={"target_user_id": "target-id", "new_self_role": "scientist"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
 
     assert r.status_code == 200, r.text
@@ -106,9 +116,9 @@ async def test_transfer_to_self_returns_400():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/members/transfer",
+                f"/organizations/{ORG_1}/members/transfer",
                 json={"target_user_id": "owner-id", "new_self_role": "scientist"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
     assert r.status_code == 400
     assert "self" in r.json()["detail"].lower()
@@ -124,9 +134,9 @@ async def test_transfer_to_non_member_returns_404():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/members/transfer",
+                f"/organizations/{ORG_1}/members/transfer",
                 json={"target_user_id": "stranger", "new_self_role": "viewer"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
     assert r.status_code == 404
     assert "not a member" in r.json()["detail"].lower()
@@ -142,9 +152,9 @@ async def test_transfer_new_self_role_must_be_scientist_or_viewer():
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             r = await client.post(
-                "/organizations/org-1/members/transfer",
+                f"/organizations/{ORG_1}/members/transfer",
                 json={"target_user_id": "target-id", "new_self_role": "owner"},
-                headers={"X-Org-Id": "org-1"},
+                headers={"X-Org-Id": ORG_1},
             )
     # Pydantic Literal[scientist, viewer] rejects "owner" at validation time -> 422
     # (the service-layer 400 guard is defensive only).
