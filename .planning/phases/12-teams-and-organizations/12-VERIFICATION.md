@@ -171,7 +171,7 @@ Independent grep audit against `backend/**/*.py` for `u\.stripe_customer_id|user
 |----------|---------|--------|--------|
 | Backend phase-12 modules parse | `python -c "ast.parse for organizations/*, auth/org_dependencies.py, scripts/*"` | All 7 files parse | PASS |
 | Phase-12 test files parse | `python -c "ast.parse for 15 test files"` | All 15 parse | PASS |
-| Pytest collection (organizations + integration) | `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` | 71 tests collected in 0.25s | PASS (prior verification) |
+| Pytest collection (organizations + integration) | `pytest tests/organizations/ tests/integration/test_org_migration.py test_last_owner_trigger.py test_rls_jobs_org.py --collect-only -q` | 71 tests collected in 0.25s; re-measured at the flag-off landing, the same command collects 92, of which 9 come from the one file that landing adds (`tests/organizations/test_flag_off_single_user.py`, 9 collected on its own) and 12 were already uncounted here before it | PASS (re-measured) |
 | Migration grep enforcement (no LANGUAGE sql) | grep on 12-01 migration | zero matches | PASS |
 | LANGUAGE plpgsql occurrences in 12-01 | grep | 4 occurrences | PASS |
 | Playwright test count | grep `^\s*test\(` on organizations.spec.ts | 12 tests; 11 after the flag-off landing replaced the smoke-launch step, whose `/jobs/launch_smoke` endpoint exists in no branch, with a job-list read that runs | PASS |
@@ -233,9 +233,15 @@ Total matches: 7, broken down as:
 | `tests/integration/test_org_migration.py:68,75,80` | Intentional pre-migration test | Proves backfill correctness; obsoletes itself when the drop migration ships |
 | `tests/webhooks/test_runpod_org_billing.py:6` | Comment | Contrasts old vs new path |
 
-No remaining live-code reads of `public.users.stripe_customer_id` in the backend. The runbook step-9 drop migration is now safe.
+No remaining live-code reads of `public.users.stripe_customer_id` in the backend. The runbook's final-step drop migration is now safe.
 
 ## Runbook Review
+
+> Renumbered after this review: the flag-off landing folded the separate
+> frontend flag flip into step 5, so the runbook now has eight steps, not nine
+> (`grep '^### Step' docs/runbook-phase-12-rollout.md`). Every "Step 9" below
+> is the drop-column merge, now step 8; the 24-hour watch it gates is now step
+> 7. The observations are unchanged, only the numbers moved.
 
 `docs/runbook-phase-12-rollout.md` (247 lines) is operator-actionable:
 
