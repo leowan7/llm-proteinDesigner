@@ -82,3 +82,40 @@ class TestJobNotifications:
         assert call_params["to"] == ["scientist@example.com"]
         assert "OOM: GPU out of memory" in call_params["subject"]
         assert "OOM: GPU out of memory" in call_params["html"]
+
+    @pytest.mark.anyio
+    async def test_send_export_ready_email_points_at_a_bindwave_address(self):
+        """The GDPR export email must not name a Ranomics address.
+
+        Brand rule: Ranomics does not appear on Bindwave PRODUCT surfaces. The
+        legal pages are the deliberate exception and still name Ranomics Inc.
+        as the operating entity, because the data controller and contracting
+        party must be identifiable there (frontend/src/pages/legal/Terms.tsx:9,
+        :156, :204). An email body is a product surface, not a legal page.
+
+        This email is sent from jobs@bindwave.com (backend/config.py:117), so a
+        ranomics.com address in the body would also tell the user to reply to a
+        different domain than the one that wrote to them.
+        """
+        mock_send = MagicMock()
+
+        with (
+            patch("resend.Emails.send", mock_send),
+            patch("jobs.notifications.settings") as mock_settings,
+        ):
+            mock_settings.resend_api_key = "re_test"
+            mock_settings.resend_from_email = "Bindwave <jobs@bindwave.com>"
+            mock_settings.app_base_url = "http://localhost:8000"
+            from jobs.notifications import send_export_ready_email
+            await send_export_ready_email(
+                to_email="scientist@example.com",
+                presigned_url="https://r2.example.com/export.zip?sig=x",
+                expires_at_iso="2026-09-26T00:00:00Z",
+            )
+
+        mock_send.assert_called_once()
+        call_params = mock_send.call_args[0][0]
+
+        assert "privacy@bindwave.com" in call_params["html"]
+        assert "ranomics" not in call_params["html"].lower()
+        assert "Bindwave" in call_params["subject"]

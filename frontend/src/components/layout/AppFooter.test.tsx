@@ -49,9 +49,9 @@ describe("AppFooter", () => {
   it("renders a copyright line for the current year", () => {
     renderFooter();
     const year = new Date().getFullYear();
-    // The copyright line uses a © glyph plus the current year plus "Ranomics Inc."
+    // The copyright line uses a © glyph plus the current year plus "Bindwave by Ranomics Inc."
     expect(
-      screen.getByText(new RegExp(`©\\s*${year}\\s*Ranomics Inc\\.`, "i")),
+      screen.getByText(new RegExp(`©\\s*${year}\\s*Bindwave by Ranomics Inc\\.`, "i")),
     ).toBeInTheDocument();
   });
 

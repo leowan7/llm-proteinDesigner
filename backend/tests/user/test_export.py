@@ -254,3 +254,20 @@ async def test_build_and_deliver_export_stamps_sentinel_on_failure():
     sql = conn.execute.await_args.args[0]
     assert "last_export_expires_at = now() - interval '1 second'" in sql
     assert conn.execute.await_args.args[1] == "user-123"
+
+
+def test_export_manifest_notes_name_a_bindwave_address():
+    """The manifest.json inside the downloaded export ZIP is customer-facing.
+
+    Asserted against the module source, not a built ZIP: the notes string is
+    authored inline in _build_and_deliver_export_inner and reaching it needs a
+    live DB pool and S3 client. This check therefore proves the authored
+    string, not that a ZIP was written with it.
+    """
+    from pathlib import Path
+
+    import user.export as export_module
+
+    source = Path(export_module.__file__).read_text(encoding="utf-8")
+    assert "contact privacy@bindwave.com." in source
+    assert "ranomics" not in source.lower()

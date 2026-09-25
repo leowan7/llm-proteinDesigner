@@ -306,7 +306,7 @@ export function PrivacyTab({ initialSettings, onChanged }: PrivacyTabProps) {
         {exportStatus && exportStatus.status === "failed" && (
           <p role="alert" className="text-sm text-destructive">
             Your previous export could not be built. Request a new one above
-            or contact support@ranomics.com if this repeats.
+            or contact support@bindwave.com if this repeats.
           </p>
         )}
       </section>
