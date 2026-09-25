@@ -942,47 +942,56 @@ async def test_hard_delete_keeps_an_org_that_gains_a_member_mid_delete(
         "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1",
         leaver_id,
     )
-
-    joiner_conn = await pool.acquire()
-    committed = False
     try:
-        tx = joiner_conn.transaction()
-        await tx.start()
-        await joiner_conn.execute(
-            "INSERT INTO public.organization_memberships "
-            "(organization_id, user_id, role) VALUES ($1, $2, 'scientist')",
-            org_id, joiner_id,
-        )
-        deleter = asyncio.create_task(
-            _hard_delete_then_cascade(pool, leaver_id, leaver_email),
-        )
+        joiner_conn = await pool.acquire()
+        committed = False
         try:
-            await _wait_until_blocked(pool, "public.organization_memberships rival")
-            await tx.commit()
-            committed = True
-            with pytest.raises(asyncpg.exceptions.CheckViolationError):
-                await asyncio.wait_for(deleter, timeout=30)
+            tx = joiner_conn.transaction()
+            await tx.start()
+            await joiner_conn.execute(
+                "INSERT INTO public.organization_memberships "
+                "(organization_id, user_id, role) VALUES ($1, $2, 'scientist')",
+                org_id, joiner_id,
+            )
+            deleter = asyncio.create_task(
+                _hard_delete_then_cascade(pool, leaver_id, leaver_email),
+            )
+            try:
+                await _wait_until_blocked(pool, "public.organization_memberships rival")
+                await tx.commit()
+                committed = True
+                with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                    await asyncio.wait_for(deleter, timeout=30)
+            finally:
+                if not deleter.done():
+                    deleter.cancel()
+                if not committed:
+                    await tx.rollback()
         finally:
-            if not deleter.done():
-                deleter.cancel()
-            if not committed:
-                await tx.rollback()
+            await pool.release(joiner_conn)
+
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
+        ) == 1, "the org gained a member before the delete and must survive it"
+        assert await pool.fetchval(
+            "SELECT count(*) FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, joiner_id,
+        ) == 1, "the new member's own row must not have gone with a cascade"
+
+        # The cron retries, and this time the new member is visible from the start.
+        await _hard_delete_then_cascade(pool, leaver_id, leaver_email)
+        assert await pool.fetchval(
+            "SELECT role::text FROM public.organization_memberships "
+            "WHERE organization_id = $1 AND user_id = $2",
+            org_id, joiner_id,
+        ) == "owner", "the retry promotes the member it could not see the first time"
     finally:
-        await pool.release(joiner_conn)
-
-    assert await pool.fetchval(
-        "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
-    ) == 1, "the org gained a member before the delete and must survive it"
-    assert await pool.fetchval(
-        "SELECT count(*) FROM public.organization_memberships "
-        "WHERE organization_id = $1 AND user_id = $2",
-        org_id, joiner_id,
-    ) == 1, "the new member's own row must not have gone with a cascade"
-
-    # The cron retries, and this time the new member is visible from the start.
-    await _hard_delete_then_cascade(pool, leaver_id, leaver_email)
-    assert await pool.fetchval(
-        "SELECT role::text FROM public.organization_memberships "
-        "WHERE organization_id = $1 AND user_id = $2",
-        org_id, joiner_id,
-    ) == "owner", "the retry promotes the member it could not see the first time"
+        # This org survives the test by design, with a fixture user as its only
+        # owner. Left for make_user's finalizer, that finalizer would raise:
+        # deleting the auth user cascades the last owner's membership, and
+        # protect_last_owner refuses that on a shared org (section 5 of
+        # migration 20260605000003) -- a teardown error plus a leaked org and
+        # auth user. Deleting the parent org cascades the same membership, which
+        # section 5 does tolerate.
+        await pool.execute("DELETE FROM public.organizations WHERE id = $1", org_id)
