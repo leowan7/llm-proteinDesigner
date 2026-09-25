@@ -50,10 +50,8 @@ describe("AppFooter", () => {
   it("renders a copyright line for the current year", () => {
     renderFooter();
     const year = new Date().getFullYear();
-    // The copyright line uses a © glyph plus the current year plus the operator name.
-    expect(
-      screen.getByText(new RegExp(`©\\s*${year}\\s*${LEGAL_ENTITY}`, "i")),
-    ).toBeInTheDocument();
+    // One <span> at AppFooter.tsx:22, so the normalized text is a single string.
+    expect(screen.getByText(`© ${year} ${LEGAL_ENTITY}`)).toBeInTheDocument();
   });
 
   it("renders inside a <footer> element with role=contentinfo", () => {
