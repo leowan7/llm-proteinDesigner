@@ -242,8 +242,9 @@ async def test_personal_org_for_restores_a_missing_owner_membership(pool, make_u
     Nothing ties an organizations row to a membership row, so an org can exist
     with none: a raw INSERT, a seed, a hand-run backfill. Once one does, the
     state is self-sealing -- organizations_one_personal_per_creator
-    (20260605000001) stops personal_org_for() from giving the user a different
-    personal org, and is_member_of() is false for the one they have, so every
+    (20260605000003 section 1) stops personal_org_for() from giving the user a
+    different personal org, and is_member_of() is false for the one they have, so
+    every
     RLS-scoped read of their own personal org comes back empty with no path out.
     That is why the owner membership is re-asserted on every call rather than
     only at creation (20260605000003 section 2).
