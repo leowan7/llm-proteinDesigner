@@ -94,4 +94,4 @@ Follow expression, purification, and validation guidance from the BindCraft sect
 
 ---
 
-*LEO: Customize these protocols based on Ranomics internal SOPs and client preferences. Add target-class-specific guidance as needed (e.g., membrane protein targets requiring detergent or nanodisc reconstitution, enzyme inhibitor designs requiring activity assay rather than direct binding readout, cytokine receptor designs requiring cell-based signaling assays for functional validation). Note which steps Ranomics can perform in-house versus which require external CROs or collaborators.*
+*LEO: Customize these protocols based on Bindwave internal SOPs and client preferences. Add target-class-specific guidance as needed (e.g., membrane protein targets requiring detergent or nanodisc reconstitution, enzyme inhibitor designs requiring activity assay rather than direct binding readout, cytokine receptor designs requiring cell-based signaling assays for functional validation). Note which steps Bindwave can perform in-house versus which require external CROs or collaborators.*

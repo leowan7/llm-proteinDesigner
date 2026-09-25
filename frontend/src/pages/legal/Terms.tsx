@@ -1,14 +1,14 @@
 import { LegalLayout } from "./LegalLayout";
-import { TOS_VERSION } from "./versions";
+import { LEGAL_ENTITY, TOS_VERSION } from "./versions";
 
 export default function TermsPage() {
   return (
     <LegalLayout title="Terms of Service" lastUpdated={TOS_VERSION}>
       <p>
         These Terms of Service (the <em>"Terms"</em>) govern your access to and use of
-        Bindwave, an AI protein design platform operated by Ranomics Inc.
-        (<em>"Ranomics,"</em> <em>"we,"</em> <em>"us"</em>). By creating an account or
-        using the service you agree to these Terms. If you are entering into these Terms
+        Bindwave, an AI protein design platform operated by {LEGAL_ENTITY}{" "}
+        (<em>"we,"</em> <em>"us"</em>). By creating an account or using the service you
+        agree to these Terms. If you are entering into these Terms
         on behalf of an organization, you represent that you have authority to bind that
         organization.
       </p>
@@ -19,7 +19,7 @@ export default function TermsPage() {
         your jurisdiction. You must provide accurate registration information and keep
         your credentials confidential. You are responsible for all activity under your
         account. Notify us immediately at{" "}
-        <a href="mailto:security@ranomics.com">security@ranomics.com</a> if you suspect
+        <a href="mailto:security@bindwave.com">security@bindwave.com</a> if you suspect
         unauthorized access.
       </p>
 
@@ -153,10 +153,10 @@ export default function TermsPage() {
 
       <h2 id="indemnification">10. Indemnification</h2>
       <p>
-        You will defend, indemnify, and hold harmless Ranomics and its personnel from
-        any third-party claim arising out of (a) your content, (b) your use of the
-        service in violation of these Terms or applicable law, or (c) your use of any
-        output in research, product, or clinical development. We will defend,
+        You will defend, indemnify, and hold harmless {LEGAL_ENTITY} and its
+        personnel from any third-party claim arising out of (a) your content, (b) your
+        use of the service in violation of these Terms or applicable law, or (c) your
+        use of any output in research, product, or clinical development. We will defend,
         indemnify, and hold you harmless from any third-party claim that the service
         itself, as provided by us, infringes that third party's intellectual property
         rights, subject to the liability cap above.
@@ -201,15 +201,15 @@ export default function TermsPage() {
 
       <h2 id="contact">14. Contact</h2>
       <p>
-        Ranomics Inc.
+        {LEGAL_ENTITY}
         <br />
         Toronto, Ontario, Canada
         <br />
-        Legal notices: <a href="mailto:legal@ranomics.com">legal@ranomics.com</a>
+        Legal notices: <a href="mailto:legal@bindwave.com">legal@bindwave.com</a>
         <br />
-        Security reports: <a href="mailto:security@ranomics.com">security@ranomics.com</a>
+        Security reports: <a href="mailto:security@bindwave.com">security@bindwave.com</a>
         <br />
-        Privacy inquiries: <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a>
+        Privacy inquiries: <a href="mailto:privacy@bindwave.com">privacy@bindwave.com</a>
       </p>
     </LegalLayout>
   );

@@ -269,7 +269,7 @@ async def send_export_ready_email(
             "<p>Your data export has been generated. Download the ZIP before the link expires:</p>"
             f'<p><a href="{presigned_url}">Download my data</a></p>'
             f"<p>Link expires: {expires_at_iso}.</p>"
-            "<p>If you did not request this export, contact privacy@ranomics.com immediately.</p>"
+            "<p>If you did not request this export, contact privacy@bindwave.com immediately.</p>"
         ),
     }
     await _send_email_safely(params, purpose="data_export")

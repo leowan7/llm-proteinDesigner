@@ -1,5 +1,5 @@
 import { LegalLayout } from "./LegalLayout";
-import { SUBPROCESSORS_VERSION } from "./versions";
+import { LEGAL_ENTITY, SUBPROCESSORS_VERSION } from "./versions";
 
 interface SubprocessorRow {
   name: string;
@@ -89,7 +89,7 @@ export default function SubprocessorsPage() {
   return (
     <LegalLayout title="Subprocessors" lastUpdated={SUBPROCESSORS_VERSION}>
       <p>
-        This page lists the third-party service providers that Ranomics Inc. engages
+        This page lists the third-party service providers that {LEGAL_ENTITY} engages
         to deliver Bindwave. Each subprocessor processes personal data only under
         written data-processing terms, solely for the purposes described below, and
         may not use the data for its own purposes.
@@ -152,7 +152,7 @@ export default function SubprocessorsPage() {
       <h2 id="contact">Contact</h2>
       <p>
         Enterprise procurement and due-diligence requests:{" "}
-        <a href="mailto:procurement@ranomics.com">procurement@ranomics.com</a>.
+        <a href="mailto:procurement@bindwave.com">procurement@bindwave.com</a>.
       </p>
     </LegalLayout>
   );

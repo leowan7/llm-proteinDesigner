@@ -1,11 +1,11 @@
 import { LegalLayout } from "./LegalLayout";
-import { PRIVACY_VERSION } from "./versions";
+import { LEGAL_ENTITY, PRIVACY_VERSION } from "./versions";
 
 export default function PrivacyPage() {
   return (
     <LegalLayout title="Privacy Policy" lastUpdated={PRIVACY_VERSION}>
       <p>
-        This Privacy Policy explains how Ranomics Inc. (<em>"we,"</em> <em>"us"</em>)
+        This Privacy Policy explains how {LEGAL_ENTITY} (<em>"we,"</em> <em>"us"</em>)
         collects, uses, discloses, and retains personal data in connection with
         Bindwave. It supplements the{" "}
         <a href="/legal/terms">Terms of Service</a>. If a term is defined there, it has
@@ -13,9 +13,10 @@ export default function PrivacyPage() {
       </p>
       <p>
         For the purposes of the EU General Data Protection Regulation (<em>GDPR</em>)
-        and the UK GDPR, Ranomics is the data controller. For the California Consumer
-        Privacy Act as amended (<em>CCPA/CPRA</em>), Ranomics is the business. A
-        Canadian PIPEDA-equivalent controller designation applies for users in Canada.
+        and the UK GDPR, {LEGAL_ENTITY} is the data controller. For the California
+        Consumer Privacy Act as amended (<em>CCPA/CPRA</em>), {LEGAL_ENTITY} is the
+        business. A Canadian PIPEDA-equivalent controller designation applies for
+        users in Canada.
       </p>
 
       <h2 id="scope">1. Scope</h2>
@@ -102,9 +103,9 @@ export default function PrivacyPage() {
       </p>
       <p>
         We may also disclose personal data if required to do so by law, in response to
-        valid legal process, to protect the rights or safety of Ranomics, our users, or
-        the public, or in connection with a corporate transaction (subject to this
-        policy continuing to apply to transferred data).
+        valid legal process, to protect the rights or safety of {LEGAL_ENTITY}, our
+        users, or the public, or in connection with a corporate transaction (subject
+        to this policy continuing to apply to transferred data).
       </p>
 
       <h2 id="retention">5. Retention</h2>
@@ -136,7 +137,7 @@ export default function PrivacyPage() {
         production data is limited to named personnel under confidentiality
         obligations. You are responsible for keeping your own credentials confidential;
         report suspected incidents to{" "}
-        <a href="mailto:security@ranomics.com">security@ranomics.com</a>.
+        <a href="mailto:security@bindwave.com">security@bindwave.com</a>.
       </p>
 
       <h2 id="your-rights">7. Your rights</h2>
@@ -184,7 +185,7 @@ export default function PrivacyPage() {
       <p>
         Once the Privacy tab in Settings is available you can self-serve data export
         and account deletion from there. Until then, email{" "}
-        <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a> from the address
+        <a href="mailto:privacy@bindwave.com">privacy@bindwave.com</a> from the address
         on file and we will respond within 30 days. We may need to verify your identity
         before acting on a request.
       </p>
@@ -203,7 +204,7 @@ export default function PrivacyPage() {
         Bindwave is not directed to children under 16. We do not knowingly collect
         personal data from children under 16. If you believe a child has provided us
         with personal data, contact{" "}
-        <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a> so we can
+        <a href="mailto:privacy@bindwave.com">privacy@bindwave.com</a> so we can
         remove it.
       </p>
 
@@ -217,12 +218,12 @@ export default function PrivacyPage() {
       <h2 id="contact">11. Contact</h2>
       <p>
         Privacy inquiries:{" "}
-        <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a>
+        <a href="mailto:privacy@bindwave.com">privacy@bindwave.com</a>
         <br />
         Data protection representative (EU/UK): contact via the same address; we will
         appoint a named representative before general availability in the EEA/UK.
         <br />
-        Postal: Ranomics Inc., Toronto, Ontario, Canada.
+        Postal: {LEGAL_ENTITY}, Toronto, Ontario, Canada.
       </p>
     </LegalLayout>
   );

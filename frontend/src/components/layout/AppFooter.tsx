@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { requestOpenConsent } from "@/lib/cookieConsent";
+import { LEGAL_ENTITY } from "@/pages/legal/versions";
 
 /**
  * Persistent site footer shown on both public and authenticated layouts.
@@ -18,7 +19,7 @@ export function AppFooter() {
       className="border-t bg-background/50 px-4 py-4 text-xs text-muted-foreground"
     >
       <div className="mx-auto flex max-w-5xl flex-col items-center gap-3 sm:flex-row sm:justify-between">
-        <span>© {year} Ranomics Inc.</span>
+        <span>© {year} {LEGAL_ENTITY}</span>
         <nav aria-label="Legal" className="flex flex-wrap items-center gap-4">
           <Link to="/legal/terms" className="hover:text-foreground hover:underline">
             Terms

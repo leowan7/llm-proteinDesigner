@@ -116,7 +116,7 @@ export default function CookiesPage() {
       <h2 id="contact">Contact</h2>
       <p>
         Questions about cookies or browser storage:{" "}
-        <a href="mailto:privacy@ranomics.com">privacy@ranomics.com</a>.
+        <a href="mailto:privacy@bindwave.com">privacy@bindwave.com</a>.
       </p>
     </LegalLayout>
   );

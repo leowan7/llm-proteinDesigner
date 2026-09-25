@@ -2,6 +2,8 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 
+import { LEGAL_ENTITY } from "./versions";
+
 interface LegalLayoutProps {
   title: string;
   lastUpdated: string;
@@ -34,7 +36,7 @@ export function LegalLayout({ title, lastUpdated, children }: LegalLayoutProps) 
       </div>
 
       <footer className="mt-12 flex items-center justify-between border-t pt-6 text-sm text-muted-foreground">
-        <span>© Ranomics Inc.</span>
+        <span>© {LEGAL_ENTITY}</span>
         <Button variant="outline" size="sm" render={<Link to="/">Return to Bindwave</Link>} />
       </footer>
     </div>
@@ -52,8 +54,8 @@ function DraftBanner() {
       This document is an operational draft pending review by qualified legal
       counsel. The binding commercial version will replace this page before
       general availability. Questions:{" "}
-      <a href="mailto:legal@ranomics.com" className="underline">
-        legal@ranomics.com
+      <a href="mailto:legal@bindwave.com" className="underline">
+        legal@bindwave.com
       </a>
       .
     </div>
