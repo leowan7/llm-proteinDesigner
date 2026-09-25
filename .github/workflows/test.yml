@@ -256,13 +256,22 @@ jobs:
         run: |
           cd backend && uvicorn main:app --host 0.0.0.0 --port 8001 &
           echo "Waiting for flag-on backend..."
+          ready=""
           for i in $(seq 1 20); do
             if curl -sf http://localhost:8001/health > /dev/null 2>&1; then
               echo "Flag-on backend ready after ${i}s"
+              ready=1
               break
             fi
             sleep 1
           done
+          # A bare for-loop exits 0 after twenty failed probes. Without this the
+          # step goes green on a backend that never started, and the failure
+          # surfaces later as the org spec's step 0 assertion instead of here.
+          if [ -z "$ready" ]; then
+            echo "Flag-on backend never answered /health on :8001" >&2
+            exit 1
+          fi
         env:
           TESTING: "true"
           ORGANIZATIONS_ENABLED: "true"

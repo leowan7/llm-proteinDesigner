@@ -212,6 +212,57 @@ on.
 
 ### Step 5 — Flip the feature flag (backend and frontend, one switch)
 
+> **Do not run this step yet.** The flag-off landing is safe to merge and this
+> step is not blocked by it, but an independent review of the landed code found
+> four defects that only bite once the flag is on. Each was verified against the
+> files cited. Fix them, or decide each one is acceptable, before flipping:
+>
+> 1. **Team jobs are launched in and billed to the launcher's personal org.**
+>    `frontend/src/lib/jobs.ts` reaches `/jobs/launch`, `/jobs/`,
+>    `/billing/checkout-session` and `/billing/payment-status` with bare
+>    `fetch`, nine call sites, none through the `api()` helper that is the only
+>    place `X-Org-Id` is attached (asserted by `frontend/src/lib/api.test.ts`,
+>    the `api() X-Org-Id header` describe block). With no header,
+>    `backend/auth/org_dependencies.py:80-85` resolves the request to
+>    `personal_org_for(user)` as `owner`. So a scientist who selects team org T
+>    and launches a job has it metered to their own Stripe customer and is sent
+>    to Checkout to add a personal card for team work, while `/user/usage` --
+>    which does go through `api()` -- shows T with no usage. This is money on
+>    the wrong customer and it is the first thing a real team will do.
+> 2. **A departed sole owner's email and card stay on the team org.**
+>    `backend/billing/router.py:51-57` creates a team org's Stripe customer with
+>    the oldest owner's email. The hard delete removes only that person's
+>    *personal* customer -- `deletion_cron.py:51-53` resolves
+>    `public.user_stripe_customer(u.id)`, whose personal-org branch is
+>    constrained to `is_personal`, and `deletion.py:91-94` deletes exactly the id
+>    it is handed -- so the team's billing keeps working, which is why this is a
+>    privacy defect rather than an outage. Nothing then rewrites the team org's
+>    `stripe_customer_id`: `deletion.py` promotes an heir owner but never updates
+>    that column, the orgs module only reads it
+>    (`backend/organizations/router.py:190,200`), and its only writers are
+>    `billing/stripe_client.py:100` and `:127`, both on customer *create*. So
+>    after a GDPR erasure the org still bills the deleted person's card under
+>    their email, and their email is still on a live Stripe customer.
+> 3. **`DELETE /organizations/{id}` destroys every member's jobs.**
+>    `backend/organizations/router.py:205` deletes the org row with no job
+>    rescue, and `jobs.organization_id` is `ON DELETE CASCADE`
+>    (`supabase/migrations/20260605000001_organizations.sql:213`). The only
+>    guard is a 409 when the org has a Stripe customer id, so an org that never
+>    billed deletes and takes the jobs with it. `backend/user/deletion.py`
+>    re-parents other people's jobs before its own org delete; this route does
+>    not. Latent only because defect 1 keeps jobs out of team orgs -- fixing 1
+>    makes this live.
+> 4. **A signed-out invitee never joins.** `AcceptInvitation.tsx:205,217,253`
+>    sends them to `/login?invite_token=...&next=...`, and `Login.tsx:53` goes
+>    to `/chat` while `SignUp.tsx:70` goes to `/verify-email`; neither page
+>    reads either parameter. The E2E spec signs in before opening the link, so
+>    it covers only the already-signed-in branch.
+>
+> Defects 1 and 2 are money and erasure, so they are filed as their own tasks.
+> None of the four is reachable while the flag is off: the orgs router is not
+> mounted, no frontend surface renders, and every user resolves to their own
+> personal org, which is the correct answer for them.
+
 In the Railway dashboard, set `ORGANIZATIONS_ENABLED=true` on the backend
 service. Redeploy.
 

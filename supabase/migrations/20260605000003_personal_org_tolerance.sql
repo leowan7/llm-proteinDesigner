@@ -357,15 +357,55 @@ BEGIN
 END;
 $$;
 
--- CREATE TRIGGER does not validate existing rows, and nothing here repairs
--- one, because no database can hold a violating row at this point: all three
--- org migrations are new in this phase, so whatever runs this file created
--- organization_memberships empty in the same push. A database that already
--- applied an earlier copy of this file is also the one place a repair
--- statement could not reach -- supabase db push skips a version already in the
--- remote migration history, so nothing edited into this file runs there. Reset
--- such a database rather than expecting this file to fix it.
+-- CREATE TRIGGER does not validate existing rows, so the two statements below
+-- repair the states it would otherwise leave stranded. Production cannot be in
+-- either one: origin/master has no org tables at all, so the migration history
+-- there runs 000001 through 000003 in a single push and this trigger is created
+-- over an empty organization_memberships.
 --
+-- A development database that ran 000001 and 000002 from an earlier branch
+-- WITHOUT this file can be, which is what these statements are for. Those two
+-- migrations create the invitations table and the org routes it feeds, and
+-- nothing in them stops an owner inviting a second person into their own
+-- personal org. Such a database then applies this file on its next
+-- `supabase db push` -- the version is missing from its history -- and gets the
+-- trigger without the repair, so:
+--   * personal_org_for() re-asserts the owner membership on EVERY call
+--     (section 4 above), and that INSERT would now raise, breaking every
+--     request made by the org's owner, and
+--   * a pending invitation into that org would raise at accept_invitation's
+--     membership INSERT (backend/organizations/service.py:127-134), which
+--     catches nothing, so the invitee gets a 500.
+--
+-- The one database these cannot reach is one that already applied an EARLIER
+-- copy of this file: `supabase db push` skips a version already in the remote
+-- migration history, so nothing edited in here runs there at all. Reset that
+-- one (`supabase db reset`) rather than expecting this file to fix it.
+--
+-- Converting the org to a team org is the repair that loses nothing: no member
+-- is stripped of access, and the partial unique index
+-- organizations_one_personal_per_creator (section 1) frees that creator's
+-- personal slot, so personal_org_for() builds them a fresh one on its next
+-- call. Deleting the extra membership instead would silently evict whoever
+-- accepted.
+UPDATE public.organizations o
+   SET is_personal = FALSE, updated_at = now()
+ WHERE o.is_personal
+   AND (SELECT count(*) FROM public.organization_memberships m
+         WHERE m.organization_id = o.id) > 1;
+
+-- Retiring a pending invitation into a still-personal org gives its holder the
+-- 410 a revoked invitation already gives (backend/organizations/service.py:92-96)
+-- instead of a 500, and create_invitation now refuses to issue another
+-- (backend/organizations/router.py:430-441). Ordered after the UPDATE above on
+-- purpose: an org that just became a team org keeps its live invitations.
+UPDATE public.organization_invitations i
+   SET revoked_at = now()
+ WHERE i.revoked_at IS NULL
+   AND i.accepted_at IS NULL
+   AND EXISTS (SELECT 1 FROM public.organizations o
+                WHERE o.id = i.organization_id AND o.is_personal);
+
 -- UPDATE OF as well: moving an existing membership row onto a personal org
 -- reaches the same end state as inserting one there.
 CREATE TRIGGER organization_memberships_personal_single_member
