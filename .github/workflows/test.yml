@@ -404,7 +404,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report
-          path: frontend/playwright-report/
+          # test-results/ as well: no html reporter is configured, so
+          # playwright-report/ is never written and this artifact has only ever
+          # uploaded nothing. The per-test dirs under test-results/ are where
+          # the failure ARIA snapshot (error-context.md) and the on-first-retry
+          # trace live, which is what a red E2E run has to be diagnosed from.
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
 
   lint:
     name: Lint & Type Check

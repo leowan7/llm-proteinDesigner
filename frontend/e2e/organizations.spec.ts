@@ -116,13 +116,24 @@ async function waitForOrgIdByName(
 }
 
 /** Put ``orgId`` in localStorage and reload, landing the page in that org. */
+/**
+ * Make ``orgId`` the active org for the rest of this page's life.
+ *
+ * Seeded before any app code runs rather than written into a page that has
+ * already mounted OrgProvider. refresh() reads the stored id only after
+ * awaiting /health and /organizations/mine, then persists whatever it resolved
+ * (OrganizationContext.tsx:143-146) -- so a setItem that lands after that read
+ * is overwritten by the personal org, and the reload afterwards brings the
+ * personal workspace back up with no Organization tab at all. An init script
+ * also re-applies on the reloads the org UI itself performs, so the active org
+ * cannot drift mid-test.
+ */
 async function switchToOrgById(page: Page, orgId: string) {
-  await page.goto("/jobs");
-  await page.evaluate(
+  await page.addInitScript(
     ([key, id]) => localStorage.setItem(key, id),
     [ORG_STORAGE_KEY, orgId],
   );
-  await page.reload();
+  await page.goto("/jobs");
 }
 
 /** Open /settings on the Organization tab, then the named sub-tab. */
@@ -344,19 +355,24 @@ test.describe.serial("Phase 12: full teams flow", () => {
       .getByRole("button", { name: "Transfer ownership", exact: true })
       .click();
 
-    // handleTransfer reloads on success, so the role assertion comes first:
-    // it is the only one here that needs a painted members table, and it gets
-    // the same budget as every other post-reload wait in this spec. Non-owners
-    // see their role as plain text, so A's own row now reads scientist
-    // (MembersTab.tsx:291 renders <span>{m.role}</span> off isOwner).
+    // handleTransfer reloads on success, and the reload lands back on
+    // /settings?tab=organization -- clicking a tab does not touch the URL. That
+    // is the deep link SettingsPage.tsx now controls the selection for: with
+    // defaultValue, Base UI rewrote the selection to Account on the render
+    // before OrgProvider resolved the org, so this block had no members table
+    // to look at on any of its attempts. This assertion is the flag-on evidence
+    // for that fix; SettingsPage.test.tsx covers it without a browser.
+    //
+    // Role first, because it is the only assertion here that needs the table
+    // painted. Non-owners see their role as plain text, so A's own row now
+    // reads scientist (MembersTab.tsx:291 renders <span>{m.role}</span> off
+    // isOwner).
     await expect(
       page.getByRole("row").filter({ hasText: USER_A_EMAIL }),
     ).toContainText("scientist", { timeout: 20_000 });
     // Only now are the absences evidence. Asserted before the table repaints
-    // they pass on the blank page and prove nothing -- MembersTab renders a
-    // skeleton with no table at all while members is null
-    // (MembersTab.tsx:156-163), which is what starved the assertion above of
-    // its 5s default on the first flag-on CI run.
+    // they pass on a page with no table at all and prove nothing -- MembersTab
+    // renders a skeleton while members is null (MembersTab.tsx:156-163).
     await expect(
       page.locator('form[aria-label="Invite member"]'),
     ).toHaveCount(0);

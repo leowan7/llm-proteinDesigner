@@ -43,7 +43,7 @@ import {
 
 const STORAGE_KEY = "kendrew.activeOrgId";
 
-interface OrgContextValue {
+export interface OrgContextValue {
   /**
    * True only when the backend reports organizations_enabled=true. Every org
    * UI surface gates on this so a flag-off deploy renders as single-tenant.

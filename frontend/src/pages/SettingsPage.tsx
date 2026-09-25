@@ -593,7 +593,11 @@ function OrganizationTab() {
 export function SettingsPage() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const { enabled: orgsEnabled, activeOrg } = useOrgContext();
+  const {
+    enabled: orgsEnabled,
+    activeOrg,
+    loading: orgsLoading,
+  } = useOrgContext();
   const showOrgTab =
     orgsEnabled && activeOrg !== null && !activeOrg.is_personal;
 
@@ -607,6 +611,32 @@ export function SettingsPage() {
   )
     ? (tabParam as string)
     : "account";
+
+  // The selection is controlled, not defaultValue. Base UI's uncontrolled Tabs
+  // rewrites a selection that matches no tab to the first tab, in a layout
+  // effect on the render that finds it missing
+  // (node_modules/@base-ui/react/esm/tabs/root/TabsRoot.js:139-156; the escape
+  // hatch there covers a *disabled* tab, not an absent one). The organization
+  // trigger only mounts once OrgProvider has resolved a non-personal active org
+  // from GET /organizations/mine, which is never true on the first render of a
+  // page load -- so ?tab=organization was being dropped every time, including
+  // on the full reloads setActiveOrg() and a completed ownership transfer
+  // perform. Controlling the value short-circuits that reset
+  // (TabsRoot.js:139-141) so the selection survives the tab arriving late.
+  // Verified by SettingsPage.test.tsx "deep-link ?tab=organization".
+  const [tab, setTab] = useState(initialTab);
+
+  // Controlling the value also opts out of Base UI's fallback, so the page owes
+  // that itself: once org state has settled, a selection with no reachable tab
+  // has to land somewhere. Gated on !orgsLoading, which is false on both flag
+  // paths (OrganizationContext.tsx:148-150 clears it in a finally), so a
+  // flag-off deploy still shows Account for a hand-typed ?tab=organization
+  // exactly as it does today.
+  useEffect(() => {
+    if (tab === "organization" && !showOrgTab && !orgsLoading) {
+      setTab("account");
+    }
+  }, [tab, showOrgTab, orgsLoading]);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -631,7 +661,7 @@ export function SettingsPage() {
         </p>
       )}
 
-      <Tabs defaultValue={initialTab}>
+      <Tabs value={tab} onValueChange={(next) => setTab(next as string)}>
         <TabsList>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
