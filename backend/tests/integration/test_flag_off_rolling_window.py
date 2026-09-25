@@ -890,3 +890,99 @@ async def test_hard_delete_keeps_a_removed_members_jobs_out_of_the_cascade(
     assert await pool.fetchval(
         "SELECT organization_id FROM public.jobs WHERE id = $1", job_id,
     ) == await pool.fetchval("SELECT public.personal_org_for($1)", stayer_id)
+
+
+async def _wait_until_blocked(pool, needle: str, timeout: float = 15.0):
+    """Wait until another session is stuck on a lock inside a statement.
+
+    Makes the interleaving below deterministic without a sleep: the joiner's
+    uncommitted INSERT holds FOR KEY SHARE on the organizations row, which is
+    what both the locking SELECT and the DELETE have to wait for. The needle
+    travels as a parameter, so this query cannot match itself.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if await pool.fetchval(
+            """SELECT count(*) FROM pg_stat_activity
+                WHERE wait_event_type = 'Lock'
+                  AND query LIKE '%' || $1 || '%'""",
+            needle,
+        ):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"nothing blocked on {needle!r} within {timeout}s")
+
+
+async def test_hard_delete_keeps_an_org_that_gains_a_member_mid_delete(
+    pool, make_user,
+):
+    """A sole-member org that gains a member mid-delete must survive.
+
+    execute_hard_delete runs at READ COMMITTED and re-parents other people's
+    jobs between deciding which orgs are doomed and deleting them, so an
+    invitation accepted in that window commits a membership the first snapshot
+    cannot see. Delete by id alone and the org goes anyway: protect_last_owner
+    tolerates the membership cascade because the parent row is already gone
+    (migration 20260605000003 section 5), so the member who just joined loses
+    the org and every job in it with nothing raised anywhere.
+
+    Guarded, the org survives and the auth delete is refused instead -- a shared
+    org with no owner is what section 5 will not tolerate -- and the cron's next
+    pass promotes the new member and finishes.
+
+    The interleaving is deterministic rather than timed: the joiner's INSERT is
+    held open, and its foreign key's FOR KEY SHARE lock on the organizations row
+    is what the delete blocks on.
+    """
+    leaver_id, leaver_email = await make_user()
+    joiner_id, _ = await make_user()
+    org_id = await _sole_owner_org(pool, leaver_id)
+    await pool.execute(
+        "UPDATE public.users SET deletion_requested_at = now() WHERE id = $1",
+        leaver_id,
+    )
+
+    joiner_conn = await pool.acquire()
+    committed = False
+    try:
+        tx = joiner_conn.transaction()
+        await tx.start()
+        await joiner_conn.execute(
+            "INSERT INTO public.organization_memberships "
+            "(organization_id, user_id, role) VALUES ($1, $2, 'scientist')",
+            org_id, joiner_id,
+        )
+        deleter = asyncio.create_task(
+            _hard_delete_then_cascade(pool, leaver_id, leaver_email),
+        )
+        try:
+            await _wait_until_blocked(pool, "public.organization_memberships rival")
+            await tx.commit()
+            committed = True
+            with pytest.raises(asyncpg.exceptions.CheckViolationError):
+                await asyncio.wait_for(deleter, timeout=30)
+        finally:
+            if not deleter.done():
+                deleter.cancel()
+            if not committed:
+                await tx.rollback()
+    finally:
+        await pool.release(joiner_conn)
+
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organizations WHERE id = $1", org_id,
+    ) == 1, "the org gained a member before the delete and must survive it"
+    assert await pool.fetchval(
+        "SELECT count(*) FROM public.organization_memberships "
+        "WHERE organization_id = $1 AND user_id = $2",
+        org_id, joiner_id,
+    ) == 1, "the new member's own row must not have gone with a cascade"
+
+    # The cron retries, and this time the new member is visible from the start.
+    await _hard_delete_then_cascade(pool, leaver_id, leaver_email)
+    assert await pool.fetchval(
+        "SELECT role::text FROM public.organization_memberships "
+        "WHERE organization_id = $1 AND user_id = $2",
+        org_id, joiner_id,
+    ) == "owner", "the retry promotes the member it could not see the first time"

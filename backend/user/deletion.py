@@ -210,7 +210,8 @@ async def execute_hard_delete(
                       AND NOT EXISTS (
                               SELECT 1 FROM public.organization_memberships rival
                                WHERE rival.organization_id = o.id
-                                 AND rival.user_id <> $1::uuid)""",
+                                 AND rival.user_id <> $1::uuid)
+                      FOR UPDATE""",
                 user_id,
             )
             doomed_ids = [row["id"] for row in doomed]
@@ -225,6 +226,9 @@ async def execute_hard_delete(
                 # would destroy that person's history. Move those jobs to their
                 # own personal org first; personal_org_for is find-or-create, so
                 # it also covers an owner whose personal org never materialised.
+                # A job moved for an org the DELETE below then keeps -- because
+                # it gained a member in between -- stays with its own owner
+                # either way.
                 rescued = await conn.fetch(
                     """UPDATE public.jobs j
                           SET organization_id = public.personal_org_for(j.user_id)
@@ -241,15 +245,54 @@ async def execute_hard_delete(
                         row["user_id"],
                     )
 
-                await conn.execute(
-                    "DELETE FROM public.organizations WHERE id = ANY($1::uuid[])",
-                    doomed_ids,
+                # Re-check the sole-member predicate on the DELETE itself.
+                # This transaction is READ COMMITTED and the re-parent pass above
+                # is not instant (personal_org_for runs once per rescued row), so
+                # an invitation accepted in that window commits a membership the
+                # SELECT's snapshot cannot see. Deleting by id alone would drop
+                # the org anyway, and protect_last_owner tolerates the membership
+                # cascade because the parent org row is already gone (migration
+                # 20260605000003 section 5) -- so whoever had just joined would
+                # lose the org and every job in it, with no error raised
+                # anywhere.
+                #
+                # The FOR UPDATE above and this predicate close different halves
+                # and are both needed. The lock stops a membership INSERT that
+                # arrives after the SELECT: its foreign key takes FOR KEY SHARE
+                # on this same organizations row, so it waits for this
+                # transaction and then fails on the missing key instead of
+                # landing in a deleted org. This predicate covers the reverse
+                # order -- an INSERT already waiting when the SELECT ran commits
+                # a row the SELECT could not see, and a lock wait on an unchanged
+                # row does not re-evaluate the SELECT's qualifier.
+                #
+                # Re-checked, the DELETE skips that org and the auth delete below
+                # fails loudly instead: the cron's next pass sees the new member,
+                # promotes them and completes. Proved by
+                # tests/integration/test_flag_off_rolling_window.py::
+                # test_hard_delete_keeps_an_org_that_gains_a_member_mid_delete.
+                deleted = await conn.fetch(
+                    """DELETE FROM public.organizations o
+                        WHERE o.id = ANY($2::uuid[])
+                          AND NOT EXISTS (
+                                  SELECT 1 FROM public.organization_memberships rival
+                                   WHERE rival.organization_id = o.id
+                                     AND rival.user_id <> $1::uuid)
+                    RETURNING o.id, o.is_personal""",
+                    user_id, doomed_ids,
                 )
-                for row in doomed:
+                for row in deleted:
                     logger.info(
                         "Hard-delete: deleted sole-member org %s (personal=%s)",
                         row["id"],
                         row["is_personal"],
+                    )
+                if len(deleted) != len(doomed_ids):
+                    logger.warning(
+                        "Hard-delete: %d of %d sole-member orgs gained a member "
+                        "before the delete and were kept",
+                        len(doomed_ids) - len(deleted),
+                        len(doomed_ids),
                     )
     delete_auth_user(user_id)
     logger.info("Hard-delete: Supabase auth user deleted %s", user_id)

@@ -357,6 +357,40 @@ BEGIN
 END;
 $$;
 
+-- CREATE TRIGGER does not look at existing rows, and an environment that ran
+-- an earlier copy of this file could already hold a violating one. Production
+-- cannot: these tables arrive with this phase and the flag is off after the
+-- merge, so the invitations router is never mounted. Both statements below are
+-- therefore expected to touch zero rows. They are here because the states they
+-- repair are ones no API could repair afterwards.
+--
+-- A personal org that already has a second member becomes a team org rather
+-- than losing members: nobody is stripped of access, and the partial unique
+-- index organizations_one_personal_per_creator frees that creator's slot, so
+-- personal_org_for() gives them a fresh personal org on its next call. Left
+-- alone, that org would break its owner outright -- personal_org_for()
+-- re-asserts the owner membership on every call (section 4 above), and that
+-- INSERT would trip the trigger below on every request.
+UPDATE public.organizations o
+   SET is_personal = FALSE, updated_at = now()
+ WHERE o.is_personal
+   AND (SELECT count(*) FROM public.organization_memberships m
+         WHERE m.organization_id = o.id) > 1;
+
+-- A pending invitation into an org that is still personal can no longer be
+-- accepted: the membership INSERT in accept_invitation
+-- (backend/organizations/service.py:127-134) hits the trigger below, and
+-- nothing there catches check_violation, so the invitee would get a 500.
+-- Retiring it gives them the 410 a revoked invitation already gives
+-- (backend/organizations/service.py:92-96), and create_invitation now refuses
+-- to issue another (backend/organizations/router.py:430-441).
+UPDATE public.organization_invitations i
+   SET revoked_at = now()
+ WHERE i.revoked_at IS NULL
+   AND i.accepted_at IS NULL
+   AND EXISTS (SELECT 1 FROM public.organizations o
+                WHERE o.id = i.organization_id AND o.is_personal);
+
 -- UPDATE OF as well: moving an existing membership row onto a personal org
 -- reaches the same end state as inserting one there.
 CREATE TRIGGER organization_memberships_personal_single_member
