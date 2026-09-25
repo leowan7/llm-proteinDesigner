@@ -218,10 +218,11 @@ on.
 > files cited. Fix them, or decide each one is acceptable, before flipping:
 >
 > 1. **Team jobs are launched in and billed to the launcher's personal org.**
->    `frontend/src/lib/jobs.ts` reaches `/jobs/launch`, `/jobs/`,
->    `/billing/checkout-session` and `/billing/payment-status` with bare
->    `fetch`, nine call sites, none through the `api()` helper that is the only
->    place `X-Org-Id` is attached (asserted by `frontend/src/lib/api.test.ts`,
+>    `frontend/src/lib/jobs.ts` reaches the backend with bare `fetch` at nine
+>    call sites -- every job and billing endpoint the app uses, including
+>    `/jobs/launch`, `/jobs/`, `/jobs/{id}/status`, `/jobs/{id}/cancel`,
+>    `/billing/checkout-session` and `/billing/payment-status` -- none of them
+>    through the `api()` helper that is the only place `X-Org-Id` is attached (asserted by `frontend/src/lib/api.test.ts`,
 >    the `api() X-Org-Id header` describe block). With no header,
 >    `backend/auth/org_dependencies.py:80-85` resolves the request to
 >    `personal_org_for(user)` as `owner`. So a scientist who selects team org T

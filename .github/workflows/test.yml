@@ -225,13 +225,24 @@ jobs:
         run: |
           cd backend && uvicorn main:app --host 0.0.0.0 --port 8000 &
           echo "Waiting for backend..."
+          ready=""
           for i in $(seq 1 20); do
             if curl -sf http://localhost:8000/health > /dev/null 2>&1; then
               echo "Backend ready after ${i}s"
+              ready=1
               break
             fi
             sleep 1
           done
+          # Same guard as the flag-on step below, and for the same reason: a bare
+          # for-loop exits 0 after twenty failed probes, so this step went green
+          # on a backend that never started and the first symptom was a
+          # connection error in whichever spec ran first. This job now starts two
+          # uvicorns, so there is one more way for this one to die.
+          if [ -z "$ready" ]; then
+            echo "Backend never answered /health on :8000" >&2
+            exit 1
+          fi
         env:
           TESTING: "true"
           SUPABASE_URL: http://127.0.0.1:54321

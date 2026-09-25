@@ -371,7 +371,7 @@ $$;
 -- `supabase db push` -- the version is missing from its history -- and gets the
 -- trigger without the repair, so:
 --   * personal_org_for() re-asserts the owner membership on EVERY call
---     (section 4 above), and that INSERT would now raise, breaking every
+--     (section 2 above), and that INSERT would now raise, breaking every
 --     request made by the org's owner, and
 --   * a pending invitation into that org would raise at accept_invitation's
 --     membership INSERT (backend/organizations/service.py:127-134), which
