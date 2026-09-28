@@ -11,15 +11,17 @@ from auth.router import router as auth_router
 from billing.router import router as billing_router
 from config import settings
 from db.connection import close_db_pool, get_db_pool
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from jobs.router import router as jobs_router
 from middleware.logging import StructuredLoggingMiddleware, setup_logging
+from middleware.rate_limit import setup_rate_limiting
 from pdb_utils.router import router as pdb_router
 from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 from sessions.router import router as sessions_router
+from starlette_csrf import CSRFMiddleware
 from user.router import router as user_router
 from webhooks.router import router as webhooks_router
 
@@ -76,39 +78,46 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS -- must come before CSRF middleware
-# allow_credentials=True required for cookie-based auth
-# Cannot use ["*"] with allow_credentials=True
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CSRF_REJECTED_DETAIL = "We could not verify this request. Refresh the page and try again."
 
-# CSRF -- double-submit cookie pattern
-# Only register when NOT in test mode; tests cannot perform the double-submit flow
-if not settings.testing:
-    from starlette_csrf import CSRFMiddleware
 
+class ReadableCSRFMiddleware(CSRFMiddleware):
+    """starlette_csrf with its rejection as JSON, so frontend apiErrorMessage (src/lib/api.ts) can show the detail."""
+
+    def _get_error_response(self, request: Request) -> Response:
+        return JSONResponse({"detail": CSRF_REJECTED_DETAIL}, status_code=403)
+
+
+def install_middleware(app: FastAPI, *, csrf: bool, rate_limit: bool) -> None:
+    """Add CSRF, rate limiting, CORS and structured logging, each wrapping the one before.
+
+    Starlette runs the last-added middleware outermost (starlette/applications.py,
+    add_middleware inserts at index 0), so CSRF 403s and middleware-level 429s carry
+    CORS headers. tests/middleware/test_cors_order.py checks the order and the CSRF case.
+    """
+    if csrf:
+        app.add_middleware(
+            ReadableCSRFMiddleware,
+            secret=settings.csrf_secret,
+            sensitive_cookies={"access_token", "refresh_token"},
+            cookie_name="csrftoken_v2",
+            cookie_samesite="lax",
+            cookie_secure=settings.cookie_secure,
+            cookie_domain=settings.csrf_cookie_domain or None,
+        )
+    if rate_limit:
+        setup_rate_limiting(app)
     app.add_middleware(
-        CSRFMiddleware,
-        secret=settings.csrf_secret,
-        sensitive_cookies={"access_token", "refresh_token"},
-        cookie_name="csrftoken_v2",
-        cookie_samesite="lax",
-        cookie_secure=settings.cookie_secure,
-        cookie_domain=settings.csrf_cookie_domain or None,
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
+    app.add_middleware(StructuredLoggingMiddleware)
 
-# Rate limiting — after CORS, before routers
-if settings.rate_limit_enabled:
-    from middleware.rate_limit import setup_rate_limiting
-    setup_rate_limiting(app)
 
-# Structured logging — added last so it wraps all other middleware (outermost in Starlette).
-app.add_middleware(StructuredLoggingMiddleware)
+install_middleware(app, csrf=not settings.testing, rate_limit=settings.rate_limit_enabled)
 
 # Routers
 app.include_router(auth_router)

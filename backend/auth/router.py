@@ -14,6 +14,12 @@ from pydantic import BaseModel, EmailStr
 from auth.dependencies import get_current_user
 from auth.jwks import jwks_verifier
 from supabase import create_client
+from supabase_auth.errors import (
+    AuthError,
+    AuthInvalidJwtError,
+    AuthSessionMissingError,
+    UserDoesntExist,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +29,16 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 def _get_supabase():
     """Create a Supabase client for auth operations."""
     return create_client(settings.supabase_url, settings.supabase_anon_key)
+
+
+RESET_LINK_INVALID = "This reset link is no longer valid. Request a new one."
+
+
+def _password_refused_message(exc: Exception) -> str | None:
+    """Supabase's own sentence when its password rules refuse the new password."""
+    if isinstance(exc, AuthError) and exc.code in ("weak_password", "same_password"):
+        return exc.message
+    return None
 
 
 class SignUpRequest(BaseModel):
@@ -106,7 +122,17 @@ async def signup(request: Request, body: SignUpRequest, response: Response):
         error_msg = str(exc)
         if "already registered" in error_msg.lower() or "already been registered" in error_msg.lower():
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
-        raise HTTPException(status_code=400, detail=f"Signup failed: {error_msg}")
+        refused = _password_refused_message(exc)
+        if refused:
+            raise HTTPException(status_code=400, detail=refused)
+        logger.warning(
+            "Signup failed: %s code=%s %s",
+            type(exc).__name__, getattr(exc, "code", None), getattr(exc, "message", ""),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="We could not create your account. Try again in a moment.",
+        )
 
     # Record ToS acceptance against public.users. A database trigger creates
     # the row from auth.users; on rare races we may arrive before the trigger,
@@ -307,15 +333,29 @@ async def update_password(
     The global CSRF middleware applies on top of the rate limit.
     """
     if access_token is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        raise HTTPException(status_code=401, detail=RESET_LINK_INVALID)
     try:
         supabase = _get_supabase()
         supabase.auth.set_session(access_token, "")
         supabase.auth.update_user({"password": body.password})
-        _clear_auth_cookies(response)
-        return {"message": "Password updated. Please sign in with your new password."}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Password update failed: {str(exc)}")
+        refused = _password_refused_message(exc)
+        if refused:
+            raise HTTPException(status_code=400, detail=refused)
+        if isinstance(exc, (AuthSessionMissingError, AuthInvalidJwtError, UserDoesntExist)) or (
+            isinstance(exc, AuthError) and getattr(exc, "status", None) in (401, 403)
+        ):
+            raise HTTPException(status_code=401, detail=RESET_LINK_INVALID)
+        logger.warning(
+            "Password update failed: %s code=%s %s",
+            type(exc).__name__, getattr(exc, "code", None), getattr(exc, "message", ""),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="We could not update your password. Try again, or request a new reset link.",
+        )
+    _clear_auth_cookies(response)
+    return {"message": "Password updated. Please sign in with your new password."}
 
 
 @router.get("/me")

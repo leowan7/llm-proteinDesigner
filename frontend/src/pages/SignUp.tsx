@@ -16,7 +16,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, apiErrorMessage } from "@/lib/api";
 import { TOS_VERSION } from "@/lib/legal";
 
 const signUpSchema = z
@@ -79,10 +79,10 @@ export function SignUp() {
             "The Terms of Service have been updated. Refresh and try again."
           );
         } else {
-          setApiError("Unable to connect. Check your connection and try again.");
+          setApiError(apiErrorMessage(error));
         }
       } else {
-        setApiError("Unable to connect. Check your connection and try again.");
+        setApiError(apiErrorMessage(error));
       }
     }
   }
