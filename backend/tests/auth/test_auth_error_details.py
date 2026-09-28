@@ -111,8 +111,14 @@ async def _signup(error: Exception):
         )
 
 
-async def test_signup_weak_password_returns_supabase_reason():
-    refusal = AuthWeakPasswordError("Password should be at least 10 characters.", 422, ["length"])
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        AuthWeakPasswordError("Password should be at least 10 characters.", 422, ["length"]),
+        AuthApiError('Email address "new@example.com" is invalid', 400, "email_address_invalid"),
+    ],
+)
+async def test_signup_refused_by_supabase_returns_its_reason(refusal):
     response = await _signup(refusal)
 
     assert response.status_code == 400

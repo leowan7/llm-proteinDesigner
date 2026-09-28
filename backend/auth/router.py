@@ -34,9 +34,11 @@ def _get_supabase():
 RESET_LINK_INVALID = "This reset link is no longer valid. Request a new one."
 
 
-def _password_refused_message(exc: Exception) -> str | None:
-    """Supabase's own sentence when its password rules refuse the new password."""
-    if isinstance(exc, AuthError) and exc.code in ("weak_password", "same_password"):
+def _refusal_message(exc: Exception) -> str | None:
+    """Supabase's own sentence when it refuses input the customer can correct: the password or the email address."""
+    if isinstance(exc, AuthError) and exc.code in (
+        "weak_password", "same_password", "email_address_invalid"
+    ):
         return exc.message
     return None
 
@@ -122,7 +124,7 @@ async def signup(request: Request, body: SignUpRequest, response: Response):
         error_msg = str(exc)
         if "already registered" in error_msg.lower() or "already been registered" in error_msg.lower():
             raise HTTPException(status_code=409, detail="An account with this email already exists.")
-        refused = _password_refused_message(exc)
+        refused = _refusal_message(exc)
         if refused:
             raise HTTPException(status_code=400, detail=refused)
         logger.warning(
@@ -339,7 +341,7 @@ async def update_password(
         supabase.auth.set_session(access_token, "")
         supabase.auth.update_user({"password": body.password})
     except Exception as exc:
-        refused = _password_refused_message(exc)
+        refused = _refusal_message(exc)
         if refused:
             raise HTTPException(status_code=400, detail=refused)
         if isinstance(exc, (AuthSessionMissingError, AuthInvalidJwtError, UserDoesntExist)) or (
