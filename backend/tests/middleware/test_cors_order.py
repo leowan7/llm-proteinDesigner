@@ -9,7 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from httpx import ASGITransport, AsyncClient
 from main import CSRF_REJECTED_DETAIL, ReadableCSRFMiddleware, install_middleware
 from middleware.logging import StructuredLoggingMiddleware
+from slowapi import Limiter
 from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 
 def _app_with_production_middleware() -> FastAPI:
@@ -46,3 +48,18 @@ async def test_csrf_rejection_is_readable_only_by_allowed_origins():
     assert from_allowed.headers["access-control-allow-origin"] == allowed
     assert from_other.status_code == 403
     assert "access-control-allow-origin" not in from_other.headers
+
+
+async def test_middleware_rate_limit_rejection_is_readable_by_allowed_origin():
+    allowed = settings.cors_origins[0]
+    app = _app_with_production_middleware()
+    app.state.limiter = Limiter(
+        key_func=get_remote_address, default_limits=["1/minute"], storage_uri="memory://"
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/probe", headers={"Origin": allowed})
+        limited = await client.post("/probe", headers={"Origin": allowed})
+
+    assert first.status_code == 200
+    assert limited.status_code == 429
+    assert limited.headers["access-control-allow-origin"] == allowed

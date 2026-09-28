@@ -93,7 +93,7 @@ def install_middleware(app: FastAPI, *, csrf: bool, rate_limit: bool) -> None:
 
     Starlette runs the last-added middleware outermost (starlette/applications.py,
     add_middleware inserts at index 0), so CSRF 403s and middleware-level 429s carry
-    CORS headers. tests/middleware/test_cors_order.py checks the order and the CSRF case.
+    CORS headers. tests/middleware/test_cors_order.py checks the order and both cases.
     """
     if csrf:
         app.add_middleware(
