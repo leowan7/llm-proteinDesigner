@@ -52,3 +52,72 @@ describe("ResetPasswordConfirm errors", () => {
     expect(await screen.findByText(/unable to connect/i)).toBeInTheDocument();
   });
 });
+
+describe("ResetPasswordConfirm flow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.location.hash = "#access_token=a&refresh_token=b&type=recovery";
+  });
+
+  it("replaces the form with a success state once the password is saved", async () => {
+    vi.mocked(api)
+      .mockResolvedValueOnce({ message: "Token exchanged" })
+      .mockResolvedValueOnce({ message: "Password updated." });
+    render(
+      <MemoryRouter>
+        <ResetPasswordConfirm />
+      </MemoryRouter>,
+    );
+    fireEvent.change(await screen.findByLabelText(/^new password$/i), {
+      target: { value: "Passw0rd!12" },
+    });
+    fireEvent.change(screen.getByLabelText(/^confirm password$/i), {
+      target: { value: "Passw0rd!12" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /set new password/i }));
+
+    expect(await screen.findByRole("heading", { name: "Password updated" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /go to sign in/i })).toHaveAttribute("href", "/login");
+    expect(screen.queryByRole("button", { name: /set new password/i })).not.toBeInTheDocument();
+  });
+
+  it("marks both password inputs as new-password", async () => {
+    vi.mocked(api).mockResolvedValueOnce({ message: "Token exchanged" });
+    render(
+      <MemoryRouter>
+        <ResetPasswordConfirm />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByLabelText(/^new password$/i)).toHaveAttribute("autocomplete", "new-password");
+    expect(screen.getByLabelText(/^confirm password$/i)).toHaveAttribute("autocomplete", "new-password");
+  });
+
+  it("shows why the token exchange failed", async () => {
+    vi.mocked(api).mockRejectedValueOnce(
+      new ApiError(401, "Recovery token has expired; request a new reset link."),
+    );
+    render(
+      <MemoryRouter>
+        <ResetPasswordConfirm />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("Recovery token has expired; request a new reset link."),
+    ).toBeInTheDocument();
+  });
+
+  it("says an otp_expired link has expired without calling the API", async () => {
+    window.location.hash =
+      "#error=access_denied&error_code=otp_expired&error_description=Email+link+is+invalid+or+has+expired";
+    render(
+      <MemoryRouter>
+        <ResetPasswordConfirm />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/expired or was already used/i)).toBeInTheDocument();
+    expect(api).not.toHaveBeenCalled();
+  });
+});

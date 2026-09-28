@@ -1,7 +1,8 @@
-"""Customer-facing error details from /auth/update-password and /auth/signup.
+"""Customer-facing error details from /auth/update-password, /auth/signup and /auth/login.
 
 The Supabase client is stubbed by patching ``auth.router._get_supabase``.
 """
+import logging
 import os
 
 os.environ.setdefault("TESTING", "true")
@@ -16,6 +17,7 @@ from main import app
 from middleware.rate_limit import limiter as _limiter
 from supabase_auth.errors import (
     AuthApiError,
+    AuthRetryableError,
     AuthSessionMissingError,
     AuthWeakPasswordError,
 )
@@ -130,3 +132,45 @@ async def test_signup_unexpected_error_hides_internals():
 
     assert response.status_code == 400
     assert "supabase" not in response.json()["detail"].lower()
+
+
+LOGIN_EMAIL = "someone@example.com"
+LOGIN_PASSWORD = "Wr0ng-password!"
+SIGN_IN_FAILED = "We could not sign you in right now. Try again in a moment."
+
+
+async def _login(supabase: MagicMock):
+    with patch("auth.router._get_supabase", return_value=supabase):
+        return await _post("/auth/login", {"email": LOGIN_EMAIL, "password": LOGIN_PASSWORD})
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail"),
+    [
+        (AuthApiError("Invalid login credentials", 400, "invalid_credentials"), 401, "Incorrect email or password."),
+        (AuthApiError("Email not confirmed", 400, "email_not_confirmed"), 403, "Verify your email before signing in."),
+        (AuthApiError("Email rate limit exceeded", 429, "over_email_send_rate_limit"), 400, SIGN_IN_FAILED),
+        (AuthRetryableError("Server disconnected", 0), 400, SIGN_IN_FAILED),
+        (RuntimeError(f"unexpected reply for {LOGIN_EMAIL}"), 400, SIGN_IN_FAILED),
+    ],
+)
+async def test_login_refusal_names_its_cause_and_logs_no_credentials(error, status, detail, caplog):
+    supabase = MagicMock()
+    supabase.auth.sign_in_with_password.side_effect = error
+    with caplog.at_level(logging.WARNING, logger="auth.router"):
+        response = await _login(supabase)
+
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    assert f"{type(error).__name__} code={getattr(error, 'code', None)}" in caplog.text
+    assert LOGIN_EMAIL not in caplog.text
+    assert LOGIN_PASSWORD not in caplog.text
+
+
+async def test_login_without_a_session_is_logged():
+    supabase = MagicMock()
+    supabase.auth.sign_in_with_password.return_value = MagicMock(session=None)
+    with patch("auth.router.logger") as logger:
+        response = await _login(supabase)
+
+    assert response.status_code == 401
+    logger.warning.assert_called_once_with("Login refused: no session returned")

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 
 import { AuthLayout } from "@/components/auth/AuthLayout";
@@ -28,6 +28,8 @@ type LoginFormValues = z.infer<typeof loginSchema>;
 
 export function Login() {
   const navigate = useNavigate();
+  const { state } = useLocation();
+  const notice = typeof state?.notice === "string" ? state.notice : null;
   const [apiError, setApiError] = useState<string | null>(null);
   const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
 
@@ -48,21 +50,16 @@ export function Login() {
       const result = await api<{ user_id: string }>("/auth/login", {
         method: "POST",
         body: { email: values.email, password: values.password },
+        skipRefreshRetry: true,
       });
       setSentryUser(result.user_id, values.email);
       navigate("/chat");
     } catch (error) {
-      if (error instanceof ApiError) {
-        if (error.status === 401) {
-          setApiError("Incorrect email or password.");
-        } else if (error.status === 403 && /verify your email/i.test(error.detail)) {
-          setUnverifiedEmail(values.email);
-          setApiError(
-            "Verify your email before signing in. Check your inbox or resend the link below."
-          );
-        } else {
-          setApiError(apiErrorMessage(error));
-        }
+      if (error instanceof ApiError && error.status === 403 && /verify your email/i.test(error.detail)) {
+        setUnverifiedEmail(values.email);
+        setApiError(
+          "Verify your email before signing in. Check your inbox or resend the link below."
+        );
       } else {
         setApiError(apiErrorMessage(error));
       }
@@ -93,6 +90,12 @@ export function Login() {
     <AuthLayout title="Sign in" subtitle="Welcome back." footer={footer}>
       <Form {...form}>
         <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+          {notice && (
+            <p role="status" className="text-sm text-green-400">
+              {notice}
+            </p>
+          )}
+
           <FormField
             control={form.control}
             name="email"
@@ -102,6 +105,7 @@ export function Login() {
                 <FormControl>
                   <Input
                     type="email"
+                    autoComplete="email"
                     placeholder="you@example.com"
                     className="placeholder:text-muted-foreground/40"
                     {...field}
@@ -121,6 +125,7 @@ export function Login() {
                 <FormControl>
                   <Input
                     type="password"
+                    autoComplete="current-password"
                     placeholder="At least 8 characters"
                     className="placeholder:text-muted-foreground/40"
                     {...field}

@@ -33,12 +33,17 @@ import CookiesPage from "./pages/legal/Cookies";
  * After email confirmation: #access_token=...&type=signup → /email-confirmed
  * After password reset:    #access_token=...&type=recovery → /reset-password/confirm (keeps hash)
  * On error:                #error=access_denied → /login
+ *
+ * Does nothing on /reset-password/confirm, which reads the hash itself. Before
+ * this guard the recovery branch navigated to the page it was already on, which
+ * re-ran this effect with a new location, over and over (App.test.tsx).
  */
 function HashRedirectHandler() {
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
+    if (location.pathname === "/reset-password/confirm") return;
     const hash = window.location.hash.substring(1);
     if (!hash) return;
 

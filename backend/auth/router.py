@@ -208,6 +208,7 @@ async def login(request: Request, body: LoginRequest, response: Response):
             {"email": body.email, "password": body.password}
         )
         if result.session is None:
+            logger.warning("Login refused: no session returned")
             raise HTTPException(
                 status_code=401,
                 detail="Verify your email before signing in.",
@@ -217,15 +218,22 @@ async def login(request: Request, body: LoginRequest, response: Response):
     except HTTPException:
         raise
     except Exception as exc:
-        error_msg = str(exc)
-        if "invalid" in error_msg.lower() or "credentials" in error_msg.lower():
+        code = getattr(exc, "code", None)
+        logger.warning(
+            "Login refused: %s code=%s status=%s",
+            type(exc).__name__, code, getattr(exc, "status", None),
+        )
+        if code == "invalid_credentials":
             raise HTTPException(status_code=401, detail="Incorrect email or password.")
-        if "not confirmed" in error_msg.lower() or "email" in error_msg.lower():
+        if code == "email_not_confirmed":
             raise HTTPException(
                 status_code=403,
                 detail="Verify your email before signing in.",
             )
-        raise HTTPException(status_code=401, detail="Incorrect email or password.")
+        raise HTTPException(
+            status_code=400,
+            detail="We could not sign you in right now. Try again in a moment.",
+        )
 
 
 @router.post("/logout")

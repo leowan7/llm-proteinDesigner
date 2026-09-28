@@ -86,13 +86,3 @@ async def test_reset_password_does_not_reveal_email(client):
     )
     assert response.status_code == 200
     assert "reset link" in response.json()["message"].lower()
-
-
-@pytest.mark.anyio
-async def test_login_invalid_credentials(client):
-    """Login with wrong password returns 401."""
-    response = await client.post(
-        "/auth/login",
-        json={"email": TEST_USER_EMAIL, "password": "wrongpassword"},
-    )
-    assert response.status_code == 401
