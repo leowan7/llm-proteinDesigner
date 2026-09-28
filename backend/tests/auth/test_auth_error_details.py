@@ -14,7 +14,11 @@ from config import settings
 from httpx import ASGITransport, AsyncClient
 from main import app
 from middleware.rate_limit import limiter as _limiter
-from supabase_auth.errors import AuthApiError, AuthSessionMissingError, AuthWeakPasswordError
+from supabase_auth.errors import (
+    AuthApiError,
+    AuthSessionMissingError,
+    AuthWeakPasswordError,
+)
 
 _limiter.enabled = False
 

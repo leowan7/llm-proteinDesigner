@@ -10,16 +10,16 @@ from db.connection import get_db_pool
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from middleware.rate_limit import limiter
 from pydantic import BaseModel, EmailStr
-
-from auth.dependencies import get_current_user
-from auth.jwks import jwks_verifier
-from supabase import create_client
 from supabase_auth.errors import (
     AuthError,
     AuthInvalidJwtError,
     AuthSessionMissingError,
     UserDoesntExist,
 )
+
+from auth.dependencies import get_current_user
+from auth.jwks import jwks_verifier
+from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
