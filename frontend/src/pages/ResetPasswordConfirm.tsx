@@ -83,7 +83,7 @@ export function ResetPasswordConfirm() {
       await api("/auth/update-password", {
         method: "POST",
         body: { password: values.password },
-        // exchange-token sets only access_token (backend/auth/router.py:310), so a
+        // exchange-token sets only access_token (backend/auth/router.py:311), so a
         // refresh would use any older refresh_token cookie, possibly another account's.
         skipRefreshRetry: true,
       });
