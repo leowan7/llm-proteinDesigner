@@ -10,7 +10,7 @@ vi.mock("./features", () => ({
   useOrganizationsEnabled: () => featureFlag.orgs,
 }));
 
-import { ApiError, api } from "./api";
+import { ApiError, api, apiErrorMessage } from "./api";
 
 // ---------------------------------------------------------------------------
 // ApiError class
@@ -28,6 +28,18 @@ describe("ApiError", () => {
   it("is an instance of Error", () => {
     const error = new ApiError(500, "Server error");
     expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe("apiErrorMessage", () => {
+  it.each([
+    [new ApiError(400, "Password should be at least 10 characters."), "Password should be at least 10 characters."],
+    [new ApiError(429, "Rate limit exceeded: 5 per 1 minute"), "Too many attempts. Wait a minute and try again."],
+    [new ApiError(422, [{ msg: "field required" }] as unknown as string), "Something went wrong. Try again in a moment."],
+    [new ApiError(500, "Internal Server Error"), "Something went wrong. Try again in a moment."],
+    [new TypeError("Failed to fetch"), "Unable to connect. Check your connection and try again."],
+  ])("%s -> %s", (error, message) => {
+    expect(apiErrorMessage(error)).toBe(message);
   });
 });
 

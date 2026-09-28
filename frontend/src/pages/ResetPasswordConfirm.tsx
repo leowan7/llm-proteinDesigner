@@ -16,7 +16,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { api, ApiError } from "@/lib/api";
+import { api, apiErrorMessage } from "@/lib/api";
 
 const resetPasswordConfirmSchema = z
   .object({
@@ -83,14 +83,13 @@ export function ResetPasswordConfirm() {
       await api("/auth/update-password", {
         method: "POST",
         body: { password: values.password },
+        // exchange-token sets only access_token (backend/auth/router.py:311), so a
+        // refresh would use any older refresh_token cookie, possibly another account's.
+        skipRefreshRetry: true,
       });
       navigate("/login");
     } catch (error) {
-      if (error instanceof ApiError) {
-        setApiError("Unable to connect. Check your connection and try again.");
-      } else {
-        setApiError("Unable to connect. Check your connection and try again.");
-      }
+      setApiError(apiErrorMessage(error));
     }
   }
 

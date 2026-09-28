@@ -17,7 +17,7 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, apiErrorMessage } from "@/lib/api";
 
 const loginSchema = z.object({
   email: z.string().email("Enter a valid email address."),
@@ -55,16 +55,16 @@ export function Login() {
       if (error instanceof ApiError) {
         if (error.status === 401) {
           setApiError("Incorrect email or password.");
-        } else if (error.status === 403) {
+        } else if (error.status === 403 && /verify your email/i.test(error.detail)) {
           setUnverifiedEmail(values.email);
           setApiError(
             "Verify your email before signing in. Check your inbox or resend the link below."
           );
         } else {
-          setApiError("Unable to connect. Check your connection and try again.");
+          setApiError(apiErrorMessage(error));
         }
       } else {
-        setApiError("Unable to connect. Check your connection and try again.");
+        setApiError(apiErrorMessage(error));
       }
     }
   }

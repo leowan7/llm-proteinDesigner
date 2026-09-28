@@ -93,6 +93,19 @@ export class ApiError extends Error {
   }
 }
 
+/** Customer-facing text for an error thrown by api(). Per the Fetch Standard, fetch() rejects with TypeError on a network error. */
+export function apiErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 429) return "Too many attempts. Wait a minute and try again.";
+    if (error.status >= 400 && error.status < 500 && typeof error.detail === "string") {
+      return error.detail;
+    }
+  } else if (error instanceof TypeError) {
+    return "Unable to connect. Check your connection and try again.";
+  }
+  return "Something went wrong. Try again in a moment.";
+}
+
 /**
  * Silently attempts to refresh the access token via the /auth/refresh endpoint.
  * Returns true if the refresh succeeded, false otherwise.
