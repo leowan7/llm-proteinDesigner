@@ -30,8 +30,9 @@ test.describe("Authentication", () => {
     await page.click('button[type="submit"]');
     // Should stay on login page and show error
     await expect(page).toHaveURL(/login/);
-    // Login.tsx renders errors as <p class="text-destructive"> (no role="alert")
-    await expect(page.locator(".text-destructive").first()).toBeVisible({ timeout: 5000 });
+    // The backend sends this text only for GoTrue's invalid_credentials code
+    // (backend/auth/router.py:226-227).
+    await expect(page.getByText("Incorrect email or password.")).toBeVisible({ timeout: 5000 });
   });
 
   test("unauthenticated user is redirected to login", async ({ page }) => {
