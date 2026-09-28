@@ -24,7 +24,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 10: Legal & Compliance** - ToS, privacy policy, GDPR/CCPA, data retention, cookie consent, biopharma procurement readiness
  (completed 2026-04-23)
 - [x] **Phase 11: Deployment** - Vercel, Railway, Supabase Cloud, Upstash, R2, custom domain, SSL (completed 2026-06-04)
-- [ ] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer)
+- [x] **Phase 12: Teams & Organizations** - Multi-user accounts, team billing, shared job history, role-based access (admin/scientist/viewer) (implementation complete 2026-06-04; production cutover gated by docs/runbook-phase-12-rollout.md)
 - [ ] **Phase 13: Public API** - REST API with API keys for programmatic job submission, status polling, result download
 
 ## Phase Details
@@ -239,7 +239,7 @@ Plans:
 ### Phase 12: Teams & Organizations
 **Goal**: Biopharma teams can use the platform under a shared organization with centralized billing and role-based access. This is how you sell to companies, not individuals.
 **Depends on**: Phase 11 (post-launch feature)
-**Requirements**: (new)
+**Requirements**: ORG-01, ORG-02, ORG-03, ORG-04, ORG-05, ORG-06, ORG-07, ORG-08
 **Success Criteria** (what must be TRUE):
   1. User can create an organization and invite team members by email
   2. Organization roles: owner (billing + admin), scientist (run jobs, view all org jobs), viewer (read-only)
@@ -247,7 +247,14 @@ Plans:
   4. Organization-level billing: one Stripe subscription, one invoice, usage aggregated across all members
   5. Owner can remove members and transfer ownership
   6. User can belong to multiple organizations and switch between them
-**Plans**: TBD
+**Plans**: 6 plans (6/6 complete — deployment gated by docs/runbook-phase-12-rollout.md)
+Plans:
+- [x] 12-01-PLAN.md — Wave 0 foundation: SQL migration, SECURITY DEFINER PL/pgSQL helpers, last-owner trigger, jobs RLS rewrite, personal-org backfill + Wave 0 test scaffolds (completed 2026-06-04)
+- [x] 12-02-PLAN.md — Wave 1 backend orgs module: organizations/router + service + models + notifications + get_active_org + require_role + feature flag + 8 unit-test files (completed 2026-06-04)
+- [x] 12-03-PLAN.md — Wave 2 backend cutover: jobs/billing/webhooks/user routers org-scoped; stripe_client reads organizations.stripe_customer_id; signup auto-creates personal org; jobs.created_by_user_id + 5 cutover tests (completed 2026-06-04)
+- [x] 12-04-PLAN.md — Wave 2 Stripe metadata stamping (parallel): one-shot script pushing organization_id + kendrew_org_name onto migrated Stripe customers; dry-run + test-mode + verify script + 11 unit tests (completed 2026-06-04)
+- [x] 12-05-PLAN.md — Wave 2 frontend (parallel): OrganizationContext, OrganizationSwitcher, MembersTab, InvitationsTab, OrgSettingsTab, CreateOrganization + AcceptInvitation pages, X-Org-Id header injection, owner-gated billing, launched-by column + 4 Vitest specs (completed 2026-06-04)
+- [x] 12-06-PLAN.md — Wave 3 verification + cleanup: 12-test serialized Playwright E2E spec (11 after the flag-off landing replaced a step that could only ever skip), drop-column migration (not in the flag-off landing PR; gated by runbook step 8), invitation-token contract bug-fix (POST returns token; owner-only field on list), REQUIREMENTS.md ORG-01..ORG-08 marked Validated, rollout runbook with 9 ordered steps (8 after the flag-off landing folded the frontend flag flip into step 5) + rollback table (completed 2026-06-04)
 
 ### Phase 13: Public API
 **Goal**: Computational biologists can submit jobs, check status, and download results programmatically — enabling integration into automated pipelines and LIMS systems.
@@ -301,7 +308,7 @@ real GPU output and cannot be mocked.
 
 | Phase | Description | Plans | Status | Depends on |
 |-------|-------------|-------|--------|------------|
-| 12. Teams & Organizations | Multi-user, org billing, RBAC | 0/TBD | Not started | Phase 11 |
+| 12. Teams & Organizations | Multi-user, org billing, RBAC | 5/6 | In Progress | Phase 11 |
 | 13. Public API | REST API, API keys, Python SDK | 0/TBD | Not started | Phase 11 |
 
 **Completed:**

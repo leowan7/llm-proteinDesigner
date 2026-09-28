@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: Ready to execute
-stopped_at: Phase 11 context gathered
-last_updated: "2026-04-24T15:37:09.409Z"
+status: Phase 12 verified — ready to plan Phase 13
+stopped_at: Phase 12 verified (passed 33/33 must_haves; production cutover gated by docs/runbook-phase-12-rollout.md)
+last_updated: "2026-06-04T12:30:00.000Z"
 progress:
   total_phases: 13
-  completed_phases: 8
-  total_plans: 55
-  completed_plans: 43
-  percent: 78
+  completed_phases: 11
+  total_plans: 61
+  completed_plans: 61
+  percent: 100
 ---
 
 # Project State
@@ -20,20 +20,23 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-18)
 
 **Core value:** A scientist should be able to go from "I want to design a binder for IL-6 receptor" to downloadable, scored PDB structures without writing a single config file.
-**Current focus:** Phase 10 — legal-and-compliance
+**Current focus:** Phase 13 — public API (next milestone work)
 
 ## Current Position
 
-Phase: 11
-Plan: Not started
+Phase: 12 — COMPLETE and VERIFIED (implementation; deployment gated by `docs/runbook-phase-12-rollout.md`)
+Plan: 12-06 (final plan of Phase 12) closed 2026-06-04. All 6 Phase 12 plans complete; ORG-01..ORG-08 marked Validated in REQUIREMENTS.md; Phase 12 entry in ROADMAP.md updated to 6/6 complete.
+Verification: passed 33/33 must_haves after 3 gap-fix follow-up commits (`ee1ff77` deletion_cron + admin/router, `1b7daa0` /health flag, `cf082e7` user/export GDPR path). See `12-VERIFICATION.md` (commit `f7b70bd`).
+
+Next position: Phase 13 (Public API) — first plan TBD.
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 21
-- Average duration: 15 min
-- Total execution time: 0.25 hours
+- Total plans completed: 22
+- Average duration: 14 min
+- Total execution time: 0.33 hours
 
 **By Phase:**
 
@@ -62,6 +65,12 @@ Plan: Not started
 | Phase 03-job-execution-frontend-and-billing P04 | 4min | 2 tasks | 11 files |
 | Phase 04-pipeline-validation P01 | 4min | 2 tasks | 13 files |
 | Phase 06-ui-improvements P04 | 387 | 2 tasks | 9 files |
+| Phase 12-teams-and-organizations P01 | 5min | 2 tasks | 6 files |
+| Phase 12-teams-and-organizations P02 | 13min | 2 tasks | 16 files |
+| Phase 12-teams-and-organizations P03 | 19min | 2 tasks | 20 files |
+| Phase 12-teams-and-organizations P04 | 6min | 2 tasks | 4 files |
+| Phase 12-teams-and-organizations P05 | 24min | 2 tasks | 21 files |
+| Phase 12-teams-and-organizations P06 | 11min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -111,6 +120,35 @@ Recent decisions affecting current work:
 - [Phase 04-pipeline-validation]: RunPod executionTimeout policy sent per-job via optional policy field on GPUJobSubmission dataclass
 - [Phase 06-ui-improvements]: ChatInput injectedValue prop pattern for prompt injection rather than lifting full text state
 - [Phase 06-ui-improvements]: GreetingCard onPromptClick threaded through MessageList to avoid breaking MessageList props contract
+- [Phase 12-teams-and-organizations]: RLS helpers use LANGUAGE plpgsql (not sql) — Postgres inlines SQL functions during planning, dropping SECURITY DEFINER context and triggering infinite recursion in RLS predicates (research §14.1)
+- [Phase 12-teams-and-organizations]: Last-owner invariant is DB-enforced via BEFORE UPDATE OR DELETE trigger on organization_memberships — application-level checks race under concurrent DELETEs
+- [Phase 12-teams-and-organizations]: Stripe customer_id MOVED (not copied) from public.users to auto-created personal org so existing metered subscriptions stay attached to same Stripe customer
+- [Phase 12-teams-and-organizations]: users.stripe_customer_id is DEPRECATED via COMMENT but NOT dropped in plan 12-01; drop deferred to plan 12-06 (20260606000001) so backend rollback is safe within 24h verification window
+- [Phase 12-teams-and-organizations]: test_rls_jobs_org.py uses set_config('request.jwt.claims', value, true) instead of literal SET LOCAL — asyncpg cannot bind parameters into SET LOCAL with dotted GUC names; behavior equivalent
+- [Phase 12-teams-and-organizations]: get_active_org enforces X-Org-Id header presence (400 if missing); routes that legitimately have no active-org context (GET /organizations/mine, POST /organizations, POST /invitations/accept) use only get_current_user not get_active_org
+- [Phase 12-teams-and-organizations]: require_role(*allowed) is a factory returning an inner FastAPI dep that consumes get_active_org and returns just org_id on success; handlers want the id not the (org_id, role) tuple
+- [Phase 12-teams-and-organizations]: POST /organizations uses set_config('request.jwt.claims', $1, true) on the connection before fetchval'ing the SECURITY DEFINER RPC so auth.uid() resolves correctly from the service_role pool
+- [Phase 12-teams-and-organizations]: settings.organizations_enabled default-False; main.py conditional include_router so single-tenant routes stay unchanged until Plan 12-04 flips the flag
+- [Phase 12-teams-and-organizations]: Pydantic v2 form Annotated[str, StringConstraints(...)] over Field(strip_whitespace=True) — the Field-arg form is deprecated in Pydantic v2 and warns on every test
+- [Phase 12-teams-and-organizations]: Tests build isolated FastAPI sub-apps per test (FastAPI() + include_router + dependency_overrides) rather than mounting on main.app — avoids depending on global flag state at import time
+- [Phase 12-teams-and-organizations]: Webhook handler routes billing via JOIN through jobs.organization_id (not via users.stripe_customer_id) — service-role pool bypasses RLS in the unauth webhook context, and the JOIN gives the correct org-scoped customer for both personal and team orgs
+- [Phase 12-teams-and-organizations]: jobs/service.cancel_job_by_id is also a cutover surface (not in plan's enumerated files) — billing block rewritten via the same org JOIN pattern; cancel runs from both user and admin paths so neither can rely on is_member_of()
+- [Phase 12-teams-and-organizations]: /user/usage owner sees all org jobs, scientist sees only created_by_user_id=self, viewer 403 — no use case for read-only members to see org spend
+- [Phase 12-teams-and-organizations]: Full-design pilot eligibility flipped from user_id-scoped to organization_id-scoped — any org-completed pilot qualifies any org member, matches org-shared-jobs design
+- [Phase 12-teams-and-organizations]: Download endpoint reads user_id from the job row for the S3 prefix (immutable storage path) but gates access by org_id — separates audit trail from access control
+- [Phase 12-teams-and-organizations]: Single-tenant existing tests still pass under cutover via app.dependency_overrides[get_active_org] = (org_id, role) tuple — feature flag only governs main.py mount, but the routers themselves now unconditionally depend on get_active_org
+- [Phase 12-teams-and-organizations]: Stamp script idempotency check is keyed only on metadata.organization_id, not the full 4-key payload — kendrew_org_name and migrated_from_user_v1 can legitimately drift between runs (renames, re-runs on different dates); organization_id is the ground truth
+- [Phase 12-teams-and-organizations]: stamp_stripe_org_metadata.py never creates Stripe customers — only stamps metadata on existing ones; net-new team orgs lazily create their first customer via billing/stripe_client.get_or_create_customer on first billing interaction
+- [Phase 12-teams-and-organizations]: Stamp/verify scripts use single-line SQL strings (not Python implicit-concatenation) so acceptance-criteria substring greps match the literal SELECT phrase
+- [Phase 12-teams-and-organizations]: --test-mode is the live/test guard — uses a separately-named STRIPE_TEST_SECRET_KEY env var instead of STRIPE_SECRET_KEY so an operator cannot accidentally hit live Stripe by misreading the help text
+- [Phase 12-teams-and-organizations]: frontend useOrgContext() returns a safe empty fallback ({orgs:[], activeOrg:null, role:null}) when no <OrgProvider> is mounted — single-tenant + Vitest-scaffold compatible (no breaking changes to Plan 09 + Plan 10 specs that render pages without the full layout chain)
+- [Phase 12-teams-and-organizations]: X-Org-Id header opt-out is an explicit list (4 prefix matches + POST /organizations exact match) in api.ts, not an allowlist — minimises blast radius when new routes ship without touching api.ts
+- [Phase 12-teams-and-organizations]: OrganizationSwitcher is hidden whenever orgs.length <= 1 (covers both solo users + single-tenant deployments where the feature flag is off and /organizations/mine returns 404 → orgs=[])
+- [Phase 12-teams-and-organizations]: setActiveOrg writes localStorage BEFORE reload so post-reload OrgProvider.refresh() picks up the new value via resolveActiveOrgId(); AcceptInvitation page additionally pre-seeds localStorage and navigate("/jobs") as a fallback for the public route case where setActiveOrg's no-op fallback would otherwise leave the user staring at "Joined!"
+- [Phase 12-teams-and-organizations]: Playwright E2E for full teams flow (12-06) lives at frontend/e2e/organizations.spec.ts (NOT tests/e2e/) to match playwright.config.ts testDir; two BrowserContext instances simulate the two-user flow; per-test test.skip cascade gates execution on feature-flag presence + seed accounts so the spec is informational on flag-off CI and load-bearing on flag-on staging/prod
+- [Phase 12-teams-and-organizations]: Invitation copy-link contract resolved (12-06) — POST /organizations/{id}/invitations now returns the bearer token; GET list endpoint conditionally returns token only when caller_role == owner; frontend InvitationRow.token: string | null; InvitationsTab.handleCopyLink uses invite.token (was invite.id, which silently produced broken accept URLs)
+- [Phase 12-teams-and-organizations]: SUPERSEDED, see the entry below -- Drop-column migration (20260606000001) ships in the repo but is NOT applied by the merge — runbook step 9 gates the actual run on verify-script exit 0 + 24h clean prod monitoring; rollback past that point requires a forward migration + backfill from organizations.stripe_customer_id
+- [Phase 12-teams-and-organizations]: Superseded by the flag-off landing PR: the per-test test.skip cascade is gone -- organizations.spec.ts runs in its own chromium-orgs Playwright project (playwright.config.ts:42-43, testMatch) against a flag-on backend, is excluded from the default project (testIgnore, :34), skips nothing, and its step 0 fails the spec if that backend is missing or reports the flag off (organizations.spec.ts:154-165). The drop-column migration (20260606000001) is not in that PR at all, so runbook step 8, not 9, is now the one that merges it.
 
 ### Pending Todos
 
@@ -124,6 +162,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-24T14:34:14.125Z
-Stopped at: Phase 11 context gathered
-Resume file: .planning/phases/11-deployment/11-CONTEXT.md
+Last session: 2026-06-04T12:05:00.000Z
+Stopped at: Completed 12-06-PLAN.md (final plan of Phase 12 — Playwright E2E spec + drop-column migration + Phase 12 rollout runbook + REQUIREMENTS.md ORG-01..ORG-08 validation + ROADMAP.md Phase 12 6/6 complete + invitation-token contract bug-fix)
+Resume file: Phase 13 first plan (Public API) — to be planned next session
+Deployment status: Phase 12 implementation complete in repo; production cutover gated by docs/runbook-phase-12-rollout.md (8 ordered steps + 24h watch + decisive rollback gate, since the flag-off landing folded the frontend flag flip into step 5)

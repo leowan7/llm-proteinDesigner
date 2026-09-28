@@ -21,6 +21,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { PrivacyTab } from "@/components/legal/PrivacyTab";
+import { useOrgContext } from "@/components/org/OrganizationContext";
+import { MembersTab } from "@/components/org/MembersTab";
+import { InvitationsTab } from "@/components/org/InvitationsTab";
+import { OrgSettingsTab } from "@/components/org/OrgSettingsTab";
+import { fetchMembers } from "@/lib/organizations";
 import {
   getSettings,
   updateSettings,
@@ -145,14 +150,50 @@ function AccountTab({ initialSettings, onSaved }: AccountTabProps) {
 // ---------------------------------------------------------------------------
 
 function BillingTab() {
+  const { enabled: orgsEnabled, role, activeOrgId, activeOrg } = useOrgContext();
   const [payment, setPayment] = useState<PaymentMethod | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [portalError, setPortalError] = useState<string | null>(null);
   const [redirecting, setRedirecting] = useState(false);
+  const [ownerEmail, setOwnerEmail] = useState<string | null>(null);
+
+  // Plan 12-05: non-owners see an "ask your owner" message instead of the
+  // payment portal — backend /billing/* returns 403 to anyone except the
+  // active org's owner. We pre-empt the 403 in the UI for polish.
+  const nonOwnerGated =
+    orgsEnabled &&
+    role !== null &&
+    role !== "owner" &&
+    activeOrg !== null &&
+    !activeOrg.is_personal;
+
+  // Resolve owner email for the non-owner gate copy.
+  useEffect(() => {
+    let cancelled = false;
+    if (!nonOwnerGated || !activeOrgId) return;
+    fetchMembers(activeOrgId)
+      .then((members) => {
+        if (cancelled) return;
+        const owner = members.find((m) => m.role === "owner");
+        if (owner) setOwnerEmail(owner.email);
+      })
+      .catch(() => {
+        // Silent failure — the gate copy still works without the email.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [nonOwnerGated, activeOrgId]);
 
   useEffect(() => {
     let cancelled = false;
+    if (nonOwnerGated) {
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
     setLoading(true);
     getPaymentMethod()
       .then((data) => {
@@ -165,7 +206,21 @@ function BillingTab() {
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [nonOwnerGated]);
+
+  if (nonOwnerGated) {
+    return (
+      <div className="pt-4 space-y-2">
+        <p className="text-sm text-foreground">
+          Billing is managed by your organization owner.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          Ask <strong>{ownerEmail ?? "your organization owner"}</strong> for
+          access if you need to update the payment method or view invoices.
+        </p>
+      </div>
+    );
+  }
 
   async function handleManagePayment() {
     setPortalError(null);
@@ -462,18 +517,89 @@ function NotificationsTab({ initialPrefs, onSaved }: NotificationsTabProps) {
 // ---------------------------------------------------------------------------
 
 /** Tabs surfaced by SettingsPage. "privacy" scaffold added in Plan 10-06;
- *  Plan 10-04 fills in the Privacy tab content (Export + Delete buttons). */
+ *  Plan 10-04 fills in the Privacy tab content (Export + Delete buttons).
+ *  "organization" added in Plan 12-05 — shown only when the organizations
+ *  feature flag is on and activeOrg is a non-personal org. */
 const VALID_SETTINGS_TABS = [
   "account",
   "billing",
   "privacy",
   "usage",
   "notifications",
+  "organization",
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Organization Tab (Plan 12-05)
+// ---------------------------------------------------------------------------
+
+type OrgSubTab = "members" | "invitations" | "settings";
+
+function OrganizationTab() {
+  const { activeOrg, activeOrgId } = useOrgContext();
+  const [subTab, setSubTab] = useState<OrgSubTab>("members");
+
+  if (!activeOrg || !activeOrgId) {
+    return (
+      <p className="text-sm text-muted-foreground pt-4">
+        Loading organization...
+      </p>
+    );
+  }
+
+  if (activeOrg.is_personal) {
+    return (
+      <p className="text-sm text-muted-foreground pt-4">
+        You're in your personal workspace. Create an organization to invite
+        teammates and share jobs.
+      </p>
+    );
+  }
+
+  return (
+    <div className="pt-4">
+      <div className="flex items-center gap-1 mb-4 border-b border-border/50">
+        {(
+          [
+            ["members", "Members"],
+            ["invitations", "Invitations"],
+            ["settings", "Settings"],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setSubTab(value)}
+            className={[
+              "px-3 py-1.5 text-sm border-b-2 transition-colors",
+              subTab === value
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            ].join(" ")}
+            aria-current={subTab === value ? "page" : undefined}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === "members" && <MembersTab orgId={activeOrgId} />}
+      {subTab === "invitations" && <InvitationsTab orgId={activeOrgId} />}
+      {subTab === "settings" && <OrgSettingsTab orgId={activeOrgId} />}
+    </div>
+  );
+}
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<UserSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const {
+    enabled: orgsEnabled,
+    activeOrg,
+    loading: orgsLoading,
+  } = useOrgContext();
+  const showOrgTab =
+    orgsEnabled && activeOrg !== null && !activeOrg.is_personal;
 
   // Plan 10-06: deep-link support for /settings?tab=<name>. Hardens the
   // cancel-deletion email link from Plan 10-04 Task 3 — invalid values fall
@@ -485,6 +611,32 @@ export function SettingsPage() {
   )
     ? (tabParam as string)
     : "account";
+
+  // The selection is controlled, not defaultValue. Base UI's uncontrolled Tabs
+  // rewrites a selection that matches no tab to the first tab, in a layout
+  // effect on the render that finds it missing
+  // (node_modules/@base-ui/react/esm/tabs/root/TabsRoot.js:139-156; the escape
+  // hatch there covers a *disabled* tab, not an absent one). The organization
+  // trigger only mounts once OrgProvider has resolved a non-personal active org
+  // from GET /organizations/mine, which is never true on the first render of a
+  // page load -- so ?tab=organization was being dropped every time, including
+  // on the full reloads setActiveOrg() and a completed ownership transfer
+  // perform. Controlling the value short-circuits that reset
+  // (TabsRoot.js:139-141) so the selection survives the tab arriving late.
+  // Verified by SettingsPage.test.tsx "deep-link ?tab=organization".
+  const [tab, setTab] = useState(initialTab);
+
+  // Controlling the value also opts out of Base UI's fallback, so the page owes
+  // that itself: once org state has settled, a selection with no reachable tab
+  // has to land somewhere. Gated on !orgsLoading, which is false on both flag
+  // paths (OrganizationContext.tsx:148-150 clears it in a finally), so a
+  // flag-off deploy still shows Account for a hand-typed ?tab=organization
+  // exactly as it does today.
+  useEffect(() => {
+    if (tab === "organization" && !showOrgTab && !orgsLoading) {
+      setTab("account");
+    }
+  }, [tab, showOrgTab, orgsLoading]);
 
   const loadSettings = useCallback(async () => {
     try {
@@ -509,13 +661,16 @@ export function SettingsPage() {
         </p>
       )}
 
-      <Tabs defaultValue={initialTab}>
+      <Tabs value={tab} onValueChange={(next) => setTab(next as string)}>
         <TabsList>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="privacy">Privacy</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
+          {showOrgTab && (
+            <TabsTrigger value="organization">Organization</TabsTrigger>
+          )}
         </TabsList>
 
         <TabsContent value="account">
@@ -549,6 +704,12 @@ export function SettingsPage() {
             onSaved={loadSettings}
           />
         </TabsContent>
+
+        {showOrgTab && (
+          <TabsContent value="organization">
+            <OrganizationTab />
+          </TabsContent>
+        )}
       </Tabs>
     </div>
   );

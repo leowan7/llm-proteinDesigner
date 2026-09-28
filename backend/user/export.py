@@ -103,13 +103,26 @@ async def _build_and_deliver_export_inner(user_id: str, user_email: str) -> None
         # Export profile covers every Phase-10-added user column so the user can
         # verify ToS acceptance, retention, deletion state, export history, and
         # (for their own records) their Stripe customer id. No billing PII beyond that.
+        #
+        # Phase 12 cutover: stripe_customer_id moved from public.users to
+        # public.organizations. Resolved through public.user_stripe_customer so
+        # the export profile still surfaces the same field under the same key,
+        # preserving GDPR export shape across the schema change.
+        #
+        # This is a scalar per user. Joining public.organization_memberships
+        # here instead returns one row per membership -- and fetchrow takes the
+        # first of them in whatever order the planner produces, so a user who
+        # belongs to a team org could have been exported with a null
+        # stripe_customer_id they do in fact have.
         profile = await conn.fetchrow(
-            """SELECT id, email, display_name, created_at,
-                      tos_version, tos_accepted_at,
-                      data_retention_days, deletion_requested_at,
-                      last_export_requested_at,
-                      notification_preferences, stripe_customer_id
-               FROM public.users WHERE id = $1""",
+            """SELECT u.id, u.email, u.display_name, u.created_at,
+                      u.tos_version, u.tos_accepted_at,
+                      u.data_retention_days, u.deletion_requested_at,
+                      u.last_export_requested_at,
+                      u.notification_preferences,
+                      public.user_stripe_customer(u.id) AS stripe_customer_id
+               FROM public.users u
+               WHERE u.id = $1""",
             user_id,
         )
         sessions = await conn.fetch(

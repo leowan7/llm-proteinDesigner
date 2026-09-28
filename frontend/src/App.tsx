@@ -11,6 +11,8 @@ import { JobPage } from "./pages/JobPage";
 import { HomePage } from "./pages/HomePage";
 import { JobHistoryPage } from "./pages/JobHistoryPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { CreateOrganization } from "./pages/CreateOrganization";
+import { AcceptInvitation } from "./pages/AcceptInvitation";
 import { AuthenticatedLayout } from "./components/layout/AuthenticatedLayout";
 import { AdminLayout } from "./components/layout/AdminLayout";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
@@ -84,6 +86,15 @@ function App() {
             {/* Public marketing home */}
             <Route path="/" element={<HomePage />} />
 
+            {/*
+              Invitation accept — public route. Handles all four §6.2 branches
+              internally: signed-in matching email, signed-in mismatched,
+              signed-out new-user, signed-out existing account. /invitations/*
+              + /auth/me are on the api.ts X-Org-Id opt-out list so the page
+              works without an OrgProvider.
+            */}
+            <Route path="/invitations/accept" element={<AcceptInvitation />} />
+
             {/* Admin routes — separate layout, admin auth guard */}
             <Route element={<AdminLayout />}>
               <Route path="/admin" element={<AdminUsersPage />} />
@@ -94,13 +105,16 @@ function App() {
               <Route path="/admin/audit" element={<AdminAuditPage />} />
             </Route>
 
-            {/* Authenticated routes — wrapped in sidebar layout */}
+            {/* Authenticated routes — wrapped in sidebar layout (which mounts
+                OrgProvider so the X-Org-Id header resolves against the user's
+                active org). */}
             <Route element={<AuthenticatedLayout />}>
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/chat/:sessionId" element={<ChatPage />} />
               <Route path="/jobs" element={<JobHistoryPage />} />
               <Route path="/jobs/:id" element={<JobPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/organizations/new" element={<CreateOrganization />} />
             </Route>
           </Routes>
         </div>

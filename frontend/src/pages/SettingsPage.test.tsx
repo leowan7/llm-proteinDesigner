@@ -1,7 +1,45 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { SettingsPage } from "./SettingsPage";
+import {
+  useOrgContext,
+  type OrgContextValue,
+} from "@/components/org/OrganizationContext";
+
+// Default to the same value the real module exports when no provider is
+// mounted, so every describe above the organization one behaves as before.
+const ORG_CTX_OFF: OrgContextValue = {
+  enabled: false,
+  orgs: [],
+  activeOrgId: null,
+  activeOrg: null,
+  role: null,
+  loading: false,
+  refresh: async () => {},
+  setActiveOrg: () => {},
+};
+
+vi.mock("@/components/org/OrganizationContext", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/components/org/OrganizationContext")
+  >("@/components/org/OrganizationContext");
+  return { ...actual, useOrgContext: vi.fn(() => ORG_CTX_OFF) };
+});
+
+// The organization tab mounts MembersTab, which fetches on mount.
+vi.mock("@/lib/organizations", () => ({
+  fetchMembers: vi.fn().mockResolvedValue([]),
+  inviteMember: vi.fn(),
+  removeMember: vi.fn(),
+  transferOwnership: vi.fn(),
+  updateMemberRole: vi.fn(),
+  fetchPendingInvitations: vi.fn().mockResolvedValue([]),
+  revokeInvitation: vi.fn(),
+  renameOrg: vi.fn(),
+  deleteOrg: vi.fn(),
+}));
 
 // Mock the user API module so no real HTTP calls are made.
 // Plan 10-04 adds requestDataExport / getExportStatus / requestAccountDeletion /
@@ -355,5 +393,103 @@ describe("SettingsPage Privacy tab — Data retention (Plan 10-05)", () => {
     const saveButtons = screen.getAllByRole("button", { name: /^save$/i });
     const retentionSave = saveButtons[saveButtons.length - 1];
     expect(retentionSave).toBeDisabled();
+  });
+});
+
+
+/**
+ * Deep link to the organization tab, whose trigger mounts late.
+ *
+ * OrgProvider resolves the active org from GET /organizations/mine, so on a
+ * page load there is at least one render with activeOrg=null and no
+ * organization trigger in the list. Base UI's uncontrolled Tabs treats a
+ * selection with no matching tab as stale and rewrites it to the first tab in
+ * a layout effect, which silently discarded ?tab=organization -- including on
+ * the full reloads setActiveOrg() and the ownership transfer perform. The fake
+ * below flips org state one render after mount, which is the whole condition.
+ */
+describe("SettingsPage deep-link ?tab=organization", () => {
+  const TEAM_ORG = {
+    id: "org-team-1",
+    name: "Acme Lab",
+    role: "owner" as const,
+    is_personal: false,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // A real hook, so the second render is a genuine React update rather than
+    // a value that was already settled on the first paint.
+    vi.mocked(useOrgContext).mockImplementation(() => {
+      const [resolved, setResolved] = useState(false);
+      useEffect(() => {
+        setResolved(true);
+      }, []);
+      return resolved
+        ? {
+            ...ORG_CTX_OFF,
+            enabled: true,
+            orgs: [TEAM_ORG],
+            activeOrgId: TEAM_ORG.id,
+            activeOrg: TEAM_ORG,
+            role: "owner",
+          }
+        : { ...ORG_CTX_OFF, enabled: true, loading: true };
+    });
+  });
+
+  afterEach(() => {
+    vi.mocked(useOrgContext).mockImplementation(() => ORG_CTX_OFF);
+  });
+
+  it("selects the Organization tab once it mounts", async () => {
+    render(
+      <MemoryRouter initialEntries={["/settings?tab=organization"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    const trigger = await screen.findByRole("tab", { name: /^organization$/i });
+    await waitFor(() =>
+      expect(trigger).toHaveAttribute("aria-selected", "true"),
+    );
+    // The panel's own content, not just the trigger state: MembersTab is what
+    // the E2E transfer flow needs on screen after its reload.
+    expect(await screen.findByText("Members (0)")).toBeInTheDocument();
+  });
+
+  it("falls back to Account when the active org is personal", async () => {
+    vi.mocked(useOrgContext).mockImplementation(() => {
+      const personal = { ...TEAM_ORG, name: "Personal", is_personal: true };
+      const [resolved, setResolved] = useState(false);
+      useEffect(() => {
+        setResolved(true);
+      }, []);
+      return resolved
+        ? {
+            ...ORG_CTX_OFF,
+            enabled: true,
+            orgs: [personal],
+            activeOrgId: personal.id,
+            activeOrg: personal,
+            role: "owner",
+          }
+        : { ...ORG_CTX_OFF, enabled: true, loading: true };
+    });
+    render(
+      <MemoryRouter initialEntries={["/settings?tab=organization"]}>
+        <SettingsPage />
+      </MemoryRouter>,
+    );
+    // Controlling the value opts out of Base UI's own fallback, so the page
+    // owes this one itself: a tab nobody can reach must not stay selected.
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: /^account$/i })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
+    expect(
+      screen.queryByRole("tab", { name: /^organization$/i }),
+    ).not.toBeInTheDocument();
   });
 });

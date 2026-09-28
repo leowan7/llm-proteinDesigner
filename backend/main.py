@@ -121,6 +121,20 @@ app.include_router(sessions_router)
 app.include_router(user_router)
 app.include_router(admin_router)
 
+# Phase 12: Teams & Organizations -- gated by feature flag during rollout.
+# Mount only when settings.organizations_enabled is True so existing
+# single-tenant routes continue to behave identically until Plans 12-03 +
+# 12-04 land (RESEARCH §12.1 step 5).
+if settings.organizations_enabled:
+    from organizations.router import (
+        invitations_router,
+    )
+    from organizations.router import (
+        router as orgs_router,
+    )
+    app.include_router(orgs_router)
+    app.include_router(invitations_router)
+
 # Phase 11 SC 8: synthetic-error endpoint for Sentry verification (dev only).
 if settings.debug or settings.testing:
     from debug_routes import router as debug_router
@@ -159,4 +173,8 @@ async def health():
 
     healthy = all(v == "ok" for v in checks.values())
     status_code = 200 if healthy else 503
-    return JSONResponse(content=checks, status_code=status_code)
+    # Phase 12 rollout runbook probes /health | jq .organizations_enabled to
+    # confirm the multi-tenancy feature flag state in each environment.
+    # Surface the flag as a non-health-gating top-level field.
+    payload = {**checks, "organizations_enabled": settings.organizations_enabled}
+    return JSONResponse(content=payload, status_code=status_code)

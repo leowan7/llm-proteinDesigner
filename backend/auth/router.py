@@ -145,6 +145,27 @@ async def signup(request: Request, body: SignUpRequest, response: Response):
             exc,
         )
 
+    # Phase 12: Auto-create a personal organization for the new user so all
+    # downstream paths (jobs, billing, RLS) always have an org context.
+    # personal_org_for is find-or-create (see
+    # supabase/migrations/20260605000003_personal_org_tolerance.sql), so a
+    # retried signup cannot leave this user with two personal orgs -- which
+    # would let billing read stripe_customer_id off the wrong one.
+    # Best-effort here and not fatal to signup: the same function backs the
+    # no-X-Org-Id fallback in auth/org_dependencies.py and the BEFORE INSERT
+    # trigger on public.jobs, so a failure here is recovered on first use.
+    try:
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval(
+                "SELECT public.personal_org_for($1::uuid)", new_user_id
+            )
+    except Exception as exc:  # pragma: no cover - personal-org bootstrap is best-effort
+        logger.warning(
+            "Signup succeeded for user %s but personal org bootstrap failed: %s",
+            new_user_id, exc,
+        )
+
     # With email verification enabled, no session is returned until email is confirmed
     return {"message": "Account created. Check your email for a verification link."}
 

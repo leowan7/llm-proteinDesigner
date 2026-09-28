@@ -36,17 +36,20 @@ def _make_ctx(conn):
     return ctx
 
 
-def _make_pool_for_cancel(job_row, cust_row=None):
+def _make_pool_for_cancel(job_row, stripe_customer_id=None):
     """Build the pool mock expected by cancel_job_by_id.
 
     cancel_job_by_id makes these pool.acquire() calls in order:
       1. fetchrow  — fetch job row (running check)
       2. execute   — UPDATE jobs SET gpu_cost_usd
-      3. fetchrow  — fetch stripe_customer_id (if gpu_seconds > 0)
+      3. fetchval  — resolve stripe_customer_id (if gpu_seconds > 0)
+
+    The third call is a scalar fetchval, not a fetchrow: the service resolves
+    the customer through public.org_stripe_customer(), which returns one value.
 
     Args:
         job_row: Dict or None for the first fetchrow (job lookup).
-        cust_row: Dict or None for the third fetchrow (customer lookup).
+        stripe_customer_id: Customer string or None for the third call.
 
     Returns:
         AsyncMock pool with side_effect covering all three acquire() calls.
@@ -60,9 +63,9 @@ def _make_pool_for_cancel(job_row, cust_row=None):
     update_conn = AsyncMock()
     update_conn.execute = AsyncMock(return_value="UPDATE 1")
 
-    # Connection 3: stripe customer lookup
+    # Connection 3: stripe customer resolution (scalar)
     cust_conn = AsyncMock()
-    cust_conn.fetchrow = AsyncMock(return_value=cust_row)
+    cust_conn.fetchval = AsyncMock(return_value=stripe_customer_id)
     cust_conn.execute = AsyncMock()
 
     pool = AsyncMock()
@@ -83,8 +86,7 @@ async def test_cancel_job_by_id_success():
         "started_at": started_at,
         "user_id": "uid-1",
     }
-    cust_row = {"stripe_customer_id": "cus_test"}
-    mock_pool = _make_pool_for_cancel(job_row, cust_row)
+    mock_pool = _make_pool_for_cancel(job_row, "cus_test")
 
     mock_provider = AsyncMock()
     mock_provider.cancel_job = AsyncMock()
@@ -124,8 +126,7 @@ async def test_cancel_records_billing():
         "started_at": started_at,
         "user_id": "uid-2",
     }
-    cust_row = {"stripe_customer_id": "cus_billing"}
-    mock_pool = _make_pool_for_cancel(job_row, cust_row)
+    mock_pool = _make_pool_for_cancel(job_row, "cus_billing")
 
     mock_provider = AsyncMock()
     mock_provider.cancel_job = AsyncMock()

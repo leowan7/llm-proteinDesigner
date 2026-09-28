@@ -295,15 +295,27 @@ async def runpod_webhook(request: Request):
             logger.exception("Failed to terminate GPU job %s", stored_pod_id)
             sentry_sdk.capture_exception(exc)
 
-    # Record billing for completed or cancelled jobs (user pays for consumed GPU time).
+    # Record billing for completed or cancelled jobs (org pays for consumed GPU time).
+    #
+    # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
+    # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
+    # we resolve the billing customer from the job's org:
+    #   jobs.id -> jobs.organization_id -> org_stripe_customer()
+    # which reads organizations.stripe_customer_id and falls back to the
+    # deprecated public.users.stripe_customer_id for a personal org whose
+    # customer was created by an old replica mid-deploy. Without that fallback
+    # the GPU time of an existing payer would silently go unmetered, because
+    # a NULL resolution skips billing rather than raising.
     if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
         async with pool.acquire() as conn:
-            cust_row = await conn.fetchrow(
-                "SELECT stripe_customer_id FROM public.users WHERE id = $1",
-                user_id,
+            stripe_customer_id = await conn.fetchval(
+                """SELECT public.org_stripe_customer(j.organization_id)
+                   FROM public.jobs j
+                   WHERE j.id = $1""",
+                job_id,
             )
-        if cust_row and cust_row["stripe_customer_id"]:
-            record_gpu_usage(cust_row["stripe_customer_id"], job_id, gpu_seconds)
+        if stripe_customer_id:
+            record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
 
     # Send email notification.
     async with pool.acquire() as conn:

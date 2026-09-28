@@ -5,16 +5,26 @@ The stripe library uses synchronous HTTP internally; wrap calls in a thread
 executor if you need to call from async context without blocking the event loop.
 
 Key design decisions:
-- stripe_customer_id is cached in the users table to avoid redundant Stripe API calls.
+- Phase 12: stripe_customer_id lives on public.organizations (not public.users).
+  Personal orgs (one per user, auto-created at signup) hold the customer ID that
+  used to live on public.users.stripe_customer_id. Reads go through
+  public.org_stripe_customer(), which still falls back to the deprecated
+  public.users.stripe_customer_id -- an old replica mid-rolling-deploy writes
+  only that column, and creating a second Stripe customer for a user who has
+  just added a card is a billing failure, not a cosmetic one.
 - record_gpu_usage uses Stripe Billing Meters API (not legacy Usage Records).
   The 'value' field in the meter event payload MUST be a string, not an int.
 - check_payment_method inspects invoice_settings.default_payment_method,
   which is set when a customer completes a Checkout setup session.
 """
 
+import logging
+
 import asyncpg
 import stripe
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 # Configure stripe at module import using the settings value.
 # Tests that mock stripe functions should patch after import.
@@ -23,44 +33,106 @@ stripe.api_key = settings.stripe_secret_key
 
 async def get_or_create_customer(
     email: str,
-    user_id: str,
+    org_id: str,
+    org_name: str,
     pool: asyncpg.Pool,
 ) -> str:
-    """Return the Stripe customer ID for a user, creating one if needed.
+    """Return the Stripe customer ID for an organization, creating one if needed.
 
-    Checks the users table for an existing stripe_customer_id. If absent,
-    creates a new Stripe Customer and stores the ID in the database.
+    Phase 12: Stripe customer lives at the org level. Personal orgs (one per
+    user, auto-created at signup) hold the customer ID that used to live on
+    public.users.stripe_customer_id.
+
+    Resolution goes through public.org_stripe_customer (migration
+    20260605000003 section 4), which reads organizations.stripe_customer_id and
+    falls back to the personal org creator's deprecated
+    public.users.stripe_customer_id. An existing payer therefore never gets a
+    second Stripe customer, even in the window where an old replica wrote only
+    the legacy column.
+
+    A NEW customer for a personal org is written to both columns, because the
+    fallback only covers "old replica wrote first". Pre-Phase-12 code reads and
+    writes public.users.stripe_customer_id only, so without the second write it
+    would not see this customer, would create its own, and would attach the
+    card to the customer nobody meters (railway.toml numReplicas = 2 keeps both
+    versions serving for the length of a deploy). The legacy write is a
+    compare-and-set, so the ordering "old replica wrote first" is safe: its id
+    wins and is adopted onto the org, putting the card and the meter on one
+    customer.
+
+    The REVERSE ordering is not closed here. If this function writes X and an
+    old replica -- which read NULL before that write -- then creates its own
+    customer Y and blind-writes it over the legacy column, the org meters X
+    while the card sits on Y. The losing write lives in already-deployed code,
+    and the card is attached inside Stripe rather than through this module, so
+    no change here can prevent it. It is left DETECTABLE instead: the two
+    columns disagree, which the runbook's 24-hour watch query looks for
+    (docs/runbook-phase-12-rollout.md step 7), and the repair is to point the
+    org at the customer holding the payment method. A first-write-wins guard on
+    the legacy column would be worse -- both columns would read X while the card
+    still sat on an unreferenced Y, removing the only signal. The window is one
+    Stripe customer-create inside one rolling deploy, for a user who had no
+    customer yet; the whole leg goes away with the column in the drop-column PR
+    (runbook step 8).
 
     Args:
-        email: User's email address (used when creating a new Stripe customer).
-        user_id: Application user UUID (stored as Stripe customer metadata).
-        pool: asyncpg connection pool for DB reads/writes.
+        email: Billing contact email (owner's email or org's billing_email).
+        org_id: Organization UUID.
+        org_name: Organization name (used as Stripe customer metadata).
+        pool: Database pool.
 
     Returns:
-        Stripe customer ID string (e.g. "cus_...").
+        Stripe customer ID (cus_...).
     """
-    # Check DB first to avoid redundant Stripe API calls
-    row = await pool.fetchrow(
-        "SELECT stripe_customer_id FROM public.users WHERE id = $1",
-        user_id,
+    existing = await pool.fetchval(
+        "SELECT public.org_stripe_customer($1::uuid)", org_id,
     )
-    if row and row["stripe_customer_id"]:
-        return row["stripe_customer_id"]
-
-    # Create a new Stripe customer
+    if existing:
+        return existing
     customer = stripe.Customer.create(
         email=email,
-        metadata={"user_id": user_id},
+        metadata={
+            "organization_id": org_id,
+            "kendrew_org_name": org_name,
+        },
     )
-    customer_id: str = customer.id
-
-    # Persist to DB
     await pool.execute(
-        "UPDATE public.users SET stripe_customer_id = $1 WHERE id = $2",
-        customer_id,
-        user_id,
+        "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
+        customer.id, org_id,
     )
-    return customer_id
+    legacy = await pool.fetchval(
+        """WITH cas AS (
+               UPDATE public.users u
+                  SET stripe_customer_id = $1
+                 FROM public.organizations o
+                WHERE o.id = $2::uuid AND o.is_personal
+                  AND u.id = o.created_by
+                  AND u.stripe_customer_id IS NULL
+            RETURNING u.id)
+           SELECT u.stripe_customer_id
+             FROM public.users u
+             JOIN public.organizations o ON o.created_by = u.id
+            WHERE o.id = $2::uuid AND o.is_personal
+              AND NOT EXISTS (SELECT 1 FROM cas)""",
+        customer.id, org_id,
+    )
+    if legacy and legacy != customer.id:
+        # An old replica created its own customer between our read and our
+        # write, and won the compare-and-set. Adopt its id rather than keep
+        # ours: pre-Phase-12 code can only ever see the legacy column, so a
+        # card added by that replica goes to ITS customer, and the org has to
+        # meter the same one. Our freshly created customer is left unused in
+        # Stripe with no payment method and no usage.
+        await pool.execute(
+            "UPDATE public.organizations SET stripe_customer_id = $1, updated_at = now() WHERE id = $2",
+            legacy, org_id,
+        )
+        logger.warning(
+            "get_or_create_customer: adopted legacy customer %s for org %s, "
+            "discarding freshly created %s", legacy, org_id, customer.id,
+        )
+        return legacy
+    return customer.id
 
 
 def create_setup_session(stripe_customer_id: str, return_url: str) -> str:

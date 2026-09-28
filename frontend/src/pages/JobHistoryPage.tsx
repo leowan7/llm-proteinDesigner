@@ -31,6 +31,19 @@ import {
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { listJobs, downloadAllDesignsUrl } from "@/lib/jobs";
 import type { JobListItem } from "@/lib/jobs";
+import { api } from "@/lib/api";
+import { useOrgContext } from "@/components/org/OrganizationContext";
+
+/** Truncates an email at maxLength characters, suffixed with ellipsis. */
+function truncate(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return value.slice(0, maxLength - 1) + "…";
+}
+
+interface MeResponse {
+  user_id: string;
+  email: string;
+}
 
 const PAGE_SIZE = 25;
 
@@ -59,6 +72,32 @@ export function JobHistoryPage() {
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const { enabled: orgsEnabled, activeOrg } = useOrgContext();
+
+  // Show the "Launched by" column for org-scoped views (any non-personal
+  // active org) so the user can tell teammates' jobs apart from their own.
+  // Off with the feature flag off: the table renders exactly today's columns.
+  const showLaunchedBy =
+    orgsEnabled && activeOrg !== null && !activeOrg.is_personal;
+
+  // Resolve current user so "Launched by" can render "You" on own rows. Only
+  // fetched when the column is actually shown, so a flag-off page load issues
+  // no request the single-tenant app did not already make.
+  useEffect(() => {
+    let cancelled = false;
+    if (!showLaunchedBy) return () => {};
+    api<MeResponse>("/auth/me")
+      .then((u) => {
+        if (!cancelled) setCurrentUserId(u.user_id);
+      })
+      .catch(() => {
+        // Non-fatal — the column falls back to the raw email.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showLaunchedBy]);
 
   // Status filter: null means "All"
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
@@ -188,6 +227,9 @@ export function JobHistoryPage() {
                     <TableHead scope="col">Tool</TableHead>
                     <TableHead scope="col">Status</TableHead>
                     <TableHead scope="col">Date</TableHead>
+                    {showLaunchedBy && (
+                      <TableHead scope="col">Launched by</TableHead>
+                    )}
                     <TableHead scope="col">Designs</TableHead>
                     <TableHead scope="col">Cost</TableHead>
                     <TableHead scope="col">Actions</TableHead>
@@ -216,6 +258,19 @@ export function JobHistoryPage() {
                       >
                         {relativeDate(job.created_at)}
                       </TableCell>
+                      {showLaunchedBy && (
+                        <TableCell
+                          className="text-muted-foreground"
+                          title={job.created_by_email ?? undefined}
+                        >
+                          {currentUserId &&
+                          job.created_by_user_id === currentUserId
+                            ? "You"
+                            : job.created_by_email
+                              ? truncate(job.created_by_email, 28)
+                              : "—"}
+                        </TableCell>
+                      )}
                       <TableCell className="text-muted-foreground">
                         {job.candidate_count ?? "—"}
                       </TableCell>
