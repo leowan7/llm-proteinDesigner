@@ -157,7 +157,7 @@ async def _build_and_deliver_export_inner(user_id: str, user_email: str) -> None
                     "notes": (
                         "PDB input files and job outputs remain in object storage; "
                         "their S3 keys are listed here. If you need the files themselves, "
-                        "contact privacy@ranomics.com."
+                        "contact privacy@bindwave.com."
                     ),
                 },
                 indent=2,
