@@ -30,11 +30,16 @@ const resetPasswordConfirmSchema = z
 
 type ResetPasswordConfirmFormValues = z.infer<typeof resetPasswordConfirmSchema>;
 
-type ExchangeState = "loading" | "ready" | "error";
+type ExchangeState = "loading" | "ready" | "error" | "done";
+
+const PASSWORD_UPDATED_NOTICE = "Your password has been updated. Sign in with your new password.";
 
 export function ResetPasswordConfirm() {
   const navigate = useNavigate();
   const [exchangeState, setExchangeState] = useState<ExchangeState>("loading");
+  const [linkError, setLinkError] = useState(
+    "Invalid or expired reset link. Please request a new one.",
+  );
   const [apiError, setApiError] = useState<string | null>(null);
 
   const form = useForm<ResetPasswordConfirmFormValues>({
@@ -56,6 +61,9 @@ export function ResetPasswordConfirm() {
       const accessToken = params.get("access_token");
       const refreshToken = params.get("refresh_token");
 
+      if (params.get("error_code") === "otp_expired") {
+        setLinkError("This reset link has expired or was already used. Request a new one.");
+      }
       if (!accessToken || !refreshToken) {
         setExchangeState("error");
         return;
@@ -69,7 +77,8 @@ export function ResetPasswordConfirm() {
         // Clear hash from URL so tokens are not visible in browser history
         window.history.replaceState(null, "", window.location.pathname);
         setExchangeState("ready");
-      } catch {
+      } catch (error) {
+        setLinkError(apiErrorMessage(error));
         setExchangeState("error");
       }
     }
@@ -87,10 +96,12 @@ export function ResetPasswordConfirm() {
         // refresh would use any older refresh_token cookie, possibly another account's.
         skipRefreshRetry: true,
       });
-      navigate("/login");
     } catch (error) {
       setApiError(apiErrorMessage(error));
+      return;
     }
+    setExchangeState("done");
+    navigate("/login", { replace: true, state: { notice: PASSWORD_UPDATED_NOTICE } });
   }
 
   const footer = (
@@ -121,9 +132,7 @@ export function ResetPasswordConfirm() {
         footer={footer}
       >
         <div className="space-y-4">
-          <p className="text-sm font-medium text-destructive">
-            Invalid or expired reset link. Please request a new one.
-          </p>
+          <p className="text-sm font-medium text-destructive">{linkError}</p>
           <Link
             to="/reset-password"
             className="text-sm text-muted-foreground hover:text-foreground hover:underline"
@@ -131,6 +140,20 @@ export function ResetPasswordConfirm() {
             Request a new reset link
           </Link>
         </div>
+      </AuthLayout>
+    );
+  }
+
+  if (exchangeState === "done") {
+    return (
+      <AuthLayout title="Password updated" subtitle="Sign in with your new password.">
+        <Link
+          to="/login"
+          state={{ notice: PASSWORD_UPDATED_NOTICE }}
+          className="text-sm text-muted-foreground hover:text-foreground hover:underline"
+        >
+          Go to sign in
+        </Link>
       </AuthLayout>
     );
   }
@@ -152,6 +175,7 @@ export function ResetPasswordConfirm() {
                 <FormControl>
                   <Input
                     type="password"
+                    autoComplete="new-password"
                     placeholder="At least 8 characters"
                     className="placeholder:text-muted-foreground/40"
                     {...field}
@@ -171,6 +195,7 @@ export function ResetPasswordConfirm() {
                 <FormControl>
                   <Input
                     type="password"
+                    autoComplete="new-password"
                     placeholder="Re-enter your password"
                     className="placeholder:text-muted-foreground/40"
                     {...field}
