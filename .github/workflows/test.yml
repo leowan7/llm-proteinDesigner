@@ -86,6 +86,13 @@ jobs:
           CSRF_SECRET: "ci-csrf-secret"
           SUPABASE_INTEGRATION_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
 
+      # Same migrated database as the step above. Fails if any ordinary table
+      # in schema public has row-level security off.
+      - name: "Guard: row-level security on every public table"
+        run: python -m pytest tests/integration/test_rls_on_every_public_table.py -v
+        env:
+          SUPABASE_INTEGRATION_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v4
