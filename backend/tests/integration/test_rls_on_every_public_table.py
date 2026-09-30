@@ -1,4 +1,4 @@
-"""Fail if any ordinary table in schema public has row-level security off.
+"""Fail if any ordinary or partitioned table in schema public has row-level security off.
 
 Reads pg_class on the database ``supabase start`` applied every migration to.
 The URL defaults to that local stack, the same one .github/workflows/test.yml
@@ -24,7 +24,7 @@ async def test_every_public_table_has_row_level_security_on():
             """SELECT c.relname, c.relrowsecurity
                FROM pg_class c
                JOIN pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = 'public' AND c.relkind = 'r'
+               WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
                ORDER BY c.relname"""
         )
     finally:

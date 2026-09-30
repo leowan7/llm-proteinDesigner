@@ -3,7 +3,7 @@
 -- (20260420000002_job_sessions.sql) and retention_policy
 -- (20260424000003_retention_tracking.sql). No policies are added.
 -- backend/tests/integration/test_rls_on_every_public_table.py fails if any
--- ordinary table in schema public has it off.
+-- ordinary or partitioned table in schema public has it off.
 
 ALTER TABLE public.audit_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.job_sessions ENABLE ROW LEVEL SECURITY;
