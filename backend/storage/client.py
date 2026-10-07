@@ -221,3 +221,30 @@ def delete_job_objects(user_id: str, job_id: str) -> int:
         user_id, job_id, deleted,
     )
     return deleted
+
+
+def job_has_saved_designs(user_id: str, job_id: str) -> bool:
+    """True when the job's output prefix already holds at least one design PDB.
+
+    Read-only counterpart to :func:`delete_job_objects`: the same
+    ``list_objects_v2`` paginator, narrowed from that function's whole-job
+    ``users/{user_id}/jobs/{job_id}/`` prefix to the ``outputs/`` one the
+    container uploads designs to. The webhook uses it to settle a run that
+    died after streaming designs to Storage.
+
+    Only ``.pdb`` keys count. The upload endpoint flattens every container
+    upload into that one prefix (``backend/jobs/router.py::get_upload_urls``),
+    so a run's metrics CSVs land beside its designs; the target structure does
+    not -- that is written under ``inputs/`` (:func:`ensure_pdb_in_s3`).
+
+    Returns False on an empty or missing prefix. Whatever botocore raises
+    propagates: the caller decides what an unreadable bucket means.
+    """
+    client = get_s3_client()
+    prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=settings.s3_bucket_name, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            if obj["Key"].endswith(".pdb"):
+                return True
+    return False

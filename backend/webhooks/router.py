@@ -19,6 +19,7 @@ Payload structure (POSTed by run_pipeline.py in the container):
     error    dict  Error info if status is "FAILED"
 """
 
+import asyncio
 import datetime
 import hashlib
 import hmac
@@ -32,6 +33,7 @@ from db.connection import get_db_pool
 from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
+from storage.client import job_has_saved_designs
 from worker.tasks import publish_status, update_job_status
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,13 @@ _RUNPOD_STATUS_MAP: dict[str, str] = {
     "CANCELLED": "cancelled",
     "TIMED_OUT": "failed",
 }
+
+# Tools whose container uploads each design as it finishes, so a run that died
+# part way through can already have delivered designs. A failure of one of
+# these is billed when Storage holds at least one of them; see the billing
+# block below. Save-as-you-go lands one tool per PR, and a tool joins this
+# tuple with its own PR.
+_STREAMS_DESIGNS_MID_RUN: tuple[str, ...] = ("bindcraft",)
 
 
 def validate_webhook_signature(
@@ -295,7 +304,13 @@ async def runpod_webhook(request: Request):
             logger.exception("Failed to terminate GPU job %s", stored_pod_id)
             sentry_sdk.capture_exception(exc)
 
-    # Record billing for completed or cancelled jobs (org pays for consumed GPU time).
+    # Record billing for a run the org owes GPU time for.
+    #
+    # Finished and cancelled runs always qualify. A crashed or timed-out run of
+    # a mid-run streaming tool qualifies too, once Storage holds at least one of
+    # its designs -- Leo's call 2026-10-07: such a run is settled on GPU time
+    # used, the same as a finished run, and is not prorated. A run that saved
+    # nothing stays fully unbilled, as every failure was before this change.
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
@@ -306,7 +321,29 @@ async def runpod_webhook(request: Request):
     # customer was created by an old replica mid-deploy. Without that fallback
     # the GPU time of an existing payer would silently go unmetered, because
     # a NULL resolution skips billing rather than raising.
-    if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
+    should_bill = internal_status in ("complete", "cancelled")
+    if (
+        not should_bill
+        and gpu_seconds > 0
+        and internal_status == "failed"
+        and (row["tool"] or "") in _STREAMS_DESIGNS_MID_RUN
+    ):
+        try:
+            # Sync boto3 off the event loop, the house pattern at
+            # jobs/notifications.py:57. Every job termination runs this handler.
+            should_bill = await asyncio.to_thread(
+                job_has_saved_designs, str(user_id), job_id
+            )
+        except Exception as exc:
+            # An unreadable bucket must not become a charge. Leaving the run
+            # unbilled is what every failure did before this change.
+            logger.exception(
+                "Could not read saved designs for failed job %s; leaving it unbilled",
+                job_id,
+            )
+            sentry_sdk.capture_exception(exc)
+
+    if should_bill and gpu_seconds > 0:
         async with pool.acquire() as conn:
             stripe_customer_id = await conn.fetchval(
                 """SELECT public.org_stripe_customer(j.organization_id)

@@ -2,7 +2,10 @@
 
 Covers:
 - Completed job: DB status updated, billing recorded, pod terminated, email sent
-- Failed job: DB status failed, no billing, pod terminated, failure email sent
+- Failed job that saved nothing: DB status failed, no billing, pod terminated,
+  failure email sent
+- Failed job that already streamed designs to Storage: same failure handling,
+  but the GPU time is metered
 - Invalid payload (missing fields): acknowledged (webhook is permissive)
 - Unknown job_id: acknowledged with received=True (webhook is permissive)
 - Signature validation: 401 when HMAC signature is invalid
@@ -205,12 +208,18 @@ async def test_webhook_completed_job():
 # ---------------------------------------------------------------------------
 
 async def test_webhook_failed_job():
-    """POST /webhooks/runpod with FAILED status marks job failed and sends failure email.
+    """A failed run that saved no designs is not billed.
+
+    This is the zero-saved-designs side of the 2026-10-07 billing rule: a
+    crashed run of a mid-run streaming tool is billed only when Storage holds
+    at least one of its designs, so one that saved none stays free. The tool
+    here is in ``_STREAMS_DESIGNS_MID_RUN``, so the handler really does ask
+    Storage -- which the assertion on the patched lookup pins.
 
     Verifies:
     - Returns 200 with {"received": True}
     - update_job_status called with 'failed'
-    - Billing NOT recorded for failed job
+    - Storage consulted for the failed job, and billing NOT recorded
     - send_failure_email called
     """
     conn1 = AsyncMock()
@@ -245,6 +254,7 @@ async def test_webhook_failed_job():
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch("webhooks.router.job_has_saved_designs", return_value=False) as mock_saved,
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -261,12 +271,149 @@ async def test_webhook_failed_job():
     mock_update.assert_called_once()
     assert mock_update.call_args[0][1] == "failed"
 
-    # No billing for failed jobs (only complete and cancelled are billed)
+    # Storage was asked, with the launcher's user id and this job id, and said
+    # no designs (the prefix itself is pinned in tests/storage/)
+    mock_saved.assert_called_once_with("user-uuid", JOB_ID)
+
+    # So no billing: a failure is billed only when it saved something
     mock_billing.assert_not_called()
 
     # Failure email was sent
     mock_fail_email.assert_called_once()
     assert mock_fail_email.call_args[1]["to_email"] == "test@example.com"
+
+
+async def test_webhook_failed_job_with_saved_designs_is_billed():
+    """A failed run that already streamed designs is settled on GPU time used.
+
+    Leo's call 2026-10-07 for the BindCraft save-as-you-go path: a run that
+    saved at least one design and then crashed or timed out is billed the same
+    as a finished run, not prorated. The "not prorated" half is pinned by
+    comparing the metered figure against the gpu_seconds written to the job
+    row -- the same number a completed run meters.
+
+    Everything else about the failure is unchanged: the status is still
+    'failed' and the failure email, not the completion email, goes out.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock()
+
+    # Conn 4: SELECT org_stripe_customer -- only acquired when the run is billed
+    conn4 = AsyncMock()
+    conn4.fetchval = AsyncMock(return_value="cus_crashed")
+
+    # Conn 5: SELECT email from auth.users
+    conn5 = AsyncMock()
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_ok_email,
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+
+    mock_saved.assert_called_once_with("user-uuid", JOB_ID)
+
+    # Billed, to the customer the org resolver returned
+    mock_billing.assert_called_once()
+    customer, billed_job, billed_seconds = mock_billing.call_args[0]
+    assert customer == "cus_crashed"
+    assert billed_job == JOB_ID
+
+    # Not prorated: the metered seconds are the job row's own gpu_seconds
+    assert billed_seconds > 0
+    assert billed_seconds == mock_update.call_args[1]["gpu_seconds"]
+
+    # Still a failure in every other respect
+    assert mock_update.call_args[0][1] == "failed"
+    mock_fail_email.assert_called_once()
+    mock_ok_email.assert_not_called()
+
+
+async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():
+    """A tool outside _STREAMS_DESIGNS_MID_RUN keeps the old all-or-nothing rule.
+
+    Save-as-you-go lands one tool per PR, so the billing rule has to stay off
+    for every tool whose container still uploads only after the GPU subprocess
+    finishes. Pinning that Storage is not even consulted keeps the gate from
+    widening by accident: billing an rfdiffusion run that crashed after its
+    final upload loop is a call nobody has made.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "rfdiffusion",
+    })
+
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock()
+
+    conn4 = AsyncMock()
+    conn4.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock),
+        patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    mock_saved.assert_not_called()
+    mock_billing.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

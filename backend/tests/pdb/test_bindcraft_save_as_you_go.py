@@ -19,11 +19,15 @@ Three invariants, all load-bearing:
    design would list it twice regardless.
 3. An early-ended run still FAILS, and its designs are delivered by
    having been uploaded mid-run rather than by rewriting the outcome.
-   Reporting it as COMPLETED would move it from the unbilled bucket to
-   the billed one (``backend/webhooks/router.py:309``), so the status
-   stays what it was before this change. The sweep must also be stopped
-   before main()'s own upload loop starts, or the two sign one object
-   name at once.
+   What that costs the customer no longer rides on the status alone: the
+   webhook commit on this branch meters a failed run of a streaming tool
+   once Storage holds one of its designs
+   (``backend/webhooks/router.py``, ``storage/client.py``
+   ``::job_has_saved_designs``). Reporting the run as COMPLETED would
+   still send the completion email instead of the failure one, and would
+   bill the saved-nothing run that stays free. The sweep must also be
+   stopped before main()'s own upload loop starts, or the two sign one
+   object name at once.
 
 Its own file, like the sibling tool tests in this directory, so in-flight
 branches do not collide at one file's end on merge.
@@ -627,13 +631,16 @@ def test_an_early_ended_run_still_fails_but_its_designs_are_in_storage(
 ):
     """The streamed uploads must NOT be bought by flipping the run's status.
 
-    A run that dies early stays a failure, exactly as it did before this
-    change: ``backend/webhooks/router.py`` maps FAILED and TIMED_OUT to
-    ``"failed"`` (:42-47) and meters GPU time only for
-    ``("complete", "cancelled")`` (:309), so reporting such a run as
-    COMPLETED would start billing a crashed run that was previously free,
-    and would send the completion email (:327-328). The designs are delivered by
-    having been uploaded mid-run, not by rewriting the outcome.
+    A run that dies early stays a failure. ``backend/webhooks/router.py``
+    maps FAILED and TIMED_OUT to ``"failed"`` (``_RUNPOD_STATUS_MAP``), and
+    since the webhook commit on this branch it meters a failed run of a tool
+    in ``_STREAMS_DESIGNS_MID_RUN`` once Storage holds one of its designs --
+    so this run is settled on GPU time used whichever status it reports, and
+    flipping the status buys nothing. What flipping would still do is send the
+    completion email instead of the failure one, present a crashed run as a
+    success, and bill a run that saved nothing, which stays free. The designs
+    are delivered by having been uploaded mid-run, not by rewriting the
+    outcome.
     """
     rec = _Recorder()
     payload = _run_main(tmp_path, monkeypatch, rec, run_raises=raised)
