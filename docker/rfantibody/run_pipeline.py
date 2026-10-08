@@ -1513,9 +1513,14 @@ def main():
             send_heartbeat(webhook_url, job_id, "RF2 complete", num_designs, num_designs)
 
         # ----- Extract scores and PDBs -----
+        # run_command turns a nonzero exit into RuntimeError (:444) but lets
+        # subprocess.run's TimeoutExpired through (:432), so both are caught
+        # here. Catching only RuntimeError would send a qvscorefile timeout to
+        # the outer handler, which posts "Pipeline crashed: ..." and loses the
+        # RF2 failure text captured above.
         try:
             extract_scores(predictions_qv, scores_tsv)
-        except RuntimeError as exc:
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
             logger.error("Score extraction failed: %s", exc)
             post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": f"Score extraction failed: {exc}",
@@ -1531,7 +1536,26 @@ def main():
             return
 
         # Extract PDB files from predictions quiver
-        extracted_pdbs = extract_pdbs(predictions_qv, top_hits_dir)
+        #
+        # extract_pdbs builds its return value by globbing top_hits_dir (:821),
+        # but only once run_command has returned, so a failure there discarded
+        # every PDB already sitting in that directory. The glob is repeated here
+        # instead, so whatever qvextract left behind is uploaded. How much that
+        # is depends on the external tool and is not asserted here; a file it
+        # was mid-write when killed is uploaded as-is, and the run reports
+        # FAILED either way. Designs left without a PDB are skipped by the
+        # ranking loop below without leaving rank gaps. Pinned by
+        # test_an_rfantibody_qvextract_failure_still_uploads_the_pdbs_on_disk.
+        try:
+            extracted_pdbs = extract_pdbs(predictions_qv, top_hits_dir)
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            logger.error("PDB extraction failed: %s", exc)
+            extracted_pdbs = sorted(
+                str(p) for p in Path(top_hits_dir).glob("*.pdb")
+            )
+            early_failure = early_failure or {
+                "error": f"PDB extraction failed: {exc}",
+            }
         pdb_map = {Path(p).stem: p for p in extracted_pdbs}
 
         # ----- Label and rank -----
@@ -1733,8 +1757,11 @@ def main():
             # run's designs sit in Storage unserved. Serving them is not part
             # of this change.
             #
-            # "partial" is already set where early_failure is built, matching
-            # what this stage posts today.
+            # "partial" marks a failure that still produced designs. The RF2
+            # catch above sets it as it builds early_failure, which keeps an
+            # RF2 failure that saved nothing byte-identical to what this stage
+            # posts today; the qvextract catch leaves it out, so it is only
+            # claimed below when a design actually survived.
             #
             # The inline structures are left out because the backend reads a
             # webhook's output only when the run completed (the
@@ -1745,6 +1772,7 @@ def main():
             # test_an_rfantibody_timeout_still_fails_but_uploads_its_designs.
             result_payload = dict(early_failure)
             if candidates:
+                result_payload["partial"] = True
                 result_payload["candidate_count"] = len(candidates)
 
         if failed_uploads:

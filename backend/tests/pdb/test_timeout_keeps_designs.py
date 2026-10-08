@@ -6,12 +6,16 @@ RuntimeError reach its outer ``except Exception``. Designs already written
 to the container's output directory were then rmtree'd with the work dir,
 so a run that had produced usable designs delivered none.
 
-Three of the four tests here fake the GPU stage so that it writes designs
+Three of the five tests here fake the GPU stage so that it writes designs
 AND then dies, then assert both halves: the designs are uploaded, and the
 run still reports FAILED (post_webhook keys the status off ``error`` --
 boltzgen :807, pxdesign :513, rfantibody :561). The fourth drives the same
 boltzgen timeout with nothing on disk, and pins that it uploads nothing
-and posts the bare error.
+and posts the bare error. The fifth lets RF2 succeed and kills the PDB
+extraction instead -- another step on the new path that can lose designs
+already written. It is not the last one: the score-extraction handler
+posts and returns without uploading, because without the scores TSV there
+is nothing to rank.
 
 Faked: the GPU subprocess, the input sanitize/convert step, and the
 quiver tooling that only a real RF2 output satisfies. The
@@ -380,6 +384,95 @@ def test_an_rfantibody_timeout_still_fails_but_uploads_its_designs(
         "design_001.pdb", "design_002.pdb", "metrics.csv",
     ]
     assert payload["error"].startswith("RF2 validation failed:")
+    assert _TIMEOUT_TEXT in payload["error"]
+    assert payload["partial"] is True
+    assert payload["candidate_count"] == _N_DESIGNS
+    assert "candidates" not in payload
+def test_an_rfantibody_qvextract_failure_still_uploads_the_pdbs_on_disk(
+    tmp_path, monkeypatch,
+):
+    """qvextract dying after it wrote PDBs still delivers them.
+
+    RF2 succeeds here, so extraction is the only failure. extract_pdbs builds
+    its return value by globbing top_hits_dir (run_pipeline.py:821) but only
+    once the subprocess returns, so the production code re-globs that
+    directory on the failure path and uploads what qvextract finished.
+    """
+    rec = _Recorder()
+    names = [f"design_{i}" for i in range(_N_DESIGNS)]
+
+    def _fake_extract_scores(predictions_qv, scores_tsv):
+        """Stand-in for qvscorefile: columns from parse_scores_tsv."""
+        with open(scores_tsv, "w", newline="") as fh:
+            writer = csv.writer(fh, delimiter="\t")
+            writer.writerow(["tag", "interaction_pae", "pae", "pred_lddt"])
+            for i, name in enumerate(names):
+                writer.writerow([name, 8.0 + i, 9.0, 0.88])
+
+    def _fake_extract_pdbs(predictions_qv, out_dir):
+        """Stand-in for qvextract: write the PDBs, then time out."""
+        os.makedirs(out_dir, exist_ok=True)
+        for name in names:
+            with open(os.path.join(out_dir, f"{name}.pdb"), "w") as fh:
+                fh.write(f"ATOM  {name}\n")
+        raise subprocess.TimeoutExpired(["qvextract", predictions_qv], 120)
+
+    def _fake_normalize(src, dest, target_chain=None):
+        with open(src) as fh_in, open(dest, "w") as fh_out:
+            fh_out.write(fh_in.read())
+        return types.SimpleNamespace(
+            chains_kept=["A"], chains_dropped=[],
+            residues_kept_per_chain={}, residues_dropped_per_chain={},
+            changes=[],
+        )
+
+    import pipeline_normalize
+
+    framework = tmp_path / "vhh.pdb"
+    framework.write_text("ATOM  framework\n")
+
+    monkeypatch.setattr(
+        pipeline_normalize, "normalize_for_rfantibody", _fake_normalize,
+    )
+    monkeypatch.syspath_prepend(_REPO_ROOT)  # /opt/contracts in the image
+    monkeypatch.setitem(ra.FRAMEWORKS, "VHH", str(framework))
+    monkeypatch.setattr(ra, "startup_check", lambda: {})
+    monkeypatch.setattr(ra, "archive_raw_outputs", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        ra, "download_input",
+        lambda url, dest: open(dest, "w").write("ATOM  target\n"),
+    )
+    monkeypatch.setattr(
+        ra, "preprocess_target_pdb",
+        lambda src, dest, target_chain="A": (
+            open(dest, "w").write("ATOM  target\n"), {}
+        )[1],
+    )
+    monkeypatch.setattr(ra, "stage_rfdiffusion", lambda *a, **kw: None)
+    monkeypatch.setattr(ra, "stage_proteinmpnn", lambda *a, **kw: None)
+    monkeypatch.setattr(ra, "stage_rf2", lambda *a, **kw: None)
+    monkeypatch.setattr(ra, "extract_scores", _fake_extract_scores)
+    monkeypatch.setattr(ra, "extract_pdbs", _fake_extract_pdbs)
+    _wire_io(monkeypatch, ra, rec)
+
+    _set_env(monkeypatch, {
+        "job_id": "job-1",
+        "job_spec": {
+            "target_chain": "A",
+            "parameters": {"num_designs": _N_DESIGNS, "framework": "VHH"},
+        },
+        "input_presigned_url": "https://storage.invalid/target.pdb",
+        "upload_urls_endpoint": "https://hub.invalid/upload",
+    })
+
+    ra.main()
+    assert rec.webhooks, "main() posted no webhook"
+    payload = rec.webhooks[-1]
+
+    assert rec.upload_names == [
+        "design_001.pdb", "design_002.pdb", "metrics.csv",
+    ]
+    assert payload["error"].startswith("PDB extraction failed:")
     assert _TIMEOUT_TEXT in payload["error"]
     assert payload["partial"] is True
     assert payload["candidate_count"] == _N_DESIGNS
