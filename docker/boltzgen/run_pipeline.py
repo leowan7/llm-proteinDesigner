@@ -1941,7 +1941,8 @@ def main():
         # A timeout or a nonzero exit leaves whatever BoltzGen already wrote
         # under output_dir on the container's disk. Record the failure and
         # fall through to the parse/upload code below rather than returning,
-        # so those designs still reach the customer. run_command raises
+        # so those designs are uploaded instead of discarded. run_command
+        # raises
         # TimeoutExpired for the timeout (it hands timeout= to
         # subprocess.run, :758) and RuntimeError for a nonzero exit (:771).
         early_failure: dict | None = None
@@ -2212,17 +2213,21 @@ def main():
         }
         if early_failure:
             # BoltzGen died, so the run still reports its failure
-            # (post_webhook keys the status off "error", :811) and the
+            # (post_webhook keys the status off "error", :807) and the
             # designs collected above are in Storage.
-            # Uploading them is necessary but not yet sufficient: this
-            # repo's API serves a job's designs only once it completed
-            # (backend/jobs/router.py:707 and :543), so a failed run's
-            # designs sit in Storage unserved.
-            # The inline structures are left out because the
-            # backend reads a webhook's output only when the run completed
-            # (the internal_status gate in
+            #
+            # Uploading them is necessary but not yet sufficient: this repo's
+            # API serves a job's designs only once it completed
+            # (backend/jobs/router.py:706-707 and :543-544), so a failed
+            # run's designs sit in Storage unserved. Serving them is not part
+            # of this change.
+            #
+            # The inline structures are left out because the backend reads a
+            # webhook's output only when the run completed (the
+            # internal_status gate in
             # backend/webhooks/router.py::runpod_webhook), so on this path
-            # they would pay for a multi-megabyte POST and be discarded. Pinned by
+            # they would make a multi-megabyte POST only to be discarded.
+            # Pinned by
             # test_a_boltzgen_timeout_still_fails_but_uploads_its_designs.
             result_payload = dict(early_failure)
             if candidates:

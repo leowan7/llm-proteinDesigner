@@ -1,14 +1,17 @@
-"""A timed-out or crashed GPU subprocess still ships the designs on disk.
+"""A timed-out or crashed GPU subprocess still uploads the designs on disk.
 
 Before this branch all three pipelines ended the run on a bare error --
 boltzgen and rfantibody returned from the stage handler, pxdesign let the
-RuntimeError reach its outer ``except Exception`` -- so designs already
-written to the container's output directory were rmtree'd with the work
-dir and the customer paid GPU time for nothing. Each test here fakes the
-GPU stage so that it writes designs AND then dies, then asserts both
-halves: the designs are uploaded, and the run still reports FAILED
-(post_webhook keys the status off ``error`` -- boltzgen :811,
-pxdesign :517, rfantibody :565).
+RuntimeError reach its outer ``except Exception``. Designs already written
+to the container's output directory were then rmtree'd with the work dir,
+so a run that had produced usable designs delivered none.
+
+Three of the four tests here fake the GPU stage so that it writes designs
+AND then dies, then assert both halves: the designs are uploaded, and the
+run still reports FAILED (post_webhook keys the status off ``error`` --
+boltzgen :807, pxdesign :513, rfantibody :561). The fourth drives the same
+boltzgen timeout with nothing on disk, and pins that it uploads nothing
+and posts the bare error.
 
 Faked: the GPU subprocess, the input sanitize/convert step, and the
 quiver tooling that only a real RF2 output satisfies. The
@@ -203,11 +206,12 @@ def test_a_boltzgen_timeout_still_fails_but_uploads_its_designs(monkeypatch):
 
 
 def test_a_boltzgen_timeout_with_no_designs_posts_the_bare_error(monkeypatch):
-    """Zero designs saved must stay refundable.
+    """A timeout that saved nothing posts exactly today's payload.
 
-    ``webhooks/router.py`` bills a failed boltzgen run only when Storage
-    holds a design, so this path must not acquire a ``partial`` flag or
-    a candidate count that suggests otherwise.
+    The fall-through must not change the zero-design case: this path keeps
+    posting a lone ``error`` key, with no ``partial`` flag and no candidate
+    count, so whatever reads a failed run's payload sees the same shape it
+    sees today. The ``list(payload) == ["error"]`` assertion below pins it.
     """
     rec = _Recorder()
     payload = _run_boltzgen(monkeypatch, rec, write_designs=False)

@@ -1489,7 +1489,7 @@ def main():
         # A timeout or a nonzero exit leaves whatever RF2 already wrote into
         # predictions.qv on the container's disk. Record the failure and fall
         # through to the extract/upload code below rather than returning, so
-        # those designs still reach the customer. run_command raises
+        # those designs are uploaded instead of discarded. run_command raises
         # TimeoutExpired for the timeout (it hands timeout= to
         # subprocess.run, :432) and RuntimeError for a nonzero exit (:444);
         # the payload recorded below is the one this stage posts today.
@@ -1724,19 +1724,23 @@ def main():
         }
         if early_failure:
             # RF2 died, so the run still reports its failure (post_webhook
-            # keys the status off "error", :565) and the designs collected
+            # keys the status off "error", :561) and the designs collected
             # above are in Storage.
-            # Uploading them is necessary but not yet sufficient: this
-            # repo's API serves a job's designs only once it completed
-            # (backend/jobs/router.py:707 and :543), so a failed run's
-            # designs sit in Storage unserved.
-            # "partial" is
-            # already set where early_failure is built, matching what this
-            # stage posts today. The inline structures are left out because
-            # the backend reads a webhook's output only when the run
-            # completed (the internal_status gate in
+            #
+            # Uploading them is necessary but not yet sufficient: this repo's
+            # API serves a job's designs only once it completed
+            # (backend/jobs/router.py:706-707 and :543-544), so a failed
+            # run's designs sit in Storage unserved. Serving them is not part
+            # of this change.
+            #
+            # "partial" is already set where early_failure is built, matching
+            # what this stage posts today.
+            #
+            # The inline structures are left out because the backend reads a
+            # webhook's output only when the run completed (the
+            # internal_status gate in
             # backend/webhooks/router.py::runpod_webhook), so on this path
-            # they would pay for a multi-megabyte POST and be discarded.
+            # they would make a multi-megabyte POST only to be discarded.
             # Pinned by
             # test_an_rfantibody_timeout_still_fails_but_uploads_its_designs.
             result_payload = dict(early_failure)

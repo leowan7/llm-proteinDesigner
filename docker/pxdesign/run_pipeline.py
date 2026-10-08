@@ -1763,10 +1763,10 @@ def run_webhook_tier(job_payload: dict) -> None:
         # A timeout or a nonzero exit leaves whatever PXDesign already wrote
         # under output_dir on the container's disk. Catch it here and fall
         # through to the parse/upload code below rather than letting it reach
-        # the handler at the bottom of this function, so those designs still
-        # reach the customer. run_command raises RuntimeError for both the
-        # timeout (:462) and a nonzero exit (:478); the payload recorded below
-        # is the one that handler posts today.
+        # the handler at the bottom of this function, so those designs are
+        # uploaded instead of discarded. run_command raises RuntimeError for
+        # both the timeout (:462) and a nonzero exit (:478); the payload
+        # recorded below is the one that handler posts today.
         early_failure: dict | None = None
         try:
             run_pxdesign(
@@ -1995,17 +1995,21 @@ def run_webhook_tier(job_payload: dict) -> None:
         }
         if early_failure:
             # PXDesign died, so the run still reports its failure
-            # (post_webhook keys the status off "error", :517) and the designs
+            # (post_webhook keys the status off "error", :513) and the designs
             # collected above are in Storage.
-            # Uploading them is necessary but not yet sufficient: this
-            # repo's API serves a job's designs only once it completed
-            # (backend/jobs/router.py:707 and :543), so a failed run's
-            # designs sit in Storage unserved.
+            #
+            # Uploading them is necessary but not yet sufficient: this repo's
+            # API serves a job's designs only once it completed
+            # (backend/jobs/router.py:706-707 and :543-544), so a failed
+            # run's designs sit in Storage unserved. Serving them is not part
+            # of this change.
+            #
             # The inline structures are left out because the backend reads a
             # webhook's output only when the run completed (the
             # internal_status gate in
-            # backend/webhooks/router.py::runpod_webhook), so on this path they
-            # would pay for a multi-megabyte POST and be discarded. Pinned by
+            # backend/webhooks/router.py::runpod_webhook), so on this path
+            # they would make a multi-megabyte POST only to be discarded.
+            # Pinned by
             # test_a_pxdesign_timeout_still_fails_but_uploads_its_designs.
             result_payload = dict(early_failure)
             if candidates:

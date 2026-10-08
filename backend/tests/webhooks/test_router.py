@@ -211,11 +211,10 @@ async def test_webhook_failed_job():
     """A failed run that saved no designs is not billed.
 
     This is the zero-saved-designs side of the 2026-10-07 billing rule: a
-    crashed run of a tool that can save designs before failing is billed only
-    when Storage holds at least one of them, so one that saved none stays
-    free. The tool here is in ``_MAY_SAVE_DESIGNS_BEFORE_FAILING``, so the
-    handler really does ask Storage -- which the assertion on the patched
-    lookup pins.
+    crashed run of a mid-run streaming tool is billed only when Storage holds
+    at least one of its designs, so one that saved none stays free. The tool
+    here is in ``_STREAMS_DESIGNS_MID_RUN``, so the handler really does ask
+    Storage -- which the assertion on the patched lookup pins.
 
     Verifies:
     - Returns 200 with {"received": True}
@@ -430,13 +429,14 @@ async def test_a_metering_failure_still_emails_the_customer():
     mock_fail_email.assert_called_once()
 
 
-async def test_webhook_failed_job_of_a_tool_outside_the_rule_never_asks_storage():
-    """A tool outside _MAY_SAVE_DESIGNS_BEFORE_FAILING keeps the old all-or-nothing rule.
+async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():
+    """A tool outside _STREAMS_DESIGNS_MID_RUN keeps the old all-or-nothing rule.
 
     Save-as-you-go lands one tool per PR, so the billing rule has to stay off
-    for every tool that has not joined the tuple. Pinning that Storage is not
-    even consulted keeps the gate from widening by accident: billing an
-    rfdiffusion run that crashed is a call nobody has made.
+    for every tool whose container still uploads only after the GPU subprocess
+    finishes. Pinning that Storage is not even consulted keeps the gate from
+    widening by accident: billing an rfdiffusion run that crashed after its
+    final upload loop is a call nobody has made.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
