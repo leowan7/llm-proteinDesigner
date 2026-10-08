@@ -459,6 +459,36 @@ def run_command(
             "Command TIMED OUT after %.1fs. Output head+tail:\n%s",
             elapsed, head_tail,
         )
+        # Two routes raise TimeoutExpired and only one of them killed the
+        # child: the in-loop deadline check (:437-440) kills before it raises,
+        # the proc.wait() after the readline loop (:446) does not. The caller
+        # catches the RuntimeError below and now reads output_dir instead of
+        # discarding it (:1806), so an un-killed PXDesign could still be
+        # writing into the directory being uploaded. Killing here covers both
+        # routes; kill() is a no-op once the in-loop branch has reaped it. It
+        # signals the direct child only -- whether pxdesign spawns workers
+        # that outlive it is not established here. This sits below the
+        # logger.error above so the ring buffer is captured on both exits.
+        # Pinned by test_a_pxdesign_timeout_kills_the_child_before_its_output_is_read.
+        proc.kill()
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            # Still running 30s after the kill. Leave run_command as
+            # TimeoutExpired rather than the RuntimeError below so the caller,
+            # which catches RuntimeError only (:1806), does not fall through
+            # and read this directory; the failure reaches the handler at the
+            # end of run_webhook_tier (:2053) instead.
+            # Build a fresh one from the configured timeout rather than
+            # re-raising the 30s reap, whose message would report 30 seconds
+            # as the run's own timeout. That handler uploads no design out of
+            # a directory a live process still owns; the raw-capture tar in
+            # its finally (:2066) does still archive the work dir, but a
+            # diagnostic tarball is not a delivered structure. The type and
+            # the number are pinned by
+            # test_a_pxdesign_child_surviving_the_kill_keeps_its_output_unread.
+            logger.error("Child still alive 30s after kill; output unread.")
+            raise subprocess.TimeoutExpired(cmd, timeout)
         raise RuntimeError(
             f"Command timed out after {timeout}s: {head_tail[-2000:]}"
         )
@@ -1765,7 +1795,7 @@ def run_webhook_tier(job_payload: dict) -> None:
         # through to the parse/upload code below rather than letting it reach
         # the handler at the bottom of this function, so those designs are
         # uploaded instead of discarded. run_command raises RuntimeError for
-        # both the timeout (:462) and a nonzero exit (:478); the payload
+        # both the timeout (:492) and a nonzero exit (:508); the payload
         # recorded below is the one that handler posts today.
         early_failure: dict | None = None
         try:
@@ -1995,7 +2025,7 @@ def run_webhook_tier(job_payload: dict) -> None:
         }
         if early_failure:
             # PXDesign died, so the run still reports its failure
-            # (post_webhook keys the status off "error", :513) and the designs
+            # (post_webhook keys the status off "error", :543) and the designs
             # collected above are in Storage.
             #
             # Uploading them is necessary but not yet sufficient: this repo's

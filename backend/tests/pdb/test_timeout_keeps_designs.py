@@ -6,16 +6,22 @@ RuntimeError reach its outer ``except Exception``. Designs already written
 to the container's output directory were then rmtree'd with the work dir,
 so a run that had produced usable designs delivered none.
 
-Three of the five tests here fake the GPU stage so that it writes designs
+Three of the seven tests here fake the GPU stage so that it writes designs
 AND then dies, then assert both halves: the designs are uploaded, and the
 run still reports FAILED (post_webhook keys the status off ``error`` --
-boltzgen :807, pxdesign :513, rfantibody :561). The fourth drives the same
+boltzgen :807, pxdesign :543, rfantibody :561). One more drives the same
 boltzgen timeout with nothing on disk, and pins that it uploads nothing
-and posts the bare error. The fifth lets RF2 succeed and kills the PDB
+and posts the bare error. Another lets RF2 succeed and kills the PDB
 extraction instead -- another step on the new path that can lose designs
 already written. It is not the last one: the score-extraction handler
 posts and returns without uploading, because without the scores TSV there
 is nothing to rank.
+
+The last two are a consequence of the fall-through rather than the
+fall-through itself. Reading output_dir after a timeout is only safe if
+the timed-out child is dead, and pxdesign's run_command had a second
+route to TimeoutExpired that killed nothing. They drive run_command
+directly, so they assert about the child, not about a payload.
 
 Faked: the GPU subprocess, the input sanitize/convert step, and the
 quiver tooling that only a real RF2 output satisfies. The
@@ -28,11 +34,15 @@ from __future__ import annotations
 
 import csv
 import importlib.util
+import io
 import json
+import logging
 import os
 import subprocess
 import sys
 import types
+
+import pytest
 
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
@@ -251,7 +261,7 @@ def test_a_pxdesign_timeout_still_fails_but_uploads_its_designs(monkeypatch):
 
     def _fake_run_pxdesign(spec_path, output_dir, num_designs, **kw):
         _write_pxdesign_output(output_dir)
-        # run_command converts the timeout to this RuntimeError (:462).
+        # run_command converts the timeout to this RuntimeError (:492).
         raise RuntimeError(
             f"Command timed out after {kw.get('timeout', 5400)}s: killed"
         )
@@ -477,3 +487,99 @@ def test_an_rfantibody_qvextract_failure_still_uploads_the_pdbs_on_disk(
     assert payload["partial"] is True
     assert payload["candidate_count"] == _N_DESIGNS
     assert "candidates" not in payload
+
+
+class _FakePopen:
+    """A child whose stdout hits EOF at once and which then lingers.
+
+    run_command reaches subprocess.TimeoutExpired two ways: the in-loop
+    deadline check, which kills the child before it raises, and the
+    ``proc.wait(...)`` after the readline loop, which does not. A child whose
+    stdout is already closed while the process is still alive takes the second
+    route, so these fakes exercise the route that killed nothing.
+    """
+
+    def __init__(self, *, survives_kill: bool = False):
+        self.stdout = io.StringIO("")
+        self.kills = 0
+        self.waits: list = []
+        self.returncode = None
+        self._survives_kill = survives_kill
+
+    def kill(self):
+        self.kills += 1
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.kills == 0 or self._survives_kill:
+            raise subprocess.TimeoutExpired("pxdesign", timeout or 0)
+        self.returncode = -9
+        return -9
+
+
+def _wire_fake_popen(monkeypatch, *, survives_kill: bool = False) -> list:
+    made: list[_FakePopen] = []
+
+    def _popen(*a, **kw):
+        made.append(_FakePopen(survives_kill=survives_kill))
+        return made[-1]
+
+    monkeypatch.setattr(px.subprocess, "Popen", _popen)
+    return made
+
+
+def test_a_pxdesign_timeout_kills_the_child_before_its_output_is_read(
+    monkeypatch,
+):
+    """The route that raises without killing must still kill.
+
+    The caller catches run_command's RuntimeError and now reads output_dir
+    instead of discarding it (docker/pxdesign/run_pipeline.py:1806), so a
+    child left alive would still be writing into the directory being
+    uploaded.
+    """
+    made = _wire_fake_popen(monkeypatch)
+
+    with pytest.raises(RuntimeError) as exc:
+        px.run_command(["pxdesign", "pipeline"], timeout=1)
+
+    assert _TIMEOUT_TEXT in str(exc.value)
+    proc = made[0]
+    assert proc.kills == 1, "the timed-out child was never killed"
+    assert 30 in proc.waits, "the kill was not followed by a bounded reap"
+
+
+def test_a_pxdesign_child_surviving_the_kill_keeps_its_output_unread(
+    monkeypatch, caplog,
+):
+    """A child that outlives the kill must not reach the fall-through.
+
+    run_command leaves TimeoutExpired rather than RuntimeError, and the
+    caller catches RuntimeError only (:1806), so the failure reaches the
+    handler at the end of run_webhook_tier (:2053) and no design is uploaded
+    out of the directory that child still owns. The raw-capture tar in that
+    handler's finally still archives the work dir; a diagnostic tarball is
+    not a delivered structure.
+
+    The exception carries the run's configured timeout and not the 30s reap,
+    so the payload built from it cannot report 30 seconds as the timeout of
+    a run that was given 90 minutes (run_pipeline.py:1804 passes 5400).
+
+    This escape must not cost the triage data: the output ring buffer is
+    logged before the kill, so a run wedged in uninterruptible I/O still
+    leaves its captured output behind. Asserted below, because the only
+    thing keeping that true is where the kill block sits in the handler.
+    """
+    made = _wire_fake_popen(monkeypatch, survives_kill=True)
+
+    with caplog.at_level(logging.ERROR, logger="pxdesign_pipeline"):
+        with pytest.raises(subprocess.TimeoutExpired) as exc:
+            px.run_command(["pxdesign", "pipeline"], timeout=1)
+
+    assert made[0].kills == 1, "the surviving child was never sent a kill"
+    assert exc.value.timeout == 1, (
+        "the escape reports the 30s reap, not the run's own timeout"
+    )
+    assert any("TIMED OUT" in r.getMessage() for r in caplog.records), (
+        "the captured output was not logged before the escape"
+    )
