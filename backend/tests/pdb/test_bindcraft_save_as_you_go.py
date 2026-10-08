@@ -634,7 +634,7 @@ def test_an_early_ended_run_still_fails_but_its_designs_are_in_storage(
     A run that dies early stays a failure. ``backend/webhooks/router.py``
     maps FAILED and TIMED_OUT to ``"failed"`` (``_RUNPOD_STATUS_MAP``), and
     since the webhook commit on this branch it meters a failed run of a tool
-    in ``_STREAMS_DESIGNS_MID_RUN`` once Storage holds one of its designs --
+    in ``_MAY_SAVE_DESIGNS_BEFORE_FAILING`` once Storage holds one of its designs --
     so this run is settled on GPU time used whichever status it reports, and
     flipping the status buys nothing. What flipping would still do is send the
     completion email instead of the failure one, present a crashed run as a

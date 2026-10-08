@@ -1,15 +1,16 @@
 """Tests for ``storage/client.py::job_has_saved_designs``.
 
 The helper decides money: since the webhook commit on this branch, a crashed or
-timed-out run of a tool in ``webhooks/router.py::_STREAMS_DESIGNS_MID_RUN`` is
+timed-out run of a tool in ``webhooks/router.py::_MAY_SAVE_DESIGNS_BEFORE_FAILING`` is
 billed exactly when this returns True. Every webhook test that reaches that
 branch patches it out, so the prefix it reads and the keys it accepts are
 pinned here instead.
 
-Three behaviours covered:
+Four behaviours covered:
     1. A design PDB under the job's own ``outputs/`` prefix counts.
-    2. The metrics CSVs that land in that same prefix do not.
-    3. An empty or absent prefix is False rather than an error.
+    2. A design CIF counts too, which a .pdb-only rule would refuse.
+    3. The metrics CSVs that land in that same prefix do not.
+    4. An empty or absent prefix is False rather than an error.
 """
 import os
 
@@ -44,6 +45,23 @@ def test_a_design_pdb_counts():
 
     # Read under the job's own output prefix, the one get_upload_urls writes to
     assert paginator.paginate.call_args[1]["Prefix"] == PREFIX
+
+
+def test_a_design_cif_counts():
+    """BoltzGen writes CIFs, so a PDB-only rule would never bill one.
+
+    ``docker/boltzgen/run_pipeline.py`` takes each ``upload_filename``
+    extension from the file BoltzGen wrote (``ext = Path(design_file).suffix``),
+    and BoltzGen's ranked output is ``rank{N}_{spec_id}.cif``
+    (``find_design_files``, which accepts either extension). PXDesign also
+    uploads either.
+    """
+    client, _ = _s3_yielding(
+        {"Contents": [{"Key": PREFIX + "design_001.cif"}]}
+    )
+
+    with patch("storage.client.get_s3_client", return_value=client):
+        assert job_has_saved_designs(USER_ID, JOB_ID) is True
 
 
 def test_the_metrics_csvs_are_not_designs():

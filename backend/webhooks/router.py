@@ -48,12 +48,22 @@ _RUNPOD_STATUS_MAP: dict[str, str] = {
     "TIMED_OUT": "failed",
 }
 
-# Tools whose container uploads each design as it finishes, so a run that died
-# part way through can already have delivered designs. A failure of one of
-# these is billed when Storage holds at least one of them; see the billing
-# block below. Save-as-you-go lands one tool per PR, and a tool joins this
-# tuple with its own PR.
-_STREAMS_DESIGNS_MID_RUN: tuple[str, ...] = ("bindcraft",)
+# Tools whose container can have delivered designs to Storage by the time it
+# reports a failure. A failure of one of these is billed when Storage holds at
+# least one of them; see the billing block below. Save-as-you-go lands one
+# tool per PR, and a tool joins this tuple with its own PR.
+#
+# bindcraft uploads each accepted design as it finishes. The other three
+# upload once the GPU subprocess has ended, including when it ended by
+# timing out or crashing: those pipelines record the failure and fall through
+# to their collect-and-upload code (e.g. docker/boltzgen/run_pipeline.py,
+# the ``early_failure`` branches) rather than returning.
+_MAY_SAVE_DESIGNS_BEFORE_FAILING: tuple[str, ...] = (
+    "bindcraft",
+    "boltzgen",
+    "pxdesign",
+    "rfantibody",
+)
 
 
 def validate_webhook_signature(
@@ -306,9 +316,9 @@ async def runpod_webhook(request: Request):
 
     # Record billing for a run the org owes GPU time for.
     #
-    # Finished and cancelled runs qualify. A failed run of a mid-run
-    # streaming tool qualifies too, once Storage holds at least one of its
-    # designs -- Leo's call 2026-10-07: such a run is settled on GPU time
+    # Finished and cancelled runs qualify. A failed run of a tool that can
+    # save designs before failing qualifies too, once Storage holds at least
+    # one of them -- Leo's call 2026-10-07: such a run is settled on GPU time
     # used, the same as a finished run, and is not prorated. A run that saved
     # nothing stays fully unbilled, as every failure was before this change.
     #
@@ -331,7 +341,7 @@ async def runpod_webhook(request: Request):
         not should_bill
         and gpu_seconds > 0
         and internal_status == "failed"
-        and (row["tool"] or "") in _STREAMS_DESIGNS_MID_RUN
+        and (row["tool"] or "") in _MAY_SAVE_DESIGNS_BEFORE_FAILING
     ):
         try:
             # Sync boto3 off the event loop, the house pattern at

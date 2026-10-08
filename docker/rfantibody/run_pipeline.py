@@ -1486,6 +1486,14 @@ def main():
             return
 
         # ----- Stage 3: RF2 -----
+        # A timeout or a nonzero exit leaves whatever RF2 already wrote into
+        # predictions.qv on the container's disk. Record the failure and fall
+        # through to the extract/upload code below rather than returning, so
+        # those designs still reach the customer. run_command raises
+        # TimeoutExpired for the timeout (it hands timeout= to
+        # subprocess.run, :432) and RuntimeError for a nonzero exit (:444);
+        # the payload recorded below is the one this stage posts today.
+        early_failure: dict | None = None
         try:
             with keepalive_heartbeat(webhook_url, job_id, "Running RF2 validation", num_designs):
                 stage_rf2(
@@ -1494,22 +1502,22 @@ def main():
                     webhook_url=webhook_url, job_id=job_id,
                     num_designs=num_designs,
                 )
-        except RuntimeError as exc:
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
             logger.error("RF2 failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
+            early_failure = {
                 "error": f"RF2 validation failed: {exc}",
                 "partial": True,
-            })
-            return
+            }
 
-        send_heartbeat(webhook_url, job_id, "RF2 complete", num_designs, num_designs)
+        if not early_failure:
+            send_heartbeat(webhook_url, job_id, "RF2 complete", num_designs, num_designs)
 
         # ----- Extract scores and PDBs -----
         try:
             extract_scores(predictions_qv, scores_tsv)
         except RuntimeError as exc:
             logger.error("Score extraction failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
+            post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": f"Score extraction failed: {exc}",
             })
             return
@@ -1517,7 +1525,7 @@ def main():
         all_designs = parse_scores_tsv(scores_tsv)
         if not all_designs:
             logger.error("No designs found in scores TSV")
-            post_webhook(webhook_url, job_id, pod_id, {
+            post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": "RF2 produced no scored designs",
             })
             return
@@ -1714,6 +1722,27 @@ def main():
                 "to cryo-EM structures in published benchmarks."
             ),
         }
+        if early_failure:
+            # RF2 died, so the run still reports its failure (post_webhook
+            # keys the status off "error", :565) and the designs collected
+            # above are in Storage.
+            # Uploading them is necessary but not yet sufficient: this
+            # repo's API serves a job's designs only once it completed
+            # (backend/jobs/router.py:707 and :543), so a failed run's
+            # designs sit in Storage unserved.
+            # "partial" is
+            # already set where early_failure is built, matching what this
+            # stage posts today. The inline structures are left out because
+            # the backend reads a webhook's output only when the run
+            # completed (the internal_status gate in
+            # backend/webhooks/router.py::runpod_webhook), so on this path
+            # they would pay for a multi-megabyte POST and be discarded.
+            # Pinned by
+            # test_an_rfantibody_timeout_still_fails_but_uploads_its_designs.
+            result_payload = dict(early_failure)
+            if candidates:
+                result_payload["candidate_count"] = len(candidates)
+
         if failed_uploads:
             result_payload["failed_uploads"] = failed_uploads
 

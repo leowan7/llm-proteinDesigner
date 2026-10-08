@@ -1760,19 +1760,31 @@ def run_webhook_tier(job_payload: dict) -> None:
 
         keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
         keepalive_thread.start()
+        # A timeout or a nonzero exit leaves whatever PXDesign already wrote
+        # under output_dir on the container's disk. Catch it here and fall
+        # through to the parse/upload code below rather than letting it reach
+        # the handler at the bottom of this function, so those designs still
+        # reach the customer. run_command raises RuntimeError for both the
+        # timeout (:462) and a nonzero exit (:478); the payload recorded below
+        # is the one that handler posts today.
+        early_failure: dict | None = None
         try:
             run_pxdesign(
                 spec_path, output_dir, num_designs,
                 preset="preview", timeout=5400,
             )
+        except RuntimeError as exc:
+            logger.error("PXDesign failed: %s", exc)
+            early_failure = {"error": f"Pipeline crashed: {exc}"}
         finally:
             heartbeat_stop.set()
 
-        send_heartbeat(webhook_url, job_id, "PXDesign complete", num_designs, num_designs)
+        if not early_failure:
+            send_heartbeat(webhook_url, job_id, "PXDesign complete", num_designs, num_designs)
 
         summary_csv = locate_summary_csv(output_dir)
         if summary_csv is None:
-            post_webhook(webhook_url, job_id, pod_id, {
+            post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": "PXDesign produced no summary.csv",
             })
             return
@@ -1981,6 +1993,25 @@ def run_webhook_tier(job_payload: dict) -> None:
             "total_designs": num_designs,
             "runtime_minutes": round(elapsed_minutes, 1),
         }
+        if early_failure:
+            # PXDesign died, so the run still reports its failure
+            # (post_webhook keys the status off "error", :517) and the designs
+            # collected above are in Storage.
+            # Uploading them is necessary but not yet sufficient: this
+            # repo's API serves a job's designs only once it completed
+            # (backend/jobs/router.py:707 and :543), so a failed run's
+            # designs sit in Storage unserved.
+            # The inline structures are left out because the backend reads a
+            # webhook's output only when the run completed (the
+            # internal_status gate in
+            # backend/webhooks/router.py::runpod_webhook), so on this path they
+            # would pay for a multi-megabyte POST and be discarded. Pinned by
+            # test_a_pxdesign_timeout_still_fails_but_uploads_its_designs.
+            result_payload = dict(early_failure)
+            if candidates:
+                result_payload["partial"] = True
+                result_payload["candidate_count"] = len(candidates)
+
         if failed_uploads:
             result_payload["failed_uploads"] = failed_uploads
         post_webhook(webhook_url, job_id, pod_id, result_payload)
