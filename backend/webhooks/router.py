@@ -306,11 +306,16 @@ async def runpod_webhook(request: Request):
 
     # Record billing for a run the org owes GPU time for.
     #
-    # Finished and cancelled runs always qualify. A crashed or timed-out run of
-    # a mid-run streaming tool qualifies too, once Storage holds at least one of
-    # its designs -- Leo's call 2026-10-07: such a run is settled on GPU time
+    # Finished and cancelled runs qualify. A failed run of a mid-run
+    # streaming tool qualifies too, once Storage holds at least one of its
+    # designs -- Leo's call 2026-10-07: such a run is settled on GPU time
     # used, the same as a finished run, and is not prorated. A run that saved
     # nothing stays fully unbilled, as every failure was before this change.
+    #
+    # This fires only when the webhook is the job's first terminal transition.
+    # A run already swept by worker/cleanup.py::detect_stale_jobs is 'failed'
+    # with no charge, and a late webhook for it returns at the double-processing
+    # guard above, so the reaper's timeouts are not settled by this rule.
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
@@ -330,7 +335,7 @@ async def runpod_webhook(request: Request):
     ):
         try:
             # Sync boto3 off the event loop, the house pattern at
-            # jobs/notifications.py:57. Every job termination runs this handler.
+            # jobs/notifications.py:57.
             should_bill = await asyncio.to_thread(
                 job_has_saved_designs, str(user_id), job_id
             )
@@ -352,7 +357,18 @@ async def runpod_webhook(request: Request):
                 job_id,
             )
         if stripe_customer_id:
-            record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+            try:
+                record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+            except Exception as exc:
+                # Metering must not cost the customer their failure email: the
+                # row is already terminal, so a retry returns at the
+                # double-processing guard above and the mail would never go
+                # out. Pinned by
+                # test_a_metering_failure_still_emails_the_customer.
+                logger.exception(
+                    "Could not meter job %s; it stays unbilled", job_id
+                )
+                sentry_sdk.capture_exception(exc)
 
     # Send email notification.
     async with pool.acquire() as conn:

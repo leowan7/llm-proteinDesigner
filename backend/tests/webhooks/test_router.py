@@ -290,7 +290,10 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
     saved at least one design and then crashed or timed out is billed the same
     as a finished run, not prorated. The "not prorated" half is pinned by
     comparing the metered figure against the gpu_seconds written to the job
-    row -- the same number a completed run meters.
+    row -- the same number a completed run meters. That is an
+    internal-consistency pin, not a claim the figure is right: started_at is
+    COALESCE-preserved across sessions (worker/session_orchestrator.py:239), so
+    for a campaign chunked across them it spans the gaps between sessions.
 
     Everything else about the failure is unchanged: the status is still
     'failed' and the failure email, not the completion email, goes out.
@@ -359,6 +362,71 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
     assert mock_update.call_args[0][1] == "failed"
     mock_fail_email.assert_called_once()
     mock_ok_email.assert_not_called()
+
+
+async def test_a_metering_failure_still_emails_the_customer():
+    """A Stripe error must not swallow the failure notice.
+
+    Before this rule a failed run could not reach record_gpu_usage at all, so
+    the failure email always went out. Now that it can, an unguarded raise
+    escapes the handler before the email block below it -- and the row is
+    already 'failed', so the provider's retry returns at the
+    double-processing guard and the customer never hears the run died. The
+    charge is the droppable half, not the notification.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock()
+
+    conn4 = AsyncMock()
+    conn4.fetchval = AsyncMock(return_value="cus_crashed")
+
+    conn5 = AsyncMock()
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch(
+            "webhooks.router.record_gpu_usage",
+            side_effect=RuntimeError("stripe is down"),
+        ) as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch("webhooks.router.job_has_saved_designs", return_value=True),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    # The metering was attempted, and raised
+    mock_billing.assert_called_once()
+
+    # The customer still got told, on a 200 the provider will not retry
+    assert response.status_code == 200
+    mock_fail_email.assert_called_once()
 
 
 async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():

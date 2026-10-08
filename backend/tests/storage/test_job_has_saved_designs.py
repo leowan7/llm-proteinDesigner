@@ -51,8 +51,10 @@ def test_the_metrics_csvs_are_not_designs():
 
     ``docker/bindcraft/run_pipeline.py`` sends ``metrics.csv`` and
     ``bindcraft_results.csv`` through the same endpoint, which flattens every
-    upload into the one ``outputs/`` prefix. A run that produced no accepted
-    design can still have uploaded them, and must stay unbilled.
+    upload into the one ``outputs/`` prefix. Both are gated on at least one
+    accepted design (run_pipeline.py:1856, :1863), so a CSV-only prefix is the
+    case where designs were accepted but no PDB upload of any of them landed.
+    Nothing reached Storage, so it stays unbilled.
     """
     client, _ = _s3_yielding(
         {
