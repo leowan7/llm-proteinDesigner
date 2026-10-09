@@ -223,28 +223,73 @@ def delete_job_objects(user_id: str, job_id: str) -> int:
     return deleted
 
 
-def job_has_saved_designs(user_id: str, job_id: str) -> bool:
-    """True when the job's output prefix already holds at least one design PDB.
+#: Filename suffixes a saved design can carry. BoltzGen and PxDesign name
+#: each upload after the file their pipeline produced, so either can be a
+#: ``.cif`` (``docker/boltzgen/run_pipeline.py:2043-2044``,
+#: ``docker/pxdesign/run_pipeline.py:1882-1883``); BindCraft, RFdiffusion and
+#: RFantibody write ``.pdb``.
+DESIGN_SUFFIXES: tuple[str, ...] = (".pdb", ".cif")
+
+
+def iter_job_design_keys(
+    user_id: str, job_id: str, suffixes: tuple[str, ...] = DESIGN_SUFFIXES
+):
+    """Yield the job's saved design keys under its ``outputs/`` prefix.
 
     Read-only counterpart to :func:`delete_job_objects`: the same
     ``list_objects_v2`` paginator, narrowed from that function's whole-job
     ``users/{user_id}/jobs/{job_id}/`` prefix to the ``outputs/`` one the
-    container uploads designs to. The webhook uses it to settle a run that
-    died after streaming designs to Storage.
+    container uploads designs to.
 
-    Only ``.pdb`` keys count. The upload endpoint flattens every container
+    Only keys ending in ``suffixes`` are yielded, default
+    :data:`DESIGN_SUFFIXES`. The upload endpoint flattens every container
     upload into that one prefix (``backend/jobs/router.py::get_upload_urls``),
     so a run's metrics CSVs land beside its designs; the target structure does
     not -- that is written under ``inputs/`` (:func:`ensure_pdb_in_s3`).
 
-    Returns False on an empty or missing prefix. Whatever botocore raises
-    propagates: the caller decides what an unreadable bucket means.
+    A generator, so :func:`job_has_saved_designs` stops at the first design
+    key while :func:`list_job_design_keys` drains every page. Keys arrive in the
+    paginator's order, which this function does not sort. Whatever botocore
+    raises propagates from the caller's iteration: the caller decides what an
+    unreadable bucket means.
     """
     client = get_s3_client()
     prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=settings.s3_bucket_name, Prefix=prefix):
         for obj in page.get("Contents") or []:
-            if obj["Key"].endswith(".pdb"):
-                return True
-    return False
+            if obj["Key"].endswith(suffixes):
+                yield obj["Key"]
+
+
+def job_has_saved_designs(user_id: str, job_id: str) -> bool:
+    """True when the job's output prefix already holds at least one design.
+
+    The webhook uses it to settle a run that died after streaming designs to
+    Storage. ``any`` stops at the first design key the generator yields, so a
+    prefix that leads with CSVs costs only the pages it takes to reach a
+    design, not every page of the prefix
+    (``tests/storage/test_job_design_keys.py::test_reaching_a_design_stops_the_paging``).
+
+    Returns False on an empty or missing prefix. See
+    :func:`iter_job_design_keys` for the prefix, the suffix filter and the
+    error contract.
+    """
+    return any(iter_job_design_keys(user_id, job_id))
+
+
+def list_job_design_keys(user_id: str, job_id: str) -> list[str]:
+    """Every saved design key for the job, sorted by key.
+
+    The delivery path for a run whose terminal state is not ``complete``: its
+    designs reached Storage through save-as-you-go, and no ``job_candidates``
+    row was ever written for them (``backend/webhooks/router.py`` writes those
+    only under its ``complete`` branch, and ``backend/worker/cleanup.py``
+    writes none at all), so Storage is the only record of them.
+
+    Sorted so repeat calls agree on an order. The sort is lexicographic by
+    key, which is a stable presentation order and NOT a quality ranking -- the
+    scores that would rank these designs are not in the database for a failed
+    run. See :func:`iter_job_design_keys` for the prefix and error contract.
+    """
+    return sorted(iter_job_design_keys(user_id, job_id))

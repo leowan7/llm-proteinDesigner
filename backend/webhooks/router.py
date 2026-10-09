@@ -33,7 +33,7 @@ from db.connection import get_db_pool
 from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
-from storage.client import job_has_saved_designs
+from storage.client import job_has_saved_designs, list_job_design_keys
 from worker.tasks import publish_status, update_job_status
 
 logger = logging.getLogger(__name__)
@@ -387,10 +387,36 @@ async def runpod_webhook(request: Request):
                 runtime_seconds=gpu_seconds,
             )
         elif internal_status == "failed":
+            # How many designs the run banked before it died, so the mail can
+            # point at them instead of reporting a bare failure. Counted here,
+            # after the billing block above has already settled, and
+            # deliberately not reused by it: billing a failed run stays gated
+            # on _STREAMS_DESIGNS_MID_RUN and is not widened by this count.
+            saved_designs = 0
+            try:
+                # Sync boto3 off the event loop, the house pattern at
+                # jobs/notifications.py:57.
+                saved_designs = len(
+                    await asyncio.to_thread(
+                        list_job_design_keys, str(user_id), job_id
+                    )
+                )
+            except Exception as exc:
+                # An unreadable bucket costs the mail its design count, not the
+                # mail itself: the job row is already terminal, so a retry
+                # returns at the double-processing guard above and this mail
+                # would never go out.
+                logger.exception(
+                    "Could not count saved designs for failed job %s; "
+                    "sending the plain failure mail",
+                    job_id,
+                )
+                sentry_sdk.capture_exception(exc)
             await send_failure_email(
                 to_email=user_row["email"],
                 job_id=job_id,
                 error_category=error_category or "Unknown error",
+                saved_designs=saved_designs,
             )
 
     return {"received": True}

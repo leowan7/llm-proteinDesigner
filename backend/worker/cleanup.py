@@ -20,6 +20,7 @@ from config import settings
 from db.connection import get_db_pool
 from gpu import get_provider
 from jobs.notifications import send_failure_email
+from storage.client import list_job_design_keys
 
 from worker.tasks import publish_status
 
@@ -281,16 +282,41 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # Publish SSE failure event
         await publish_status(job_id, "failed", "Job timed out")
 
-        # Send failure email
+        # Send failure email. This is the route a run killed from outside
+        # takes: nothing POSTed a webhook, which is why the job went stale. A
+        # container that catches its own timeout posts FAILED instead
+        # (docker/boltzgen/run_pipeline.py:1951) and is counted in
+        # webhooks/router.py. Save-as-you-go may have banked designs on either
+        # route, so count them here too and let the mail point at them.
         async with pool.acquire() as conn:
             user_row = await conn.fetchrow(
                 "SELECT email FROM auth.users WHERE id = $1", user_id
             )
         if user_row:
+            saved_designs = 0
+            try:
+                # Sync boto3 off the event loop, the house pattern at
+                # jobs/notifications.py:57.
+                saved_designs = len(
+                    await asyncio.to_thread(
+                        list_job_design_keys, str(user_id), job_id
+                    )
+                )
+            except Exception as exc:
+                # An unreadable bucket costs the mail its design count, not the
+                # mail itself, and must not abort the sweep of the remaining
+                # stale jobs.
+                logger.exception(
+                    "Could not count saved designs for stale job %s; "
+                    "sending the plain failure mail",
+                    job_id,
+                )
+                sentry_sdk.capture_exception(exc)
             await send_failure_email(
                 to_email=user_row["email"],
                 job_id=job_id,
                 error_category=error_category,
+                saved_designs=saved_designs,
             )
 
         killed += 1

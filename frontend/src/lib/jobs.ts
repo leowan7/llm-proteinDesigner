@@ -63,6 +63,16 @@ export interface JobData {
     zero_output: boolean;
   } | null;
   candidates: CandidateData[];
+  /**
+   * True when a run that failed or was cancelled still delivered some designs.
+   *
+   * Save-as-you-go uploads each design as it finishes, so a run that timed out,
+   * was killed or was cancelled leaves what it produced in Storage. The backend
+   * lists those for such a job and flags the set partial: what the run had
+   * saved when it stopped, with empty `scores`, because the per-design
+   * metrics never reached the database. Always false for a complete run.
+   */
+  partial: boolean;
   job_spec: Record<string, unknown> | null;
   created_at: string | null;
 }

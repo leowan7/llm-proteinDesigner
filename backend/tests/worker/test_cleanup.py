@@ -199,7 +199,9 @@ async def test_cleanup_stale_jobs():
     Verifies:
     - DB updated to 'failed'
     - publish_status called with 'failed'
-    - send_failure_email called
+    - send_failure_email called, carrying the count of designs the run banked
+      before it went stale (this is the route a timed-out run takes, so it is
+      the one that has to announce them)
     """
     stale_job_row = {
         "id": "job-stale-uuid",
@@ -237,6 +239,15 @@ async def test_cleanup_stale_jobs():
         patch("worker.cleanup.get_provider", return_value=mock_provider),
         patch("worker.cleanup.publish_status", new_callable=AsyncMock) as mock_publish,
         patch("worker.cleanup.send_failure_email", new_callable=AsyncMock) as mock_email,
+        # Unpatched this reaches boto3 against an unreachable endpoint and
+        # burns its retry budget per stale job.
+        patch(
+            "worker.cleanup.list_job_design_keys",
+            return_value=[
+                "users/user-stale/jobs/job-stale-uuid/outputs/design_1.pdb",
+                "users/user-stale/jobs/job-stale-uuid/outputs/design_2.pdb",
+            ],
+        ) as mock_list,
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
@@ -256,6 +267,11 @@ async def test_cleanup_stale_jobs():
     # Failure email sent
     mock_email.assert_called_once()
     assert mock_email.call_args[1]["to_email"] == "stale@example.com"
+
+    # ...and it names the designs the run banked, read under the launcher's
+    # own storage prefix rather than the caller's.
+    assert mock_email.call_args[1]["saved_designs"] == 2
+    assert mock_list.call_args[0] == ("user-stale", "job-stale-uuid")
 
 
 async def test_cleanup_stale_jobs_none_stale():

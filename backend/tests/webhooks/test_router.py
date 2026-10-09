@@ -255,6 +255,10 @@ async def test_webhook_failed_job():
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
         patch("webhooks.router.job_has_saved_designs", return_value=False) as mock_saved,
+        # The failure mail counts what the run banked before it died. Unpatched
+        # this reaches boto3 against an unreachable endpoint and burns its
+        # retry budget inside the handler's own except.
+        patch("webhooks.router.list_job_design_keys", return_value=[]) as mock_list,
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -278,9 +282,13 @@ async def test_webhook_failed_job():
     # So no billing: a failure is billed only when it saved something
     mock_billing.assert_not_called()
 
-    # Failure email was sent
+    # Failure email was sent, and with nothing in Storage it carries a count of
+    # zero -- the branch in jobs/notifications.py that keeps the plain
+    # bare-failure wording
     mock_fail_email.assert_called_once()
     assert mock_fail_email.call_args[1]["to_email"] == "test@example.com"
+    assert mock_fail_email.call_args[1]["saved_designs"] == 0
+    mock_list.assert_called_once_with("user-uuid", JOB_ID)
 
 
 async def test_webhook_failed_job_with_saved_designs_is_billed():
@@ -335,6 +343,10 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_ok_email,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
         patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
+        ),
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -412,6 +424,10 @@ async def test_a_metering_failure_still_emails_the_customer():
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
         patch("webhooks.router.job_has_saved_designs", return_value=True),
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
+        ),
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -429,14 +445,20 @@ async def test_a_metering_failure_still_emails_the_customer():
     mock_fail_email.assert_called_once()
 
 
-async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():
+async def test_webhook_failed_job_of_a_non_streaming_tool_is_not_billed_even_with_saved_designs():
     """A tool outside _STREAMS_DESIGNS_MID_RUN keeps the old all-or-nothing rule.
 
     Save-as-you-go lands one tool per PR, so the billing rule has to stay off
     for every tool whose container still uploads only after the GPU subprocess
-    finishes. Pinning that Storage is not even consulted keeps the gate from
-    widening by accident: billing an rfdiffusion run that crashed after its
-    final upload loop is a call nobody has made.
+    finishes. Billing an rfdiffusion run that crashed after its final upload
+    loop is a call nobody has made.
+
+    This pins the gate against the delivery work: Storage here DOES hold
+    designs, and the failure mail reads them (``list_job_design_keys``, asserted
+    below), yet the billing gate still never reaches its own
+    ``job_has_saved_designs`` probe and nothing is metered. Those are two
+    separate reads of the same bucket, and only the billing one is gated on the
+    tool tuple (webhooks/router.py:56).
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -468,8 +490,15 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
-        patch("webhooks.router.send_failure_email", new_callable=AsyncMock),
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
         patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=[
+                f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb",
+                f"users/user-uuid/jobs/{JOB_ID}/outputs/design_2.pdb",
+            ],
+        ) as mock_list,
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -480,8 +509,16 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_never_asks_storage():
             )
 
     assert response.status_code == 200
+
+    # The billing gate short-circuits on the tool before it probes Storage at
+    # all, so nothing is metered
     mock_saved.assert_not_called()
     mock_billing.assert_not_called()
+
+    # Delivery is not gated on the same tuple: the mail reads the bucket and
+    # names both designs this rfdiffusion run banked
+    mock_list.assert_called_once_with("user-uuid", JOB_ID)
+    assert mock_fail_email.call_args[1]["saved_designs"] == 2
 
 
 # ---------------------------------------------------------------------------

@@ -36,10 +36,12 @@ class TestResultDownload:
     """RESULT-01 / RESULT-02: Results are downloadable as a ranked ZIP archive."""
 
     def _make_s3_mock(self, keys_and_content):
-        """Build an S3 client mock for list_objects_v2 + get_object."""
+        """Build an S3 client mock for the list paginator + get_object."""
         contents = [{"Key": k} for k, _ in keys_and_content]
         mock_s3 = MagicMock()
-        mock_s3.list_objects_v2 = MagicMock(return_value={"Contents": contents})
+        mock_s3.get_paginator.return_value.paginate.return_value = [
+            {"Contents": contents}
+        ]
         content_by_key = {k: v for k, v in keys_and_content}
 
         def fake_get_object(Bucket, Key):
