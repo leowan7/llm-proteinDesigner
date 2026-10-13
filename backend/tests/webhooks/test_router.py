@@ -864,6 +864,174 @@ async def test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again
     mock_list.assert_not_called()
 
 
+async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim():
+    """The INSERT runs, and runs below the claim.
+
+    The sibling of
+    ``test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows``: that
+    one pins what a loser must not write, this one pins that a winner still
+    writes it, and in the order that makes the loser's case reachable. The
+    claim records how many connections had been taken when it fired; two is
+    the pair of pre-claim reads, so a third would mean the INSERT had already
+    run.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+    conn3 = AsyncMock()   # INSERT job_candidates
+    conn4 = AsyncMock()   # UPDATE results, gpu_cost_usd
+    conn5 = AsyncMock()   # SELECT org_stripe_customer
+    conn6 = AsyncMock()   # SELECT email
+    conn6.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5, conn6)
+
+    acquires_at_claim = []
+
+    async def _claim(*args, **kwargs):
+        acquires_at_claim.append(mock_pool.acquire.call_count)
+        return True
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    payload = json.dumps({
+        "id": JOB_ID,
+        "pod_id": POD_ID,
+        "status": "COMPLETED",
+        "output": {
+            "candidate_count": 2,
+            "candidates": [
+                {"rank": 1, "pdb_key": "k1.pdb", "scores": {"ipae": 0.3}},
+                {"rank": 2, "pdb_key": "k2.pdb", "scores": {}},
+            ],
+            "next_steps": "Run AlphaFold validation",
+            "job_spec": {"tool": "bindcraft"},
+        },
+    }).encode()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", side_effect=_claim),
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage"),
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+
+    # Only the two pre-claim reads had been taken when the claim fired.
+    assert acquires_at_claim == [2]
+
+    # And the rows were written, on the connection taken after it.
+    assert conn3.execute.await_count == 2
+    first = conn3.execute.await_args_list[0][0]
+    assert "INSERT INTO public.job_candidates" in first[0]
+    assert first[1] == JOB_ID
+    assert first[2] == 1
+    assert first[3] == "k1.pdb"
+    assert json.loads(first[4]) == {"ipae": 0.3}
+    assert json.loads(conn3.execute.await_args_list[1][0][4]) == {}
+
+
+async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
+    """A COMPLETED post that loses the claim leaves job_candidates untouched.
+
+    The reaper can fail a row whose container is, at that moment, posting
+    COMPLETED. The handler then returns at the lost-claim guard, and any
+    job_candidates rows it had already written would sit on a row that is
+    `failed`: get_job reads that table only when the status is 'complete'
+    (jobs/router.py:834), so the customer of a run that actually finished
+    would be served the partial branch's unscored Storage listing
+    (jobs/router.py:849) while the scored rows sat unread.
+
+    Pinned by the pool: two connections are available, the ones the handler
+    needs before the claim. A third acquire -- the INSERT -- raises
+    StopIteration rather than passing quietly.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    mock_pool = _make_pool(conn1, conn2)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    payload = json.dumps({
+        "id": JOB_ID,
+        "pod_id": POD_ID,
+        "status": "COMPLETED",
+        "output": {
+            "candidate_count": 2,
+            "candidates": [
+                {"rank": 1, "pdb_key": "k1.pdb", "scores": {"ipae": 0.3}},
+                {"rank": 2, "pdb_key": "k2.pdb", "scores": {"ipae": 0.4}},
+            ],
+            "next_steps": "Run AlphaFold validation",
+            "job_spec": {"tool": "bindcraft"},
+        },
+    }).encode()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch(
+            "webhooks.router.update_job_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    mock_update.assert_called_once()
+    assert mock_update.call_args[1]["require_non_terminal"] is True
+
+    # The two connections the handler is allowed were both used, and neither
+    # of them ran an INSERT: the only writes attempted were the pre-claim
+    # reads.
+    assert mock_pool.acquire.call_count == 2
+    conn1.execute.assert_not_called()
+    conn2.execute.assert_not_called()
+
+    mock_billing.assert_not_called()
+    mock_email.assert_not_called()
+    mock_publish.assert_not_called()
+
+
 async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
     """The reaper taking the row mid-handler stops the charge and the mail.
 

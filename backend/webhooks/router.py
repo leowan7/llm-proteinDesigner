@@ -222,6 +222,7 @@ async def runpod_webhook(request: Request):
     # Build results payload for completed jobs.
     results_json: str | None = None
     output: dict = {}
+    payload_candidates: list[dict] = []
     if internal_status == "complete":
         output = payload.get("output", {})
         candidate_count: int = output.get("candidate_count", 0)
@@ -231,20 +232,7 @@ async def runpod_webhook(request: Request):
             "next_steps": output.get("next_steps", ""),
             "zero_output": zero_output,
         })
-
-        # Persist individual candidate rows.
-        candidates = output.get("candidates", [])
-        if candidates:
-            async with pool.acquire() as conn:
-                for c in candidates:
-                    await conn.execute(
-                        """INSERT INTO public.job_candidates (job_id, rank, pdb_key, scores)
-                           VALUES ($1, $2, $3, $4::jsonb)""",
-                        row["id"],
-                        c["rank"],
-                        c["pdb_key"],
-                        json.dumps(c.get("scores", {})),
-                    )
+        payload_candidates = output.get("candidates", [])
 
     error_category: str | None = None
     if internal_status == "failed":
@@ -253,7 +241,7 @@ async def runpod_webhook(request: Request):
 
     # Update DB status. This write is also the claim on the job. The guard at
     # :207 is only a pre-read, and the reaper can take the row in the window
-    # between that read and this write (worker/cleanup.py:275 claims it the
+    # between that read and this write (worker/cleanup.py:276 claims it the
     # same way, from the other side), so everything below here that must
     # happen once per job is gated on having won the transition.
     claimed = await update_job_status(
@@ -270,13 +258,35 @@ async def runpod_webhook(request: Request):
         # at :207 has always done for a row that was already terminal: the
         # route that won the transition terminates the pod, and the reaper
         # cancels every stale pod it sweeps whether or not it claimed the row
-        # (worker/cleanup.py:308).
+        # (worker/cleanup.py:309).
         logger.info(
             "Webhook skipped: job %s went terminal between this handler's "
             "guard and its status update",
             job_id,
         )
         return {"received": True}
+
+    # Everything that records what the run produced is below the claim. A
+    # handler that lost the claim returns above this, so it cannot leave
+    # job_candidates rows on a row another route has already made terminal:
+    # get_job reads that table only on a `complete` row (jobs/router.py:834)
+    # and its partial branch lists Storage instead (jobs/router.py:849), so
+    # those rows would reach no one while the customer of a run that did
+    # finish was served an unscored listing of it
+    # (tests/webhooks/test_router.py::test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows).
+    # Between the claim and these writes a reader sees `complete` with no
+    # candidates, the same window in which it has always seen a NULL `results`.
+    if payload_candidates:
+        async with pool.acquire() as conn:
+            for c in payload_candidates:
+                await conn.execute(
+                    """INSERT INTO public.job_candidates (job_id, rank, pdb_key, scores)
+                       VALUES ($1, $2, $3, $4::jsonb)""",
+                    row["id"],
+                    c["rank"],
+                    c["pdb_key"],
+                    json.dumps(c.get("scores", {})),
+                )
 
     # Persist cost and results.
     if results_json:
@@ -319,7 +329,7 @@ async def runpod_webhook(request: Request):
     # because two separate things turn on it: the failure mail points the
     # customer at them, and a failed run is billed exactly when there is at
     # least one. The same count feeds the `partial` flag get_job serves
-    # (jobs/router.py:905) and the reaper's own gate (worker/cleanup.py:337);
+    # (jobs/router.py:909) and the reaper's own gate (worker/cleanup.py:338);
     # all three call one function, storage/client.py::list_job_design_keys.
     # The bulk download reads the same prefix with its own paginator
     # (jobs/router.py:610) because it archives every object it finds, CSVs
@@ -363,8 +373,8 @@ async def runpod_webhook(request: Request):
     # Exactly one of this route and the reaper bills any given job, because
     # exactly one of them wins the status transition. This handler reaches the
     # charge only when its own UPDATE claimed a non-terminal row
-    # (:259), and worker/cleanup.py reaches it only when its
-    # UPDATE claimed a row still 'running' (worker/cleanup.py:275)
+    # (:247), and worker/cleanup.py reaches it only when its
+    # UPDATE claimed a row still 'running' (worker/cleanup.py:276)
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.
     # record_gpu_usage keys its meter event on the job id as a second line of

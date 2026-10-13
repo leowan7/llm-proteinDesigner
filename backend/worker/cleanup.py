@@ -257,13 +257,14 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
 
         # Written for every job this sweep claims, billed or not, which is what
         # the webhook route does for every terminal job it handles
-        # (webhooks/router.py:285, :293). Until this commit the sweep
+        # (webhooks/router.py:295 and webhooks/router.py:303). Until this
+        # commit the sweep
         # wrote gpu_seconds and no cost, which did not matter while it metered
         # nothing; now that it charges, a NULL here would mean a real charge
         # with no record on the row: the customer's run would show no cost
         # (GET /jobs serves this column, jobs/router.py:495), the
         # daily spend guard in this module would sum it as zero
-        # (check_daily_gpu_spend, :412) so a burst of billed timeouts
+        # (check_daily_gpu_spend, :413) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be
         # reconciled against the Stripe invoice.
         gpu_cost_usd = round(

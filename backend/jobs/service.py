@@ -99,22 +99,41 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # Import worker tasks here to avoid circular imports at module load time.
     from worker.tasks import publish_status, update_job_status
 
-    # Update DB status and GPU cost.
-    await update_job_status(job_id, "cancelled", stage="Cancelled", gpu_seconds=gpu_seconds)
-    async with pool.acquire() as conn:
-        update_result = await conn.execute(
-            "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2 AND status IN ('running', 'queued')",
-            gpu_cost_usd,
-            job_id,
-        )
-    # update_result is "UPDATE N" — if N=0 the job transitioned to a terminal
-    # state (e.g. 'complete' via webhook) between our initial fetch and this
-    # write. Log a warning so operators can investigate if billing appears wrong.
-    rows_updated = int(update_result.split()[-1])
-    if rows_updated == 0:
+    # Update DB status, and claim the job in the same write. The reaper now
+    # meters a run it sweeps (worker/cleanup.py:374), so this route can no
+    # longer settle a job another route has already settled: the flag makes
+    # the status write conditional on the row being non-terminal and reports
+    # whether it won, the protocol the webhook takes (webhooks/router.py:247)
+    # and the reaper takes with its own 'running' guard (worker/cleanup.py:276).
+    claimed = await update_job_status(
+        job_id,
+        "cancelled",
+        stage="Cancelled",
+        gpu_seconds=gpu_seconds,
+        require_non_terminal=True,
+    )
+    if claimed:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2",
+                gpu_cost_usd,
+                job_id,
+            )
+    else:
+        # The row went terminal between the fetch above and this write, so the
+        # route that took it owns both the cost column and the meter.
+        #
+        # This cost write used to carry its own `AND status IN ('running',
+        # 'queued')` guard, which the unconditional status write immediately
+        # above had already falsified: by the time it ran the row read
+        # 'cancelled', so it matched nothing and gpu_cost_usd was left NULL on
+        # every cancelled job while Stripe was still metered below. The claim
+        # replaces that guard, so the column is now written whenever this
+        # route is the one that charges. Read off the two statements, not
+        # reproduced against a live database.
         _log.warning(
-            "cancel_job_by_id: gpu_cost_usd not written for job %s — "
-            "status transitioned before UPDATE (TOCTOU); verify billing.",
+            "cancel_job_by_id: job %s went terminal before this cancel could "
+            "claim it; its cost and metering belong to the route that did",
             job_id,
         )
 
@@ -128,7 +147,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # job's org (admins are not org members), so we resolve the billing
     # customer the same way the webhook handler does: from the job's
     # organization_id through public.org_stripe_customer.
-    if gpu_seconds > 0:
+    if claimed and gpu_seconds > 0:
         async with pool.acquire() as conn:
             stripe_customer_id = await conn.fetchval(
                 """SELECT public.org_stripe_customer(j.organization_id)

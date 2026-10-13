@@ -69,10 +69,10 @@ async def update_job_status(
             whether it did. A caller that must act exactly once per job --
             billing, the failure mail -- uses this to claim the row, because
             reading the status first and acting on what it read leaves a
-            window in which another route can take the job
-            (webhooks/router.py:259 is that caller;
-            worker/cleanup.py:275 claims the same rows from the
-            other side with its own `status = 'running'` guard).
+            window in which another route can take the job. The callers
+            that claim through this flag are webhooks/router.py:247 and
+            jobs/service.py:108; worker/cleanup.py:276 claims the same rows
+            from the other side with its own `status = 'running'` guard.
 
     Returns:
         True when a row was written. Always True unless ``require_non_terminal``

@@ -848,9 +848,12 @@ async def get_job(
         ]
     elif row["status"] in _DELIVERS_DESIGNS:
         # A run that did not complete has no job_candidates rows to read. The
-        # webhook reads a payload's candidates only inside ``if internal_status
-        # == "complete"`` (``backend/webhooks/router.py:225``, the INSERT at
-        # :241), so a FAILED post contributes none whatever its output holds;
+        # webhook collects a payload's candidates only inside ``if
+        # internal_status == "complete"`` (``backend/webhooks/router.py:226``)
+        # and writes them only below its claim on the row (the claim at
+        # ``backend/webhooks/router.py:247``, the INSERT at
+        # ``backend/webhooks/router.py:283``), so neither a FAILED post nor a
+        # COMPLETED one that lost the claim leaves any behind;
         # the reaper that fails a timed-out run writes none
         # (``backend/worker/cleanup.py::detect_stale_jobs``); and a cancel
         # writes none (``jobs/service.py::cancel_job_by_id``).
@@ -858,8 +861,9 @@ async def get_job(
         # is the only record of it and this lists it directly.
         #
         # No scores: per-design metrics live in job_candidates.scores, and that
-        # table is written only on the complete path (webhooks/router.py:225,
-        # :241), so there is nothing to read for this set. ``rank`` is the key
+        # table is written only on the complete path (webhooks/router.py:226,
+        # the INSERT at webhooks/router.py:283), so there is nothing to read
+        # for this set. ``rank`` is the key
         # order from list_job_design_keys -- a presentation order, not a
         # quality ranking.
         def _list_and_sign() -> list[dict]:
@@ -898,7 +902,7 @@ async def get_job(
             # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
             # Captured explicitly because swallowing here stops Sentry's
             # FastApiIntegration from seeing it -- the reasoning spelled out
-            # at webhooks/router.py:312-314.
+            # at webhooks/router.py:322-324.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []

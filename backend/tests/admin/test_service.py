@@ -114,6 +114,61 @@ async def test_cancel_job_not_found():
     assert exc_info.value.status_code == 404
 
 
+async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
+    """A cancel landing on a row another route already took settles nothing.
+
+    The reaper meters the runs it sweeps (worker/cleanup.py:374), so a cancel
+    arriving just after a sweep claimed the same row would otherwise be the
+    second charge for one job, on a different second count -- the reaper's
+    capped figure against this route's wall-clock one. Stripe's idempotency
+    key is a backstop with a 24-hour expiry
+    (billing/stripe_client.py:219), not the guard; the guard is the status
+    transition, which this route now has to win.
+
+    The cost write and the meter are both behind it. The 404 lookup, the
+    provider cancel, the SSE event and the response body are not, and are
+    unchanged -- a user cancelling a run that finished a moment ago still
+    gets a 200 saying cancelled.
+    """
+    started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
+    job_row = {
+        "runpod_job_id": "rp-job-003",
+        "job_spec": json.dumps({"tool": "bindcraft"}),
+        "started_at": started_at,
+        "user_id": "uid-3",
+    }
+    mock_pool = _make_pool_for_cancel(job_row, "cus_lost")
+
+    mock_provider = AsyncMock()
+    mock_provider.cancel_job = AsyncMock()
+    mock_record = MagicMock()
+
+    with (
+        patch("jobs.service.get_provider", return_value=mock_provider),
+        patch("jobs.service.record_gpu_usage", mock_record),
+        patch(
+            "worker.tasks.update_job_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as mock_update,
+        patch("worker.tasks.publish_status", new_callable=AsyncMock),
+    ):
+        result = await cancel_job_by_id("job-003", mock_pool)
+
+    # Claimed, and claimed as a claim.
+    mock_update.assert_called_once()
+    assert mock_update.call_args[1]["require_non_terminal"] is True
+
+    # Nothing behind the claim ran: the job lookup was the only connection
+    # taken, so no cost UPDATE and no customer resolution were issued.
+    assert mock_pool.acquire.call_count == 1
+    mock_record.assert_not_called()
+
+    # The caller's contract is untouched.
+    assert result["status"] == "cancelled"
+    assert result["gpu_seconds"] > 0
+
+
 async def test_cancel_records_billing():
     """cancel_job_by_id calls record_gpu_usage with the elapsed GPU seconds.
 
