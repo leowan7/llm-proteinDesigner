@@ -20,9 +20,9 @@ import os
 
 os.environ.setdefault("TESTING", "true")
 
-import pytest
 from unittest.mock import MagicMock, patch
 
+import pytest
 from storage.client import job_has_saved_designs, list_job_design_keys
 
 USER_ID = "user-uuid"

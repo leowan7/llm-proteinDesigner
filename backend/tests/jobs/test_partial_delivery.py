@@ -24,19 +24,19 @@ here the lister is patched, so these cover the routing and the response shape
 only.
 """
 
-import anyio
 import io
 import json
 import random
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
 from auth.dependencies import get_current_user
 from auth.org_dependencies import get_active_org
-from jobs.router import _ChunkSink
 from httpx import ASGITransport, AsyncClient
+from jobs.router import _ChunkSink
 from main import app
 
 JOB_ID = "job-partial"
@@ -72,11 +72,11 @@ def _job_row(status: str, **overrides):
         "job_spec": json.dumps({"tool": "bindcraft"}),
         "gpu_seconds": 1200,
         "gpu_cost_usd": None,
-        "started_at": datetime(2026, 10, 8, tzinfo=timezone.utc),
+        "started_at": datetime(2026, 10, 8, tzinfo=UTC),
         "completed_at": None,
         "error_category": "Timed out",
         "results": None,
-        "created_at": datetime(2026, 10, 8, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 10, 8, tzinfo=UTC),
     }
     row.update(overrides)
     return row
