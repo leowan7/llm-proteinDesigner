@@ -19,13 +19,12 @@ Three invariants, all load-bearing:
    design would list it twice regardless.
 3. An early-ended run still FAILS, and its designs are delivered by
    having been uploaded mid-run rather than by rewriting the outcome.
-   What that costs the customer no longer rides on the status alone: the
-   webhook commit on this branch meters a failed run of a streaming tool
-   once Storage holds one of its designs
-   (``backend/webhooks/router.py``, ``storage/client.py``
-   ``::job_has_saved_designs``). Reporting the run as COMPLETED would
-   still send the completion email instead of the failure one, and would
-   bill the saved-nothing run that stays free. The sweep must also be
+   What that costs the customer no longer rides on the status alone: since
+   2026-10-13 a failed run of any tool is metered once Storage holds one of
+   its designs (``backend/webhooks/router.py``, counting
+   ``storage/client.py::list_job_design_keys``). Reporting the run as
+   COMPLETED would still send the completion email instead of the failure
+   one, and would bill the saved-nothing run that stays free. The sweep must also be
    stopped before main()'s own upload loop starts, or the two sign one
    object name at once.
 
@@ -633,9 +632,9 @@ def test_an_early_ended_run_still_fails_but_its_designs_are_in_storage(
 
     A run that dies early stays a failure. ``backend/webhooks/router.py``
     maps FAILED and TIMED_OUT to ``"failed"`` (``_RUNPOD_STATUS_MAP``), and
-    since the webhook commit on this branch it meters a failed run of a tool
-    in ``_STREAMS_DESIGNS_MID_RUN`` once Storage holds one of its designs --
-    so this run is settled on GPU time used whichever status it reports, and
+    since 2026-10-13 it meters any failed run once Storage holds one of its
+    designs -- so this run is settled on GPU time used whichever status it
+    reports, and
     flipping the status buys nothing. What flipping would still do is send the
     completion email instead of the failure one, present a crashed run as a
     success, and bill a run that saved nothing, which stays free. The designs

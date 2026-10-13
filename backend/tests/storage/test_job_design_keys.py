@@ -1,20 +1,21 @@
-"""Tests for the two readers of a job's ``outputs/`` prefix in ``storage/client.py``.
+"""Tests for ``storage/client.py::list_job_design_keys``, the one reader of a
+job's ``outputs/`` prefix.
 
-``job_has_saved_designs`` decides money: since the webhook commit on this
-branch, a crashed or timed-out run of a tool in
-``webhooks/router.py::_STREAMS_DESIGNS_MID_RUN`` is billed exactly when it
-returns True.
+It decides delivery: for a run whose terminal state is ``failed`` or
+``cancelled`` it is the only record of the designs save-as-you-go banked,
+because no ``job_candidates`` row is written on either path.
+``jobs/router.py`` turns its keys into the candidate list and the presigned
+URLs a customer downloads.
 
-``list_job_design_keys`` decides delivery: for a run whose terminal state is
-``failed`` or ``cancelled`` it is the only record of the designs
-save-as-you-go banked, because no ``job_candidates`` row is written on either
-path. ``jobs/router.py`` turns its keys into the candidate list and the
-presigned URLs a customer downloads.
+Since 2026-10-13 it also decides money on both failure routes: a failed run
+is billed exactly when this returns at least one key
+(``webhooks/router.py``, ``worker/cleanup.py::detect_stale_jobs``). That is
+one predicate for both, which is the point -- there is no second reader that
+could disagree with it about which objects under the prefix are designs.
 
-Both go through the same generator -- ``job_has_saved_designs`` only as far
-as its first hit -- so the prefix they read and the suffixes they accept are
-pinned here. The webhook, reaper and jobs tests patch these two out
-and assert the call, so this file is the only place the listing itself runs.
+So the prefix it reads and the suffixes it accepts are pinned here. The
+webhook, reaper and jobs tests patch it out and assert the call, so this file
+is the only place the listing itself runs.
 """
 import os
 
@@ -22,8 +23,7 @@ os.environ.setdefault("TESTING", "true")
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-from storage.client import job_has_saved_designs, list_job_design_keys
+from storage.client import list_job_design_keys
 
 USER_ID = "user-uuid"
 JOB_ID = "job-uuid"
@@ -46,7 +46,7 @@ def test_a_design_pdb_counts():
     )
 
     with patch("storage.client.get_s3_client", return_value=client):
-        assert job_has_saved_designs(USER_ID, JOB_ID) is True
+        assert list_job_design_keys(USER_ID, JOB_ID) == [PREFIX + "design_1.pdb"]
 
     # Read under the job's own output prefix, the one get_upload_urls writes to
     assert paginator.paginate.call_args[1]["Prefix"] == PREFIX
@@ -58,7 +58,7 @@ def test_the_metrics_csvs_are_not_designs():
     ``docker/bindcraft/run_pipeline.py`` sends ``metrics.csv`` and
     ``bindcraft_results.csv`` through the same endpoint, which flattens every
     upload into the one ``outputs/`` prefix. Both are gated on at least one
-    accepted design (run_pipeline.py:1856, :1863), so a CSV-only prefix is the
+    accepted design (docker/bindcraft/run_pipeline.py:1856, :1863), so a CSV-only prefix is the
     case where designs were accepted but no PDB upload of any of them landed.
     Nothing reached Storage, so it stays unbilled.
     """
@@ -72,20 +72,8 @@ def test_the_metrics_csvs_are_not_designs():
     )
 
     with patch("storage.client.get_s3_client", return_value=client):
-        assert job_has_saved_designs(USER_ID, JOB_ID) is False
+        assert list_job_design_keys(USER_ID, JOB_ID) == []
 
-
-def test_an_empty_prefix_is_false_not_an_error():
-    """list_objects_v2 omits ``Contents`` entirely for a prefix with no keys."""
-    client, _ = _s3_yielding({"KeyCount": 0})
-
-    with patch("storage.client.get_s3_client", return_value=client):
-        assert job_has_saved_designs(USER_ID, JOB_ID) is False
-
-
-# ---------------------------------------------------------------------------
-# list_job_design_keys: the delivery read
-# ---------------------------------------------------------------------------
 
 def test_every_design_pdb_is_listed_sorted_and_across_pages():
     """Drains the paginator, keeps only PDBs, and returns them in key order.
@@ -144,33 +132,3 @@ def test_an_empty_prefix_lists_nothing_rather_than_raising():
 
     with patch("storage.client.get_s3_client", return_value=client):
         assert list_job_design_keys(USER_ID, JOB_ID) == []
-
-
-def test_reaching_a_design_stops_the_paging():
-    """The short-circuit, pinned by a page that fails if it is ever fetched.
-
-    ``job_has_saved_designs`` is called per job in the reaper's sweep
-    (``worker/cleanup.py``) and once per failed webhook, against a prefix that
-    can hold tens of thousands of keys, so what it costs is the pages it takes
-    to reach the first design rather than the whole prefix. The paginator here
-    raises on its third page; ``any`` abandons the generator at the design on
-    the second, so that page is never requested. ``list_job_design_keys``, which
-    has to drain, does reach it -- the contrast is the proof that the saving
-    belongs to this reader and not to the mock.
-    """
-
-    def pages():
-        yield {"Contents": [{"Key": PREFIX + "metrics.csv"}]}
-        yield {"Contents": [{"Key": PREFIX + "design_1.pdb"}]}
-        raise RuntimeError("paged past the first design")
-
-    client, paginator = _s3_yielding()
-    paginator.paginate.return_value = pages()
-
-    with patch("storage.client.get_s3_client", return_value=client):
-        assert job_has_saved_designs(USER_ID, JOB_ID) is True
-
-    paginator.paginate.return_value = pages()
-    with patch("storage.client.get_s3_client", return_value=client):
-        with pytest.raises(RuntimeError, match="paged past the first design"):
-            list_job_design_keys(USER_ID, JOB_ID)

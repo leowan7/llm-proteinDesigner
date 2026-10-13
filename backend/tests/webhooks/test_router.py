@@ -210,11 +210,12 @@ async def test_webhook_completed_job():
 async def test_webhook_failed_job():
     """A failed run that saved no designs is not billed.
 
-    This is the zero-saved-designs side of the 2026-10-07 billing rule: a
-    crashed run of a mid-run streaming tool is billed only when Storage holds
-    at least one of its designs, so one that saved none stays free. The tool
-    here is in ``_STREAMS_DESIGNS_MID_RUN``, so the handler really does ask
-    Storage -- which the assertion on the patched lookup pins.
+    This is the zero-saved-designs side of the billing rule: a crashed run is
+    billed only when Storage holds at least one of its designs, so one that
+    saved none stays free. Since 2026-10-13 that applies to every tool rather
+    than the three that streamed mid-run, and the one Storage read the handler
+    makes decides both the charge and the mail -- which the assertion on the
+    patched lookup pins.
 
     Verifies:
     - Returns 200 with {"received": True}
@@ -254,10 +255,10 @@ async def test_webhook_failed_job():
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
-        patch("webhooks.router.job_has_saved_designs", return_value=False) as mock_saved,
-        # The failure mail counts what the run banked before it died. Unpatched
-        # this reaches boto3 against an unreachable endpoint and burns its
-        # retry budget inside the handler's own except.
+        # One read, two consumers: the charge is gated on this count and the
+        # failure mail reports it. Unpatched it reaches boto3 against an
+        # unreachable endpoint and burns its retry budget inside the handler's
+        # own except.
         patch("webhooks.router.list_job_design_keys", return_value=[]) as mock_list,
     ):
         transport = ASGITransport(app=app)
@@ -275,10 +276,6 @@ async def test_webhook_failed_job():
     mock_update.assert_called_once()
     assert mock_update.call_args[0][1] == "failed"
 
-    # Storage was asked, with the launcher's user id and this job id, and said
-    # no designs (the prefix itself is pinned in tests/storage/)
-    mock_saved.assert_called_once_with("user-uuid", JOB_ID)
-
     # So no billing: a failure is billed only when it saved something
     mock_billing.assert_not_called()
 
@@ -288,13 +285,17 @@ async def test_webhook_failed_job():
     mock_fail_email.assert_called_once()
     assert mock_fail_email.call_args[1]["to_email"] == "test@example.com"
     assert mock_fail_email.call_args[1]["saved_designs"] == 0
+
+    # Storage was asked exactly once, with the launcher's user id and this job
+    # id (the prefix itself is pinned in tests/storage/). Once, not twice,
+    # because the charge and the mail read the same count.
     mock_list.assert_called_once_with("user-uuid", JOB_ID)
 
 
 async def test_webhook_failed_job_with_saved_designs_is_billed():
     """A failed run that already streamed designs is settled on GPU time used.
 
-    Leo's call 2026-10-07 for the BindCraft save-as-you-go path: a run that
+    Leo's call 2026-10-07, widened to every tool on 2026-10-13: a run that
     saved at least one design and then crashed or timed out is billed the same
     as a finished run, not prorated. The "not prorated" half is pinned by
     comparing the metered figure against the gpu_seconds written to the job
@@ -342,11 +343,10 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_ok_email,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
-        patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
         patch(
             "webhooks.router.list_job_design_keys",
             return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
-        ),
+        ) as mock_list,
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -358,7 +358,7 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
 
     assert response.status_code == 200
 
-    mock_saved.assert_called_once_with("user-uuid", JOB_ID)
+    mock_list.assert_called_once_with("user-uuid", JOB_ID)
 
     # Billed, to the customer the org resolver returned
     mock_billing.assert_called_once()
@@ -423,7 +423,6 @@ async def test_a_metering_failure_still_emails_the_customer():
         ) as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
-        patch("webhooks.router.job_has_saved_designs", return_value=True),
         patch(
             "webhooks.router.list_job_design_keys",
             return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
@@ -445,20 +444,23 @@ async def test_a_metering_failure_still_emails_the_customer():
     mock_fail_email.assert_called_once()
 
 
-async def test_webhook_failed_job_of_a_non_streaming_tool_is_not_billed_even_with_saved_designs():
-    """A tool outside _STREAMS_DESIGNS_MID_RUN keeps the old all-or-nothing rule.
+async def test_webhook_failed_job_of_a_non_streaming_tool_is_billed_when_it_saved_designs():
+    """Deliberately inverted on 2026-10-13: the tool no longer decides.
 
-    Save-as-you-go lands one tool per PR, so the billing rule has to stay off
-    for every tool whose container still uploads only after the GPU subprocess
-    finishes. Billing an rfdiffusion run that crashed after its final upload
-    loop is a call nobody has made.
+    This test asserted the opposite until this commit. It pinned
+    ``_STREAMS_DESIGNS_MID_RUN``, a tuple in webhooks/router.py -- deleted by
+    this commit, so there is no line left to cite -- that billed a failed run
+    only if its tool was one of the three whose container streamed designs
+    mid-run, and it checked that an rfdiffusion run whose designs
+    Storage held was handed them for free. Leo's call on 2026-10-13 is that
+    delivery and billing are one predicate for every tool, so that tuple and
+    the test that pinned it are both gone. The gate is now "the run failed and
+    Storage holds at least one design", which this rfdiffusion run meets.
 
-    This pins the gate against the delivery work: Storage here DOES hold
-    designs, and the failure mail reads them (``list_job_design_keys``, asserted
-    below), yet the billing gate still never reaches its own
-    ``job_has_saved_designs`` probe and nothing is metered. Those are two
-    separate reads of the same bucket, and only the billing one is gated on the
-    tool tuple (webhooks/router.py:56).
+    rfdiffusion is the tool here precisely because it was the excluded case:
+    its container uploads after the GPU subprocess finishes rather than as
+    each design lands, so before this change a crash after its upload loop
+    delivered designs that were never charged for.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -475,23 +477,27 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_is_not_billed_even_wit
     conn3 = AsyncMock()
     conn3.execute = AsyncMock()
 
+    # Conn 4: SELECT org_stripe_customer -- reached now, where the tool gate
+    # used to short-circuit before it
     conn4 = AsyncMock()
-    conn4.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+    conn4.fetchval = AsyncMock(return_value="cus_rfd")
 
-    mock_pool = _make_pool(conn1, conn2, conn3, conn4)
+    conn5 = AsyncMock()
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
 
     mock_provider = AsyncMock()
     mock_provider.terminate_pod = AsyncMock()
 
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("webhooks.router.update_job_status", new_callable=AsyncMock),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
         patch("webhooks.router.publish_status", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
-        patch("webhooks.router.job_has_saved_designs", return_value=True) as mock_saved,
         patch(
             "webhooks.router.list_job_design_keys",
             return_value=[
@@ -510,15 +516,80 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_is_not_billed_even_wit
 
     assert response.status_code == 200
 
-    # The billing gate short-circuits on the tool before it probes Storage at
-    # all, so nothing is metered
-    mock_saved.assert_not_called()
-    mock_billing.assert_not_called()
+    # Billed, on the same count the mail reports
+    mock_billing.assert_called_once()
+    customer, billed_job, billed_seconds = mock_billing.call_args[0]
+    assert customer == "cus_rfd"
+    assert billed_job == JOB_ID
+    assert billed_seconds == mock_update.call_args[1]["gpu_seconds"]
 
-    # Delivery is not gated on the same tuple: the mail reads the bucket and
-    # names both designs this rfdiffusion run banked
+    # One read of the bucket behind both the charge and the mail, which names
+    # both designs this rfdiffusion run banked
     mock_list.assert_called_once_with("user-uuid", JOB_ID)
     assert mock_fail_email.call_args[1]["saved_designs"] == 2
+
+
+async def test_a_storage_fault_leaves_a_failed_run_unbilled():
+    """An unreadable bucket must not become a charge.
+
+    The count the charge rests on now comes from a network call, so the
+    failure mode matters: a listing that raises leaves the count at zero,
+    which leaves the run unbilled -- what every failure did before 2026-10-13
+    -- and sends the plain failure notice rather than guessing at a number or
+    losing the mail.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock()
+
+    conn4 = AsyncMock()
+    conn4.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch(
+            "webhooks.router.list_job_design_keys",
+            side_effect=OSError("bucket unreachable"),
+        ),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    mock_billing.assert_not_called()
+
+    # The run is still failed and the customer still hears about it, with
+    # nothing to collect
+    assert mock_update.call_args[0][1] == "failed"
+    mock_fail_email.assert_called_once()
+    assert mock_fail_email.call_args[1]["saved_designs"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +762,14 @@ async def test_webhook_valid_signature():
 # ---------------------------------------------------------------------------
 
 async def test_webhook_skips_terminal_job():
-    """Webhook for a job already in terminal state returns 200 without re-processing."""
+    """Webhook for a job already in terminal state returns 200 without re-processing.
+
+    Since 2026-10-13 this guard is also what keeps a job to one charge: the
+    reaper (worker/cleanup.py) now meters a stale-killed run that banked
+    designs, so a late webhook for a row it already settled must not meter it
+    again. Returning here, before the billing block, is the mechanism -- hence
+    the assertion that nothing was metered.
+    """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
         "id": JOB_ID,
@@ -711,6 +789,7 @@ async def test_webhook_skips_terminal_job():
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
         patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
     ):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -723,3 +802,59 @@ async def test_webhook_skips_terminal_job():
     assert response.status_code == 200
     # update_job_status should NOT be called (already terminal)
     mock_update.assert_not_called()
+    # ...and nothing re-metered
+    mock_billing.assert_not_called()
+
+
+async def test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again():
+    """The reaper-then-webhook half of one-charge-per-job.
+
+    worker/cleanup.py sweeps a run killed from outside, claims the row, meters
+    its capped GPU seconds and mails the customer. The provider's own FAILED
+    post can still arrive afterwards -- and Storage holds designs, so the new
+    gate would otherwise bill it a second time. The double-processing guard
+    (webhooks/router.py:207) returns first, so the second charge never
+    happens. The other order is pinned on the reaper side, by
+    tests/worker/test_cleanup.py::
+    test_a_stale_job_another_route_already_finished_is_not_billed_or_mailed.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    # The reaper already took this row terminal.
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "failed"})
+
+    mock_pool = _make_pool(conn1, conn2)
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
+        ) as mock_list,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    mock_billing.assert_not_called()
+    mock_update.assert_not_called()
+    mock_fail_email.assert_not_called()
+    # Not even read: the guard returns above the count.
+    mock_list.assert_not_called()

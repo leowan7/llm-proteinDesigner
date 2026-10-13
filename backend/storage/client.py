@@ -247,11 +247,10 @@ def iter_job_design_keys(
     so a run's metrics CSVs land beside its designs; the target structure does
     not -- that is written under ``inputs/`` (:func:`ensure_pdb_in_s3`).
 
-    A generator, so :func:`job_has_saved_designs` stops at the first design
-    key while :func:`list_job_design_keys` drains every page. Keys arrive in the
-    paginator's order, which this function does not sort. Whatever botocore
-    raises propagates from the caller's iteration: the caller decides what an
-    unreadable bucket means.
+    A generator over the paginator, with the sort left to its one caller,
+    :func:`list_job_design_keys`. Keys arrive in the paginator's order, which
+    this function does not sort. Whatever botocore raises propagates from the
+    caller's iteration: the caller decides what an unreadable bucket means.
     """
     client = get_s3_client()
     prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
@@ -260,22 +259,6 @@ def iter_job_design_keys(
         for obj in page.get("Contents") or []:
             if obj["Key"].endswith(suffixes):
                 yield obj["Key"]
-
-
-def job_has_saved_designs(user_id: str, job_id: str) -> bool:
-    """True when the job's output prefix already holds at least one design.
-
-    The webhook uses it to settle a run that died after streaming designs to
-    Storage. ``any`` stops at the first design key the generator yields, so a
-    prefix that leads with CSVs costs only the pages it takes to reach a
-    design, not every page of the prefix
-    (``tests/storage/test_job_design_keys.py::test_reaching_a_design_stops_the_paging``).
-
-    Returns False on an empty or missing prefix. See
-    :func:`iter_job_design_keys` for the prefix, the suffix filter and the
-    error contract.
-    """
-    return any(iter_job_design_keys(user_id, job_id))
 
 
 def list_job_design_keys(user_id: str, job_id: str) -> list[str]:

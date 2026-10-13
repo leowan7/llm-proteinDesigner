@@ -33,7 +33,7 @@ from db.connection import get_db_pool
 from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
-from storage.client import job_has_saved_designs, list_job_design_keys
+from storage.client import list_job_design_keys
 from worker.tasks import publish_status, update_job_status
 
 logger = logging.getLogger(__name__)
@@ -47,13 +47,6 @@ _RUNPOD_STATUS_MAP: dict[str, str] = {
     "CANCELLED": "cancelled",
     "TIMED_OUT": "failed",
 }
-
-# Tools whose container uploads each design as it finishes, so a run that died
-# part way through can already have delivered designs. A failure of one of
-# these is billed when Storage holds at least one of them; see the billing
-# block below. Save-as-you-go lands one tool per PR, and a tool joins this
-# tuple with its own PR.
-_STREAMS_DESIGNS_MID_RUN: tuple[str, ...] = ("bindcraft",)
 
 
 def validate_webhook_signature(
@@ -304,18 +297,54 @@ async def runpod_webhook(request: Request):
             logger.exception("Failed to terminate GPU job %s", stored_pod_id)
             sentry_sdk.capture_exception(exc)
 
+    # How many designs this run banked before it died. Counted once, here,
+    # because two separate things turn on it: the failure mail points the
+    # customer at them, and a failed run is billed exactly when there is at
+    # least one. Both are the same predicate by construction: this count, the
+    # `partial` flag get_job serves (jobs/router.py:887) and the reaper's own
+    # count (worker/cleanup.py:320) all come from one function,
+    # storage/client.py::list_job_design_keys, which is the only reader of that
+    # prefix left in backend/.
+    saved_designs = 0
+    if internal_status == "failed":
+        try:
+            # Sync boto3 off the event loop, the house pattern at
+            # jobs/notifications.py:57.
+            saved_designs = len(
+                await asyncio.to_thread(list_job_design_keys, str(user_id), job_id)
+            )
+        except Exception as exc:
+            # An unreadable bucket must not become a charge, and must not cost
+            # the customer their mail either. The count stays 0, which leaves
+            # the run unbilled -- what every failure did before this change --
+            # and sends the plain failure notice. A successful listing that
+            # finds nothing lands on the same 0 and the same outcome, so the
+            # two cases are deliberately not distinguished.
+            logger.exception(
+                "Could not read saved designs for failed job %s; leaving it "
+                "unbilled and sending the plain failure mail",
+                job_id,
+            )
+            sentry_sdk.capture_exception(exc)
+
     # Record billing for a run the org owes GPU time for.
     #
-    # Finished and cancelled runs qualify. A failed run of a mid-run
-    # streaming tool qualifies too, once Storage holds at least one of its
-    # designs -- Leo's call 2026-10-07: such a run is settled on GPU time
-    # used, the same as a finished run, and is not prorated. A run that saved
-    # nothing stays fully unbilled, as every failure was before this change.
+    # Finished and cancelled runs qualify. So does a failed run that banked at
+    # least one design, for every tool -- Leo's call 2026-10-13: this PR makes
+    # those designs reachable (jobs/router.py:828), and they are not handed
+    # over for free. Such a run is settled on GPU time used, the same as a
+    # finished run, and is not prorated. A run that saved nothing stays fully
+    # unbilled. The condition is `saved_designs > 0`, the same value the mail
+    # below reports, so delivery and billing cannot drift apart per tool.
     #
-    # This fires only when the webhook is the job's first terminal transition.
-    # A run already swept by worker/cleanup.py::detect_stale_jobs is 'failed'
-    # with no charge, and a late webhook for it returns at the double-processing
-    # guard above, so the reaper's timeouts are not settled by this rule.
+    # Exactly one of this route and the reaper bills any given job. Whichever
+    # makes the row terminal first excludes the other: a late webhook for a
+    # job the reaper already failed returns at the double-processing guard
+    # above, and worker/cleanup.py only claims rows still 'running'
+    # (worker/cleanup.py::detect_stale_jobs, whose UPDATE is guarded on that
+    # status and bills only when it claimed the row). record_gpu_usage keys
+    # its meter event on the job id as a second line of defence
+    # (billing/stripe_client.py:219).
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
@@ -326,27 +355,9 @@ async def runpod_webhook(request: Request):
     # customer was created by an old replica mid-deploy. Without that fallback
     # the GPU time of an existing payer would silently go unmetered, because
     # a NULL resolution skips billing rather than raising.
-    should_bill = internal_status in ("complete", "cancelled")
-    if (
-        not should_bill
-        and gpu_seconds > 0
-        and internal_status == "failed"
-        and (row["tool"] or "") in _STREAMS_DESIGNS_MID_RUN
-    ):
-        try:
-            # Sync boto3 off the event loop, the house pattern at
-            # jobs/notifications.py:57.
-            should_bill = await asyncio.to_thread(
-                job_has_saved_designs, str(user_id), job_id
-            )
-        except Exception as exc:
-            # An unreadable bucket must not become a charge. Leaving the run
-            # unbilled is what every failure did before this change.
-            logger.exception(
-                "Could not read saved designs for failed job %s; leaving it unbilled",
-                job_id,
-            )
-            sentry_sdk.capture_exception(exc)
+    should_bill = internal_status in ("complete", "cancelled") or (
+        internal_status == "failed" and saved_designs > 0
+    )
 
     if should_bill and gpu_seconds > 0:
         async with pool.acquire() as conn:
@@ -387,31 +398,8 @@ async def runpod_webhook(request: Request):
                 runtime_seconds=gpu_seconds,
             )
         elif internal_status == "failed":
-            # How many designs the run banked before it died, so the mail can
-            # point at them instead of reporting a bare failure. Counted here,
-            # after the billing block above has already settled, and
-            # deliberately not reused by it: billing a failed run stays gated
-            # on _STREAMS_DESIGNS_MID_RUN and is not widened by this count.
-            saved_designs = 0
-            try:
-                # Sync boto3 off the event loop, the house pattern at
-                # jobs/notifications.py:57.
-                saved_designs = len(
-                    await asyncio.to_thread(
-                        list_job_design_keys, str(user_id), job_id
-                    )
-                )
-            except Exception as exc:
-                # An unreadable bucket costs the mail its design count, not the
-                # mail itself: the job row is already terminal, so a retry
-                # returns at the double-processing guard above and this mail
-                # would never go out.
-                logger.exception(
-                    "Could not count saved designs for failed job %s; "
-                    "sending the plain failure mail",
-                    job_id,
-                )
-                sentry_sdk.capture_exception(exc)
+            # saved_designs was counted before the billing block above, which
+            # gates the charge on the same value this mail reports.
             await send_failure_email(
                 to_email=user_row["email"],
                 job_id=job_id,
