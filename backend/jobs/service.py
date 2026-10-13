@@ -100,7 +100,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     from worker.tasks import publish_status, update_job_status
 
     # Update DB status, and claim the job in the same write. The reaper now
-    # meters a run it sweeps (worker/cleanup.py:374), so this route can no
+    # meters a run it sweeps (worker/cleanup.py:376), so this route can no
     # longer settle a job another route has already settled: the flag makes
     # the status write conditional on the row being non-terminal and reports
     # whether it won, the protocol the webhook takes (webhooks/router.py:247)

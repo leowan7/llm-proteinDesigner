@@ -264,7 +264,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # with no record on the row: the customer's run would show no cost
         # (GET /jobs serves this column, jobs/router.py:495), the
         # daily spend guard in this module would sum it as zero
-        # (check_daily_gpu_spend, :413) so a burst of billed timeouts
+        # (check_daily_gpu_spend, :415) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be
         # reconciled against the Stripe invoice.
         gpu_cost_usd = round(
@@ -328,7 +328,9 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # Send failure email. This is the route a run killed from outside
         # takes: nothing POSTed a webhook, which is why the job went stale. A
         # container that catches its own timeout posts FAILED instead
-        # (docker/boltzgen/run_pipeline.py:1951) and is counted in
+        # (docker/boltzgen/run_pipeline.py:1951 sets an `error` payload,
+        # which post_webhook maps to FAILED at
+        # docker/boltzgen/run_pipeline.py:807) and is counted in
         # webhooks/router.py. Save-as-you-go may have banked designs on either
         # route, so count them here too and let the mail point at them.
         saved_designs = 0

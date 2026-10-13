@@ -329,7 +329,7 @@ async def runpod_webhook(request: Request):
     # because two separate things turn on it: the failure mail points the
     # customer at them, and a failed run is billed exactly when there is at
     # least one. The same count feeds the `partial` flag get_job serves
-    # (jobs/router.py:909) and the reaper's own gate (worker/cleanup.py:338);
+    # (jobs/router.py:909) and the reaper's own gate (worker/cleanup.py:340);
     # all three call one function, storage/client.py::list_job_design_keys.
     # The bulk download reads the same prefix with its own paginator
     # (jobs/router.py:610) because it archives every object it finds, CSVs

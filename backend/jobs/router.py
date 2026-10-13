@@ -869,12 +869,12 @@ async def get_job(
         def _list_and_sign() -> list[dict]:
             # Signed in here rather than in a comprehension on the event
             # loop because nothing in backend/ bounds this set. The complete
-            # branch above signs job_candidates rows, which the run's own
-            # budget caps at 500 (agent/wizard.py:142-149); this one signs
-            # whatever Storage holds under the job's prefix, and every cap on
-            # that lives in a container's own filter, under docker/, which no
-            # module in backend/ imports (docker/pxdesign/run_pipeline.py:1867
-            # and docker/boltzgen/run_pipeline.py:2021 each upload a filtered
+            # branch above signs the job_candidates rows a container chose
+            # to report; this one signs whatever Storage holds under the
+            # job's prefix, and every cap on that lives in a container's own
+            # filter, under docker/, which no module in backend/ imports
+            # (docker/pxdesign/run_pipeline.py:1867 and
+            # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
             # `passing` set, and boltzgen's size comes from its own budget
             # default of 60, docker/boltzgen/run_pipeline.py:1850).
             # generate_presigned_get_url builds a fresh boto3 client per call

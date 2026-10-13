@@ -81,13 +81,15 @@ def test_the_metrics_csvs_are_not_designs():
 
 
 def test_every_design_pdb_is_listed_sorted_and_across_pages():
-    """Drains the paginator, keeps only PDBs, and returns them in key order.
+    """Drains the paginator, drops non-designs, and returns them in key order.
 
     Three properties in one listing because they are one line of code each and
     a failed run needs all three: the customer gets every design the GPU
     banked, not the first page of them; the CSVs that share the prefix are not
     offered as structures; and the order is stable, so two reads of the same
-    failed job agree on which design is rank 1.
+    failed job agree on which design is rank 1. The suffix property this
+    exercises is .pdb against .csv; .cif is kept too, and
+    test_a_cif_design_is_delivered_too covers that.
     """
     client, paginator = _s3_yielding(
         {
