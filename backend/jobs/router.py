@@ -609,9 +609,10 @@ async def download_all_designs(
 
     def _list_objects() -> list[dict]:
         # Paginated because a bare list_objects_v2 stops at 1000 keys and
-        # num_designs caps far above that -- 20000 for rfantibody and
-        # pxdesign, 60000 for boltzgen (agent/wizard.py:114, :166, :139,
-        # enforced at agent/tools.py:643) -- so a large run's archive was
+        # num_designs caps far above that -- 20000 for rfantibody
+        # (agent/wizard.py:114) and pxdesign (agent/wizard.py:166), 60000 for
+        # boltzgen (agent/wizard.py:139), each enforced at
+        # agent/tools.py:643 -- so a large run's archive was
         # silently short. It also reads every page list_job_design_keys does,
         # which puts every design GET /jobs/{id} lists in the archive.
         return [
@@ -636,7 +637,8 @@ async def download_all_designs(
     def _stream_archive() -> Iterator[bytes]:
         # Streamed rather than built in memory because paginating the listing
         # above removed the implicit 1000-key cap that used to bound this, and
-        # num_designs allows far more (agent/wizard.py:114, :166, :139): a
+        # num_designs allows far more (agent/wizard.py:114, agent/wizard.py:166
+        # and agent/wizard.py:139): a
         # whole archive held in a BytesIO makes one download of a large run a
         # process-wide memory event. Each object arrives 64KiB at a time and
         # the sink is drained after every entry, so what is resident is one
@@ -851,8 +853,8 @@ async def get_job(
         # webhook collects a payload's candidates only inside ``if
         # internal_status == "complete"`` (``backend/webhooks/router.py:226``)
         # and writes them only below its claim on the row (the claim at
-        # ``backend/webhooks/router.py:247``, the INSERT at
-        # ``backend/webhooks/router.py:283``), so neither a FAILED post nor a
+        # ``backend/webhooks/router.py:264``, the INSERT at
+        # ``backend/webhooks/router.py:275``), so neither a FAILED post nor a
         # COMPLETED one that lost the claim leaves any behind;
         # the reaper that fails a timed-out run writes none
         # (``backend/worker/cleanup.py::detect_stale_jobs``); and a cancel
@@ -862,7 +864,7 @@ async def get_job(
         #
         # No scores: per-design metrics live in job_candidates.scores, and that
         # table is written only on the complete path (webhooks/router.py:226,
-        # the INSERT at webhooks/router.py:283), so there is nothing to read
+        # the INSERT at webhooks/router.py:275), so there is nothing to read
         # for this set. ``rank`` is the key
         # order from list_job_design_keys -- a presentation order, not a
         # quality ranking.
@@ -876,7 +878,8 @@ async def get_job(
             # (docker/pxdesign/run_pipeline.py:1867 and
             # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
             # `passing` set, and boltzgen's size comes from its own budget
-            # default of 60, docker/boltzgen/run_pipeline.py:1850).
+            # default, 60 outside the pilot tier and 5 inside it,
+            # docker/boltzgen/run_pipeline.py:1850).
             # generate_presigned_get_url builds a fresh boto3 client per call
             # (storage/client.py:58), so a large set would hold the one event
             # loop long enough to stall every other request in the process,
@@ -902,7 +905,7 @@ async def get_job(
             # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
             # Captured explicitly because swallowing here stops Sentry's
             # FastApiIntegration from seeing it -- the reasoning spelled out
-            # at webhooks/router.py:322-324.
+            # at webhooks/router.py:323-326.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []

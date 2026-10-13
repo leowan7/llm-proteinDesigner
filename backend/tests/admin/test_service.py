@@ -127,10 +127,10 @@ async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     transition, which this route now has to win.
 
     Behind the claim: the cost write, the Stripe meter, and the SSE terminal
-    event, which the winning route publishes itself (webhooks/router.py:309,
+    event, which the winning route publishes itself (webhooks/router.py:312,
     worker/cleanup.py:326). The 404 lookup and the provider cancel are in
     front of it and still run. The response body reports the winning row --
-    jobs/router.py:734 hands these three fields to the caller and
+    jobs/router.py:736 hands these three fields to the caller and
     admin/router.py:389 writes two of them into the audit log, so returning a
     cancellation that did not happen would be an audited charge nobody made.
     """

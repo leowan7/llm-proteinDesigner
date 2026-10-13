@@ -15,7 +15,7 @@ one predicate for both, which is the point.
 The bulk download reads the same prefix with its own paginator
 (``jobs/router.py:610``) because it archives every object it
 finds, not only the designs. It reuses this module's ``DESIGN_SUFFIXES`` for
-its own "is there anything to serve" check (``jobs/router.py:629``),
+its own "is there anything to serve" check (``jobs/router.py:630``),
 so the two cannot disagree about which objects are structures.
 
 So the prefix it reads and the suffixes it accepts are pinned here. The

@@ -257,7 +257,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
 
         # Written for every job this sweep claims, billed or not, which is what
         # the webhook route does for every terminal job it handles
-        # (webhooks/router.py:295 and webhooks/router.py:303). Until this
+        # (webhooks/router.py:285 and webhooks/router.py:292). Until this
         # commit the sweep
         # wrote gpu_seconds and no cost, which did not matter while it metered
         # nothing; now that it charges, a NULL here would mean a real charge
@@ -328,7 +328,9 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # Send failure email. This is the route a run killed from outside
         # takes: nothing POSTed a webhook, which is why the job went stale. A
         # container that catches its own timeout posts FAILED instead
-        # (docker/boltzgen/run_pipeline.py:1951 sets an `error` payload,
+        # (docker/boltzgen/run_pipeline.py:1953 sets an `error` payload in the
+        # handler for its own TimeoutExpired at
+        # docker/boltzgen/run_pipeline.py:1951,
         # which post_webhook maps to FAILED at
         # docker/boltzgen/run_pipeline.py:807) and is counted in
         # webhooks/router.py. Save-as-you-go may have banked designs on either
