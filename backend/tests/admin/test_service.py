@@ -118,7 +118,7 @@ async def test_cancel_job_not_found():
 async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     """A cancel landing on a row another route already took settles nothing.
 
-    The reaper meters the runs it sweeps (worker/cleanup.py:376), so a cancel
+    The reaper meters the runs it sweeps (worker/cleanup.py:380), so a cancel
     arriving just after a sweep claimed the same row would otherwise be the
     second charge for one job, on a different second count -- the reaper's
     capped figure against this route's wall-clock one. Stripe's idempotency
@@ -127,10 +127,10 @@ async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     transition, which this route now has to win.
 
     Behind the claim: the cost write, the Stripe meter, and the SSE terminal
-    event, which the winning route publishes itself (webhooks/router.py:344,
-    worker/cleanup.py:326). The 404 lookup and the provider cancel are in
+    event, which the winning route publishes itself (webhooks/router.py:349,
+    worker/cleanup.py:328). The 404 lookup and the provider cancel are in
     front of it and still run. The response body reports the winning row --
-    jobs/router.py:737 hands these three fields to the caller and
+    jobs/router.py:738 hands these three fields to the caller and
     admin/router.py:389 writes two of them into the audit log, so returning a
     cancellation that did not happen would be an audited charge nobody made.
     """
@@ -229,4 +229,47 @@ async def test_cancel_records_billing():
     gpu_seconds = result["gpu_seconds"]
     assert gpu_seconds > 0
     # record_gpu_usage called with (stripe_customer_id, job_id, gpu_seconds)
+    mock_record.assert_called_once_with("cus_billing", "job-002", gpu_seconds)
+
+
+async def test_a_redis_fault_on_the_cancels_publish_still_meters():
+    """The cancel route meters even when the SSE event cannot be sent.
+
+    This is test_cancel_records_billing with one thing changed: the publish at
+    jobs/service.py:172 raises. It sits between a claim that has committed and
+    the meter at jobs/service.py:193, and the row is terminal afterwards, so
+    nothing retries this charge.
+    """
+    started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
+    job_row = {
+        "runpod_job_id": "rp-job-002",
+        "job_spec": json.dumps({"tool": "bindcraft"}),
+        "started_at": started_at,
+        "user_id": "uid-2",
+    }
+    mock_pool = _make_pool_for_cancel(job_row, "cus_billing")
+
+    mock_provider = AsyncMock()
+    mock_provider.cancel_job = AsyncMock()
+    mock_record = MagicMock()
+
+    with (
+        patch("jobs.service.get_provider", return_value=mock_provider),
+        patch("jobs.service.record_gpu_usage", mock_record),
+        patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+        # The fault goes inside the real wrapper, not over it.
+        patch(
+            "worker.tasks.publish_status",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("redis unreachable"),
+        ) as mock_publish,
+        patch("worker.tasks.sentry_sdk.capture_exception") as mock_sentry,
+    ):
+        result = await cancel_job_by_id("job-002", mock_pool)
+
+    mock_publish.assert_awaited_once()
+    mock_sentry.assert_called_once()
+
+    gpu_seconds = result["gpu_seconds"]
+    assert gpu_seconds > 0
     mock_record.assert_called_once_with("cus_billing", "job-002", gpu_seconds)

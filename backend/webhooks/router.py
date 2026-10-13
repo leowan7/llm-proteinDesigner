@@ -34,7 +34,11 @@ from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
 from storage.client import list_job_design_keys
-from worker.tasks import publish_status, update_job_status
+from worker.tasks import (
+    publish_status,
+    publish_status_best_effort,
+    update_job_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +254,7 @@ async def runpod_webhook(request: Request):
         error_category = error_info.get("category", "Pipeline error")
 
     # Update DB status. This write is also the claim on the job. The guard at
-    # :207 is only a pre-read, and the reaper can take the row in the window
+    # :211 is only a pre-read, and the reaper can take the row in the window
     # between that read and this write (worker/cleanup.py:276-285 claims it
     # the same way, from the other side), so everything below that must
     # happen once per job is gated on having won the transition.
@@ -260,14 +264,14 @@ async def runpod_webhook(request: Request):
     # transaction, for two reasons. A handler that loses the claim writes
     # neither, so it cannot leave rows on a row another route has already
     # made terminal: get_job reads job_candidates only on a `complete` row
-    # (jobs/router.py:837) and its partial branch lists Storage instead
-    # (jobs/router.py:852), so those rows would reach no one
+    # (jobs/router.py:838) and its partial branch lists Storage instead
+    # (jobs/router.py:853), so those rows would reach no one
     # (tests/webhooks/test_router.py::test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows).
     # And a failure part-way through the candidate loop now rolls the claim
     # back with it, leaving the row non-terminal for a redelivery or the
     # reaper to settle; without the transaction the row would stay terminal
     # with some of its candidates, a NULL `results`, no mail and no charge,
-    # and the redelivery would be dropped by the pre-read guard at :207
+    # and the redelivery would be dropped by the pre-read guard at :211
     # (tests/webhooks/test_router.py::test_a_failed_candidate_insert_rolls_the_claim_back).
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -340,18 +344,22 @@ async def runpod_webhook(request: Request):
         )
         return {"received": True}
 
-    # Publish SSE status update.
-    await publish_status(job_id, internal_status, internal_status.capitalize())
+    # Publish SSE status update. Best-effort: the claim above has committed,
+    # so a Redis fault must not take the charge and the mail below with it.
+    await publish_status_best_effort(
+        job_id, internal_status, internal_status.capitalize()
+    )
 
     # How many designs this run banked before it died. Counted once, here,
     # because two separate things turn on it: the failure mail points the
     # customer at them, and a failed run is billed exactly when there is at
     # least one. The same count feeds the `partial` flag get_job serves
-    # (jobs/router.py:917) and the reaper's own gate (worker/cleanup.py:368);
+    # (jobs/router.py:918) and the reaper's own gate (worker/cleanup.py:370);
     # all three call one function, storage/client.py::list_job_design_keys.
     # The bulk download reads the same prefix with its own paginator
-    # (jobs/router.py:611) because it archives every object it finds, CSVs
-    # included, but it counts nothing and decides no money.
+    # (jobs/router.py:612) because it archives every object it finds, CSVs
+    # included. It tests the same suffixes to decide its 404
+    # (jobs/router.py:631-633) but never counts them, and decides no money.
     saved_designs = 0
     if internal_status == "failed":
         try:
@@ -378,7 +386,7 @@ async def runpod_webhook(request: Request):
     #
     # Finished and cancelled runs qualify. So does a failed run that banked at
     # least one design, for every tool -- Leo's call 2026-10-13: this PR makes
-    # those designs reachable (jobs/router.py:852), and they are not handed
+    # those designs reachable (jobs/router.py:853), and they are not handed
     # over for free. Such a run is settled on GPU time used, the same as a
     # finished run, and is not prorated. A run that saved nothing stays fully
     # unbilled. The condition is `saved_designs > 0`, the same value the mail
@@ -391,7 +399,7 @@ async def runpod_webhook(request: Request):
     # Exactly one of this route and the reaper bills any given job, because
     # exactly one of them wins the status transition. This handler reaches the
     # charge only when its own UPDATE claimed a non-terminal row
-    # (:274), and worker/cleanup.py reaches it only when its
+    # (:278), and worker/cleanup.py reaches it only when its
     # UPDATE claimed a row still 'running' (worker/cleanup.py:284)
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.

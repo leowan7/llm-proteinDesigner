@@ -18,7 +18,11 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import the functions under test AFTER setting TESTING env
-from worker.tasks import publish_status, update_job_status
+from worker.tasks import (
+    publish_status,
+    publish_status_best_effort,
+    update_job_status,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -223,7 +227,7 @@ async def test_update_job_status_claims_a_row_that_is_not_terminal():
     """``require_non_terminal`` makes the UPDATE an atomic claim.
 
     The webhook route charges a customer on the strength of winning this one
-    write (webhooks/router.py:274), so the guard and the
+    write (webhooks/router.py:278), so the guard and the
     RETURNING have to reach the DB in the statement itself. A pre-read cannot
     stand in for them: the row can change between the read and the write,
     which is the window worker/cleanup.py's sweep opens
@@ -252,7 +256,8 @@ async def test_update_job_status_reports_a_row_another_route_already_took():
     """A claim that writes nothing comes back False.
 
     This is the value the webhook route tests for before it bills or mails
-    (webhooks/router.py:277). asyncpg's ``fetchval``
+    (webhooks/router.py:337, the guard below the pod-termination block).
+    asyncpg's ``fetchval``
     returns None when the UPDATE matched no row, which is what a terminal
     status does to the guard above.
     """
@@ -273,12 +278,15 @@ async def test_update_job_status_is_an_unconditional_write_by_default():
     """Every other caller keeps the blind write it had.
 
     run_job makes all of its own status writes through the default: it
-    drives a job through 'running' twice (worker/tasks.py:176, :291) and
-    writes 'failed' on three error paths that run before a pod exists
-    (:204, :228, :272). None of them is claiming anything, so the default
+    drives a job through 'running' twice (worker/tasks.py:237 and
+    worker/tasks.py:352) and writes 'failed' on three error paths that run
+    before it has a pod id to store (worker/tasks.py:265,
+    worker/tasks.py:289 and worker/tasks.py:333 -- the last of these is the
+    submit_job call itself, so a pod may exist provider-side and be left to
+    the reaper). None of them is claiming anything, so the default
     must stay the statement it was before the claim was added -- no status
     guard, no RETURNING, and the same ``execute`` call. The two callers that
-    do claim pass the flag explicitly (webhooks/router.py:274,
+    do claim pass the flag explicitly (webhooks/router.py:278,
     jobs/service.py:110).
     """
     conn = AsyncMock()
@@ -299,7 +307,7 @@ async def test_update_job_status_claims_on_a_caller_s_own_connection():
     """A caller that passes a connection is written on that connection.
 
     The webhook handler opens a transaction and claims inside it
-    (webhooks/router.py:272-282) so that a failure in the candidate writes
+    (webhooks/router.py:276-282) so that a failure in the candidate writes
     rolls the claim back with them. That only holds if the claim actually
     runs on the connection it was handed: a claim that quietly took a second
     connection from the pool would commit on its own, outside the caller's
@@ -337,3 +345,34 @@ async def test_update_job_status_writes_unconditionally_on_a_caller_s_connection
     mock_pool_getter.assert_not_called()
     assert "NOT IN" not in caller_conn.execute.call_args[0][0]
     caller_conn.fetchval.assert_not_called()
+
+
+async def test_publish_status_best_effort_swallows_a_redis_fault():
+    """The wrapper all three settling routes publish through absorbs Redis.
+
+    Each of them publishes between a claim UPDATE that has already committed
+    and the charge that follows it (webhooks/router.py:349,
+    worker/cleanup.py:328 and jobs/service.py:172), so an exception escaping
+    the publish would skip a charge for GPU time already burned and, on the
+    two failure routes, the mail that tells the customer the run ended.
+
+    The fault is injected at ``worker.tasks.publish_status`` rather than at
+    the wrapper, because that is the name the wrapper resolves from this
+    module's namespace at call time. Patching the wrapper would replace the
+    code under test.
+    """
+    boom = RuntimeError("redis unreachable")
+
+    with (
+        patch(
+            "worker.tasks.publish_status",
+            new_callable=AsyncMock,
+            side_effect=boom,
+        ) as mock_publish,
+        patch("worker.tasks.sentry_sdk.capture_exception") as mock_sentry,
+    ):
+        await publish_status_best_effort("job-x", "failed", "Failed")
+
+    # It delegated -- the wrapper is not a no-op -- and it reported.
+    mock_publish.assert_awaited_once_with("job-x", "failed", "Failed")
+    mock_sentry.assert_called_once_with(boom)

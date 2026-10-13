@@ -46,6 +46,37 @@ async def publish_status(job_id: str, status: str, stage: str) -> None:
     await r.aclose()
 
 
+async def publish_status_best_effort(job_id: str, status: str, stage: str) -> None:
+    """Publish a status event without letting Redis abort the caller.
+
+    The three routes that settle a job all publish between a claim UPDATE that
+    has already committed and the charge that follows it. An exception out of
+    ``publish_status`` there is not retried into place: the row is terminal, so
+    the reaper's sweep no longer selects it (``WHERE status = 'running'``,
+    worker/cleanup.py:203) and a webhook redelivery is dropped by the pre-read
+    guard (webhooks/router.py:211). What that would leave is a row stamped with
+    a ``gpu_cost_usd`` nothing metered, and -- on the two failure routes -- no
+    mail telling the customer the run ended.
+
+    So the event is the one thing after the claim that is swallowed here. The
+    front end does not need it to show the outcome: JobPage fetches the job on
+    mount (frontend/src/pages/JobPage.tsx:102), so a lost event costs a reload.
+
+    Callers that publish before anything irreversible keep plain
+    ``publish_status`` -- in ``run_job`` a Redis fault should still fail the
+    dispatch it is reporting.
+    """
+    try:
+        await publish_status(job_id, status, stage)
+    except Exception as exc:
+        logger.exception(
+            "Could not publish the status event for job %s; its status is "
+            "already committed and the charge below still runs",
+            job_id,
+        )
+        sentry_sdk.capture_exception(exc)
+
+
 async def update_job_status(
     job_id: str,
     status: str,
@@ -72,13 +103,13 @@ async def update_job_status(
             billing, the failure mail -- uses this to claim the row, because
             reading the status first and acting on what it read leaves a
             window in which another route can take the job. The callers
-            that claim through this flag are webhooks/router.py:274 and
+            that claim through this flag are webhooks/router.py:278 and
             jobs/service.py:110; worker/cleanup.py:284 claims the same rows
             from the other side with its own `status = 'running'` guard.
         conn: Optional connection to write on instead of taking one from the
             pool. A caller passes its own so that the claim and the writes
             the claim authorises land in one transaction; the webhook handler
-            does this (webhooks/router.py:281).
+            does this (webhooks/router.py:285).
 
     Returns:
         True when a row was written. Always True unless ``require_non_terminal``

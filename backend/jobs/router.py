@@ -56,7 +56,8 @@ MAX_SSE_PER_USER = settings.max_sse_connections_per_user
 #: is in Storage, so both serve a partial set listed from the bucket.
 #:
 #: ``cancelled`` is here because a cancel bills the GPU seconds already burned
-#: (``jobs/service.py::cancel_job_by_id``, the ``if gpu_seconds > 0`` block),
+#: (``jobs/service.py::cancel_job_by_id``, the ``if claimed and gpu_seconds > 0``
+#: block at jobs/service.py:184),
 #: and taking the money while the output stays unreachable is the same defect
 #: as on the failed path.
 _DELIVERS_DESIGNS: tuple[str, ...] = ("complete", "failed", "cancelled")
@@ -852,10 +853,10 @@ async def get_job(
     elif row["status"] in _DELIVERS_DESIGNS:
         # A run that did not complete has no job_candidates rows to read. The
         # webhook collects a payload's candidates only inside ``if
-        # internal_status == "complete"`` (``backend/webhooks/router.py:226``)
+        # internal_status == "complete"`` (``backend/webhooks/router.py:230``)
         # and writes them only below its claim on the row (the claim at
-        # ``backend/webhooks/router.py:274``, the INSERT at
-        # ``backend/webhooks/router.py:285``), so neither a FAILED post nor a
+        # ``backend/webhooks/router.py:278``, the INSERT at
+        # ``backend/webhooks/router.py:289``), so neither a FAILED post nor a
         # COMPLETED one that lost the claim leaves any behind;
         # the reaper that fails a timed-out run writes none
         # (``backend/worker/cleanup.py::detect_stale_jobs``); and a cancel
@@ -864,8 +865,8 @@ async def get_job(
         # Storage is the only record of it and this lists it directly.
         #
         # No scores: per-design metrics live in job_candidates.scores, and that
-        # table is written only on the complete path (webhooks/router.py:226,
-        # the INSERT at webhooks/router.py:285), so there is nothing to read
+        # table is written only on the complete path (webhooks/router.py:230,
+        # the INSERT at webhooks/router.py:289), so there is nothing to read
         # for this set. ``rank`` is the key
         # order from list_job_design_keys -- a presentation order, not a
         # quality ranking.
@@ -910,7 +911,7 @@ async def get_job(
             # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
             # Captured explicitly because swallowing here stops Sentry's
             # FastApiIntegration from seeing it -- the reasoning spelled out
-            # at webhooks/router.py:327-329.
+            # at webhooks/router.py:329-332.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []

@@ -99,13 +99,13 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     user_id = str(row["user_id"])
 
     # Import worker tasks here to avoid circular imports at module load time.
-    from worker.tasks import publish_status, update_job_status
+    from worker.tasks import publish_status_best_effort, update_job_status
 
     # Update DB status, and claim the job in the same write. The reaper now
-    # meters a run it sweeps (worker/cleanup.py:378), so this route can no
+    # meters a run it sweeps (worker/cleanup.py:380), so this route can no
     # longer settle a job another route has already settled: the flag makes
     # the status write conditional on the row being non-terminal and reports
-    # whether it won, the protocol the webhook takes (webhooks/router.py:274)
+    # whether it won, the protocol the webhook takes (webhooks/router.py:278)
     # and the reaper takes with its own 'running' guard (worker/cleanup.py:284).
     claimed = await update_job_status(
         job_id,
@@ -126,7 +126,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
         # The row went terminal between the fetch above and this write, so the
         # route that took it owns both the cost column and the meter. Report
         # that row rather than the cancellation this call did not perform:
-        # jobs/router.py:737 returns these three fields to the caller and
+        # jobs/router.py:738 returns these three fields to the caller and
         # admin/router.py:389 writes two of them into the audit log, so a
         # computed cost returned from here is a charge the audit records and
         # nobody made
@@ -163,11 +163,16 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
             gpu_cost_usd = 0.0
 
     # Publish SSE terminal event -- only for the route that made it terminal.
-    # The only routes that can take the claim from this one publish their
-    # own terminal event on the same transition: webhooks/router.py:344 and
-    # worker/cleanup.py:326.
+    # Every route that can take the claim from this one publishes its own
+    # terminal event on the same transition, so a lost claim does not cost the
+    # front end the event: webhooks/router.py:349, worker/cleanup.py:328, and
+    # run_job's three dispatch failures (worker/tasks.py:265,
+    # worker/tasks.py:289 and worker/tasks.py:333), which this route can race
+    # because a cancel also accepts a `queued` job.
     if claimed:
-        await publish_status(job_id, "cancelled", "Cancelled")
+        # Best-effort: the claim has committed, so a Redis fault must not cost
+        # the meter below.
+        await publish_status_best_effort(job_id, "cancelled", "Cancelled")
 
     # Record partial billing if GPU time was consumed.
     #

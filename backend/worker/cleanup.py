@@ -23,7 +23,7 @@ from gpu import get_provider
 from jobs.notifications import send_failure_email
 from storage.client import list_job_design_keys
 
-from worker.tasks import publish_status
+from worker.tasks import publish_status_best_effort
 
 logger = logging.getLogger(__name__)
 
@@ -257,14 +257,14 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
 
         # Written for every job this sweep claims, billed or not, which is what
         # the webhook route does for every terminal job it handles
-        # (webhooks/router.py:295 and webhooks/router.py:302). Until this
+        # (webhooks/router.py:299 and webhooks/router.py:306). Until this
         # commit the sweep
         # wrote gpu_seconds and no cost, which did not matter while it metered
         # nothing; now that it charges, a NULL here would mean a real charge
         # with no record on the row: the customer's run would show no cost
         # (GET /jobs serves this column, jobs/router.py:495), the
         # daily spend guard in this module would sum it as zero
-        # (check_daily_gpu_spend, :417) so a burst of billed timeouts
+        # (check_daily_gpu_spend, :419) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be
         # reconciled against the Stripe invoice.
         gpu_cost_usd = round(
@@ -322,8 +322,10 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         if not claimed:
             continue
 
-        # Publish SSE failure event
-        await publish_status(job_id, "failed", "Job timed out")
+        # Publish SSE failure event. Best-effort: the claim UPDATE above has
+        # committed, so a Redis fault here must not cost the charge and the
+        # mail below -- no later sweep will pick this row up again.
+        await publish_status_best_effort(job_id, "failed", "Job timed out")
 
         # Send failure email. This is the route a run killed from outside
         # takes: nothing POSTed a webhook, which is why the job went stale. A

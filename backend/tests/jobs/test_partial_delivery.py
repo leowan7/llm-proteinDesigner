@@ -110,7 +110,7 @@ async def _get_job(pool, signer=None, **lister):
             patch(
                 "jobs.router.generate_presigned_get_url",
                 # Takes ``client`` because the route now hands one in
-                # (jobs/router.py:899); a stub that did not would make a
+                # (jobs/router.py:900); a stub that did not would make a
                 # signature change here look like a Storage fault, since
                 # the route degrades a raising presigner to an empty list.
                 side_effect=signer or (lambda k, client=None: f"https://signed/{k}"),
@@ -262,8 +262,9 @@ async def test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket()
 async def test_a_cancelled_job_serves_its_designs_too():
     """A cancel bills the GPU seconds burned, so it owes the output.
 
-    ``jobs/service.py::cancel_job_by_id`` meters the elapsed seconds whenever
-    ``gpu_seconds > 0``, with no check that anything was delivered, so a
+    ``jobs/service.py::cancel_job_by_id`` meters the elapsed seconds on the
+    cancel it wins (``if claimed and gpu_seconds > 0``, jobs/service.py:184)
+    with no check that anything was delivered, so a
     cancelled run whose designs stayed unreachable was money taken for
     nothing the customer could download.
     """

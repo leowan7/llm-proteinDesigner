@@ -67,7 +67,7 @@ def _make_ctx(conn):
     # manager. Left as a plain AsyncMock attribute it would return a
     # coroutine, which `async with` rejects, so every connection handed to
     # the handler gets one: the claim and the writes it authorises run inside
-    # it (webhooks/router.py:273). __aexit__ returns False so an exception
+    # it (webhooks/router.py:277). __aexit__ returns False so an exception
     # raised inside the block propagates, as a real transaction's does.
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=tx)
@@ -139,7 +139,7 @@ async def test_webhook_completed_job():
     Verifies:
     - Returns 200 with {"received": True}
     - update_job_status called with 'complete'
-    - publish_status called
+    - publish_status_best_effort called
     - RunPodProvider.terminate_pod called for pod termination
     - send_completion_email called with correct job_id
     """
@@ -177,7 +177,9 @@ async def test_webhook_completed_job():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch(
+            "webhooks.router.publish_status_best_effort", new_callable=AsyncMock
+        ) as mock_publish,
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
@@ -261,7 +263,7 @@ async def test_webhook_failed_job():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -349,7 +351,7 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_ok_email,
@@ -426,7 +428,7 @@ async def test_a_metering_failure_still_emails_the_customer():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock),
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch(
             "webhooks.router.record_gpu_usage",
@@ -508,7 +510,7 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_is_billed_when_it_save
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -579,7 +581,7 @@ async def test_a_storage_fault_leaves_a_failed_run_unbilled():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -742,7 +744,7 @@ async def test_webhook_valid_signature():
         patch("webhooks.router.settings") as mock_settings,
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock),
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider") as MockProvider,
         patch("webhooks.router.record_gpu_usage"),
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -803,7 +805,7 @@ async def test_webhook_skips_terminal_job():
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
     ):
         transport = ASGITransport(app=app)
@@ -828,7 +830,7 @@ async def test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again
     its capped GPU seconds and mails the customer. The provider's own FAILED
     post can still arrive afterwards -- and Storage holds designs, so the new
     gate would otherwise bill it a second time. The double-processing guard
-    (webhooks/router.py:207) returns first, so the second charge never
+    (webhooks/router.py:211) returns first, so the second charge never
     happens. The other order is pinned on the reaper side, by
     tests/worker/test_cleanup.py::
     test_a_stale_job_another_route_already_finished_is_not_billed_or_mailed.
@@ -851,7 +853,7 @@ async def test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
         patch(
@@ -930,7 +932,7 @@ async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim(
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
         patch("webhooks.router.update_job_status", side_effect=_claim) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage"),
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -972,13 +974,13 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
     COMPLETED. The handler then returns at the lost-claim guard, and any
     job_candidates rows it had already written would sit on a row that is
     `failed`: get_job reads that table only when the status is 'complete'
-    (jobs/router.py:837), so the customer of a run that actually finished
+    (jobs/router.py:838), so the customer of a run that actually finished
     would be served the partial branch's unscored Storage listing
-    (jobs/router.py:852) while the scored rows sat unread.
+    (jobs/router.py:853) while the scored rows sat unread.
 
     Pinned on the connection the claim shares with those writes: it is
     available and the handler does take it, because the claim now runs inside
-    its transaction (webhooks/router.py:272-274), but nothing is executed on
+    its transaction (webhooks/router.py:276-274), but nothing is executed on
     it once the claim comes back False.
     """
     conn1 = AsyncMock()
@@ -1020,7 +1022,9 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
             new_callable=AsyncMock,
             return_value=False,
         ) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch(
+            "webhooks.router.publish_status_best_effort", new_callable=AsyncMock
+        ) as mock_publish,
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
@@ -1055,7 +1059,7 @@ async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
 
     The other order -- reaper first, webhook after -- is
     ``test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again``,
-    which returns at the pre-read guard (webhooks/router.py:207).
+    which returns at the pre-read guard (webhooks/router.py:211).
     This is the window that guard cannot cover: the row still reads 'running'
     when the handler looks, and the sweep claims it before the handler's own
     UPDATE lands. The claim comes back False and everything that must happen
@@ -1092,7 +1096,9 @@ async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
             new_callable=AsyncMock,
             return_value=False,
         ) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch(
+            "webhooks.router.publish_status_best_effort", new_callable=AsyncMock
+        ) as mock_publish,
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
@@ -1134,7 +1140,7 @@ async def test_a_failed_candidate_insert_rolls_the_claim_back():
     record the run. Written in that order on separate connections, a failure
     part-way through the loop would leave a `complete` row holding some of its
     candidates, a NULL `results`, no mail and no charge -- and the redelivered
-    webhook would be dropped by the pre-read guard (webhooks/router.py:207),
+    webhook would be dropped by the pre-read guard (webhooks/router.py:211),
     so nothing would ever repair it. Before the claim existed the same failure
     ran above an unconditional status write
     (``git show a479ac38:backend/webhooks/router.py``, the INSERT loop at
@@ -1190,7 +1196,9 @@ async def test_a_failed_candidate_insert_rolls_the_claim_back():
             new_callable=AsyncMock,
             return_value=True,
         ) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch(
+            "webhooks.router.publish_status_best_effort", new_callable=AsyncMock
+        ) as mock_publish,
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
@@ -1229,7 +1237,7 @@ async def test_a_null_candidates_payload_is_not_iterated():
     """An explicit JSON null must not stop a finished run going terminal.
 
     The candidate loop runs inside the claim's transaction
-    (webhooks/router.py:272-292), so a TypeError there rolls the claim back
+    (webhooks/router.py:276-292), so a TypeError there rolls the claim back
     and returns 500 -- and the redelivery that follows raises the same way,
     so the row would stay `running` until the reaper swept it and the
     customer of a run that actually finished would be mailed a failure.
@@ -1275,7 +1283,7 @@ async def test_a_null_candidates_payload_is_not_iterated():
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.publish_status_best_effort", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=AsyncMock()),
         patch("webhooks.router.record_gpu_usage"),
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
@@ -1344,7 +1352,9 @@ async def test_a_lost_claim_still_terminates_the_pod():
             new_callable=AsyncMock,
             return_value=False,
         ) as mock_update,
-        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch(
+            "webhooks.router.publish_status_best_effort", new_callable=AsyncMock
+        ) as mock_publish,
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage") as mock_billing,
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_email,
@@ -1370,3 +1380,76 @@ async def test_a_lost_claim_still_terminates_the_pod():
     mock_billing.assert_not_called()
     mock_email.assert_not_called()
     mock_list.assert_not_called()
+
+
+async def test_a_redis_fault_on_the_webhooks_publish_still_bills_and_mails():
+    """The webhook route settles the job even when the SSE event cannot be sent.
+
+    This is test_webhook_failed_job_with_saved_designs_is_billed with one
+    thing changed: the publish at webhooks/router.py:349 raises. The claim has
+    already committed, and a redelivery of the same payload is dropped by the
+    pre-read guard (webhooks/router.py:211), so there is no second chance to
+    bill or mail this job on this route.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock()
+
+    conn4 = AsyncMock()
+    conn4.fetchval = AsyncMock(return_value="cus_crashed")
+
+    conn5 = AsyncMock()
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("webhooks.router.update_job_status", new_callable=AsyncMock) as mock_update,
+        # The fault goes inside the real wrapper, not over it.
+        patch(
+            "worker.tasks.publish_status",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("redis unreachable"),
+        ) as mock_publish,
+        patch("worker.tasks.sentry_sdk.capture_exception") as mock_sentry,
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=[f"users/user-uuid/jobs/{JOB_ID}/outputs/design_1.pdb"],
+        ),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    # The route answered RunPod, and the fault was real and reported.
+    assert response.status_code == 200
+    mock_publish.assert_awaited_once()
+    mock_sentry.assert_called_once()
+
+    # Everything below the publish still ran.
+    mock_billing.assert_called_once()
+    assert mock_billing.call_args[0][0] == "cus_crashed"
+    assert mock_billing.call_args[0][2] == mock_update.call_args[1]["gpu_seconds"]
+    mock_fail_email.assert_called_once()
