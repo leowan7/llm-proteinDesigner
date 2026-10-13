@@ -42,16 +42,18 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     1. Fetch job row (no user_id ownership filter — works for both user and admin).
     2. Cancel on RunPod if runpod_job_id is set.
     3. Calculate partial GPU seconds and cost.
-    4. Update DB status to "cancelled".
-    5. Publish SSE terminal event.
-    6. Record Stripe meter event if any GPU seconds accrued.
+    4. Claim the job by updating its status to "cancelled".
+    5. Publish SSE terminal event, if the claim was won.
+    6. Record Stripe meter event, if the claim was won and GPU seconds accrued.
 
     Args:
         job_id: UUID string of the job to cancel.
         pool: asyncpg connection pool to use for DB queries.
 
     Returns:
-        Dict with keys: status, gpu_seconds, gpu_cost_usd, user_id.
+        Dict with keys: status, gpu_seconds, gpu_cost_usd, user_id. ``status``
+        is "cancelled" when this call made it so; when another route settled
+        the job first, the three job fields are that row's instead.
 
     Raises:
         HTTPException 404: If no running or queued job is found with the given ID.
@@ -112,6 +114,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
         gpu_seconds=gpu_seconds,
         require_non_terminal=True,
     )
+    settled_status = "cancelled"
     if claimed:
         async with pool.acquire() as conn:
             await conn.execute(
@@ -121,7 +124,13 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
             )
     else:
         # The row went terminal between the fetch above and this write, so the
-        # route that took it owns both the cost column and the meter.
+        # route that took it owns both the cost column and the meter. Report
+        # that row rather than the cancellation this call did not perform:
+        # jobs/router.py:734 returns these three fields to the caller and
+        # admin/router.py:389 writes two of them into the audit log, so a
+        # computed cost returned from here is a charge the audit records and
+        # nobody made
+        # (tests/admin/test_service.py::test_a_cancel_that_loses_the_claim_reports_the_row_that_won).
         #
         # This cost write used to carry its own `AND status IN ('running',
         # 'queued')` guard, which the unconditional status write immediately
@@ -136,9 +145,29 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
             "claim it; its cost and metering belong to the route that did",
             job_id,
         )
+        async with pool.acquire() as conn:
+            settled = await conn.fetchrow(
+                "SELECT status, gpu_seconds, gpu_cost_usd FROM public.jobs WHERE id = $1",
+                job_id,
+            )
+        if settled:
+            settled_status = settled["status"]
+            gpu_seconds = settled["gpu_seconds"] or 0
+            gpu_cost_usd = float(settled["gpu_cost_usd"] or 0)
+        else:
+            # No row to report. The job existed at the fetch above, so this is
+            # a hard delete landing mid-cancel; say nothing was cancelled or
+            # charged rather than guess.
+            settled_status = "unknown"
+            gpu_seconds = 0
+            gpu_cost_usd = 0.0
 
-    # Publish SSE terminal event.
-    await publish_status(job_id, "cancelled", "Cancelled")
+    # Publish SSE terminal event -- only for the route that made it terminal.
+    # The only routes that can take the claim from this one publish their
+    # own terminal event on the same transition: webhooks/router.py:309 and
+    # worker/cleanup.py:326.
+    if claimed:
+        await publish_status(job_id, "cancelled", "Cancelled")
 
     # Record partial billing if GPU time was consumed.
     #
@@ -159,7 +188,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
             record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
 
     return {
-        "status": "cancelled",
+        "status": settled_status,
         "gpu_seconds": gpu_seconds,
         "gpu_cost_usd": gpu_cost_usd,
         "user_id": user_id,

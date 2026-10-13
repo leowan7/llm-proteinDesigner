@@ -311,7 +311,7 @@ async def test_cleanup_stale_jobs():
     # harmless while it billed nothing. A real charge against a NULL cost
     # shows the customer's run as free (GET /jobs serves this column,
     # jobs/router.py:495) and check_daily_gpu_spend in this module
-    # sums it as zero (worker/cleanup.py:412), so a burst of billed
+    # sums it as zero (worker/cleanup.py:415), so a burst of billed
     # timeouts could not trip the alert.
     assert "gpu_cost_usd = $3" in execute_sql
     # 1800 billable seconds at the rates this test sets: 0.0000917/s + 400%.

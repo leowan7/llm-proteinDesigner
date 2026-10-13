@@ -13,6 +13,7 @@ import os
 os.environ.setdefault("TESTING", "true")
 
 import datetime
+import decimal
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -114,10 +115,10 @@ async def test_cancel_job_not_found():
     assert exc_info.value.status_code == 404
 
 
-async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
+async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     """A cancel landing on a row another route already took settles nothing.
 
-    The reaper meters the runs it sweeps (worker/cleanup.py:374), so a cancel
+    The reaper meters the runs it sweeps (worker/cleanup.py:376), so a cancel
     arriving just after a sweep claimed the same row would otherwise be the
     second charge for one job, on a different second count -- the reaper's
     capped figure against this route's wall-clock one. Stripe's idempotency
@@ -125,10 +126,13 @@ async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
     (billing/stripe_client.py:219), not the guard; the guard is the status
     transition, which this route now has to win.
 
-    The cost write and the meter are both behind it. The 404 lookup, the
-    provider cancel, the SSE event and the response body are not, and are
-    unchanged -- a user cancelling a run that finished a moment ago still
-    gets a 200 saying cancelled.
+    Behind the claim: the cost write, the Stripe meter, and the SSE terminal
+    event, which the winning route publishes itself (webhooks/router.py:309,
+    worker/cleanup.py:326). The 404 lookup and the provider cancel are in
+    front of it and still run. The response body reports the winning row --
+    jobs/router.py:734 hands these three fields to the caller and
+    admin/router.py:389 writes two of them into the audit log, so returning a
+    cancellation that did not happen would be an audited charge nobody made.
     """
     started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
     job_row = {
@@ -137,7 +141,25 @@ async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
         "started_at": started_at,
         "user_id": "uid-3",
     }
-    mock_pool = _make_pool_for_cancel(job_row, "cus_lost")
+
+    # Connection 1: the job lookup. Connection 2: the read-back of the row the
+    # winning route settled. The reaper's figures, so the seconds differ from
+    # this route's 60 and the cost arrives as the Decimal asyncpg returns for
+    # a numeric column.
+    lookup_conn = AsyncMock()
+    lookup_conn.fetchrow = AsyncMock(return_value=job_row)
+    settled_conn = AsyncMock()
+    settled_conn.fetchrow = AsyncMock(return_value={
+        "status": "failed",
+        "gpu_seconds": 1800,
+        "gpu_cost_usd": decimal.Decimal("0.8253"),
+    })
+    settled_conn.execute = AsyncMock()
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(side_effect=[
+        _make_ctx(lookup_conn),
+        _make_ctx(settled_conn),
+    ])
 
     mock_provider = AsyncMock()
     mock_provider.cancel_job = AsyncMock()
@@ -151,7 +173,7 @@ async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
             new_callable=AsyncMock,
             return_value=False,
         ) as mock_update,
-        patch("worker.tasks.publish_status", new_callable=AsyncMock),
+        patch("worker.tasks.publish_status", new_callable=AsyncMock) as mock_publish,
     ):
         result = await cancel_job_by_id("job-003", mock_pool)
 
@@ -159,14 +181,23 @@ async def test_a_cancel_that_loses_the_claim_neither_writes_a_cost_nor_meters():
     mock_update.assert_called_once()
     assert mock_update.call_args[1]["require_non_terminal"] is True
 
-    # Nothing behind the claim ran: the job lookup was the only connection
-    # taken, so no cost UPDATE and no customer resolution were issued.
-    assert mock_pool.acquire.call_count == 1
-    mock_record.assert_not_called()
+    # In front of the claim: the provider cancel still ran.
+    mock_provider.cancel_job.assert_called_once()
 
-    # The caller's contract is untouched.
-    assert result["status"] == "cancelled"
-    assert result["gpu_seconds"] > 0
+    # Behind it: no cost UPDATE, no customer resolution, no meter, no SSE
+    # event. Two connections were taken -- the lookup and the read-back -- and
+    # the second one issued no write.
+    assert mock_pool.acquire.call_count == 2
+    settled_conn.execute.assert_not_called()
+    mock_record.assert_not_called()
+    mock_publish.assert_not_called()
+
+    # The body reports the winning row, not this call's computed figures.
+    assert result["status"] == "failed"
+    assert result["gpu_seconds"] == 1800
+    assert result["gpu_cost_usd"] == 0.8253
+    assert isinstance(result["gpu_cost_usd"], float)
+    assert result["user_id"] == "uid-3"
 
 
 async def test_cancel_records_billing():

@@ -223,11 +223,11 @@ async def test_update_job_status_claims_a_row_that_is_not_terminal():
     """``require_non_terminal`` makes the UPDATE an atomic claim.
 
     The webhook route charges a customer on the strength of winning this one
-    write (webhooks/router.py:259), so the guard and the
+    write (webhooks/router.py:247), so the guard and the
     RETURNING have to reach the DB in the statement itself. A pre-read cannot
     stand in for them: the row can change between the read and the write,
     which is the window worker/cleanup.py's sweep opens
-    (worker/cleanup.py:275 claims the same rows from the other
+    (worker/cleanup.py:276 claims the same rows from the other
     side).
     """
     conn = AsyncMock()
@@ -272,11 +272,14 @@ async def test_update_job_status_reports_a_row_another_route_already_took():
 async def test_update_job_status_is_an_unconditional_write_by_default():
     """Every other caller keeps the blind write it had.
 
-    run_job drives a job through 'running' twice (worker/tasks.py:176,
-    :291) and the cancel path writes 'cancelled'
-    (jobs/service.py:103); none of them is claiming anything, so the
-    default must stay the statement it was before the claim was added -- no
-    status guard, no RETURNING, and the same ``execute`` call.
+    run_job makes all of its own status writes through the default: it
+    drives a job through 'running' twice (worker/tasks.py:176, :291) and
+    writes 'failed' on three error paths that run before a pod exists
+    (:204, :228, :272). None of them is claiming anything, so the default
+    must stay the statement it was before the claim was added -- no status
+    guard, no RETURNING, and the same ``execute`` call. The two callers that
+    do claim pass the flag explicitly (webhooks/router.py:247,
+    jobs/service.py:110).
     """
     conn = AsyncMock()
     mock_pool = AsyncMock()
