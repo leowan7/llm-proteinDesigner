@@ -67,7 +67,7 @@ def _make_ctx(conn):
     # manager. Left as a plain AsyncMock attribute it would return a
     # coroutine, which `async with` rejects, so every connection handed to
     # the handler gets one: the claim and the writes it authorises run inside
-    # it (webhooks/router.py:263). __aexit__ returns False so an exception
+    # it (webhooks/router.py:273). __aexit__ returns False so an exception
     # raised inside the block propagates, as a real transaction's does.
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=tx)
@@ -972,13 +972,13 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
     COMPLETED. The handler then returns at the lost-claim guard, and any
     job_candidates rows it had already written would sit on a row that is
     `failed`: get_job reads that table only when the status is 'complete'
-    (jobs/router.py:836), so the customer of a run that actually finished
+    (jobs/router.py:837), so the customer of a run that actually finished
     would be served the partial branch's unscored Storage listing
-    (jobs/router.py:851) while the scored rows sat unread.
+    (jobs/router.py:852) while the scored rows sat unread.
 
     Pinned on the connection the claim shares with those writes: it is
     available and the handler does take it, because the claim now runs inside
-    its transaction (webhooks/router.py:262-264), but nothing is executed on
+    its transaction (webhooks/router.py:272-274), but nothing is executed on
     it once the claim comes back False.
     """
     conn1 = AsyncMock()
@@ -1223,3 +1223,150 @@ async def test_a_failed_candidate_insert_rolls_the_claim_back():
     mock_billing.assert_not_called()
     mock_email.assert_not_called()
     mock_provider.terminate_pod.assert_not_called()
+
+
+async def test_a_null_candidates_payload_is_not_iterated():
+    """An explicit JSON null must not stop a finished run going terminal.
+
+    The candidate loop runs inside the claim's transaction
+    (webhooks/router.py:272-292), so a TypeError there rolls the claim back
+    and returns 500 -- and the redelivery that follows raises the same way,
+    so the row would stay `running` until the reaper swept it and the
+    customer of a run that actually finished would be mailed a failure.
+
+    Pinned on a null rather than a missing key, because that is the only
+    input the two spellings disagree on: `output.get("candidates", [])`
+    returns None for `{"candidates": null}` and the default never fires.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+    conn3 = AsyncMock()
+    conn4 = AsyncMock()   # SELECT org_stripe_customer
+    conn4.fetchval = AsyncMock(return_value="cus_test")
+    conn5 = AsyncMock()   # SELECT email
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
+
+    payload = json.dumps({
+        "id": JOB_ID,
+        "pod_id": POD_ID,
+        "status": "COMPLETED",
+        "output": {
+            "candidate_count": 0,
+            "candidates": None,
+            "next_steps": "",
+            "job_spec": {"tool": "bindcraft"},
+        },
+    }).encode()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch(
+            "webhooks.router.update_job_status",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("webhooks.router.publish_status", new_callable=AsyncMock),
+        patch("webhooks.router.get_provider", return_value=AsyncMock()),
+        patch("webhooks.router.record_gpu_usage"),
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+
+    # The claim's transaction ran its one write -- the results/cost column --
+    # and nothing was inserted for a payload that carried no candidates.
+    queries = [c[0][0] for c in conn3.execute.await_args_list]
+    assert len(queries) == 1
+    assert "SET results" in queries[0]
+    assert not any("job_candidates" in q for q in queries)
+
+
+async def test_a_lost_claim_still_terminates_the_pod():
+    """Losing the claim must not leave the pod burning money.
+
+    The claim guard is new on this branch; before it, every webhook that got
+    past the pre-read guard terminated the pod, because there was no claim to
+    lose. Returning above the termination block would leave a live pod until
+    the reaper swept it, and the reaper only sweeps after
+    STALE_HEARTBEAT_SECONDS (worker/cleanup.py:52) -- 30 minutes of GPU on a
+    run that is already over. The route that did win the transition is not a
+    reliable substitute: a cancel skips the provider call outright when the
+    tool resolves to no endpoint (jobs/service.py:84).
+
+    The reaper's own sweep does cancel every stale pod it finds, claimed or
+    not (worker/cleanup.py:309); this is about the half hour before that.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+    conn3 = AsyncMock()
+
+    mock_pool = _make_pool(conn1, conn2, conn3)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    payload = json.dumps({
+        "id": JOB_ID,
+        "pod_id": POD_ID,
+        "status": "FAILED",
+        "error": {"category": "Pipeline error", "message": "boom"},
+    }).encode()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch(
+            "webhooks.router.update_job_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_email,
+        patch("webhooks.router.list_job_design_keys") as mock_list,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=payload,
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    assert mock_update.call_args[1]["require_non_terminal"] is True
+
+    # The point of the test: the claim was lost and the pod was still stopped.
+    mock_provider.terminate_pod.assert_awaited_once_with(POD_ID)
+
+    # Everything the winner owns stayed with the winner, and the Storage read
+    # that decides the charge was never even made.
+    mock_publish.assert_not_called()
+    mock_billing.assert_not_called()
+    mock_email.assert_not_called()
+    mock_list.assert_not_called()

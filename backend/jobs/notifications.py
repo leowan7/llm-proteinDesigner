@@ -145,9 +145,10 @@ async def send_failure_email(
     """Send a job failure notification email via Resend.
 
     When ``saved_designs`` is positive the mail leads with the designs that
-    survived, because a run that died part way through still delivered them:
-    save-as-you-go uploads each design as it finishes. Its link is the job
-    page, which lists them for a partial run
+    survived: the run uploaded them before it stopped, and the caller counted
+    them from Storage (``backend/storage/client.py::list_job_design_keys``,
+    whose docstring says which tools bank designs on which failure route).
+    Its link is the job page, which lists them for a partial run
     (``frontend/src/pages/JobPage.tsx``) and offers the archive. At zero it is
     the bare failure notice it has always been.
 

@@ -165,7 +165,7 @@ class TestJobNotifications:
         Worth a test because the failure mail is the first thing a customer
         sees after a run they paid for died, and one is the boundary of the
         branch that announces designs at all (``if saved_designs > 0``,
-        ``jobs/notifications.py:162``), for every tool rather than a billed one.
+        ``jobs/notifications.py:163``), for every tool rather than a billed one.
         """
         mock_send = MagicMock()
 

@@ -66,11 +66,11 @@ export interface JobData {
   /**
    * True when a run that failed or was cancelled still delivered some designs.
    *
-   * Save-as-you-go uploads each design as it finishes, so a run that timed out,
-   * was killed or was cancelled leaves what it produced in Storage. The backend
-   * lists those for such a job and flags the set partial: what the run had
-   * saved when it stopped, with empty `scores`, because the per-design
-   * metrics never reached the database. Always false for a complete run.
+   * A run that timed out, was killed or was cancelled leaves whatever it had
+   * already uploaded in Storage. The backend lists those for such a job and
+   * flags the set partial: what the run had saved when it stopped, with empty
+   * `scores`, because the per-design metrics never reached the database.
+   * Always false for a complete run.
    */
   partial: boolean;
   job_spec: Record<string, unknown> | null;
@@ -210,7 +210,7 @@ export async function getJobList(): Promise<JobListItem[]> {
   // Backend returns { jobs: [...], has_more: bool } -- not a bare array.
   // The previous `as Promise<JobListItem[]>` cast lied to the type system;
   // the runtime value crashed downstream `.filter()` calls (e.g.
-  // JobPage.tsx:152). Discovered live 2026-06-03 when a failure email link
+  // JobPage.tsx:164). Discovered live 2026-06-03 when a failure email link
   // landed on /jobs/<id> and the page rendered blank with a TypeError.
   const data = (await response.json()) as { jobs: JobListItem[]; has_more?: boolean };
   return Array.isArray(data) ? data : (data.jobs ?? []);

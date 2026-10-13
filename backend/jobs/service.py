@@ -105,7 +105,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # meters a run it sweeps (worker/cleanup.py:378), so this route can no
     # longer settle a job another route has already settled: the flag makes
     # the status write conditional on the row being non-terminal and reports
-    # whether it won, the protocol the webhook takes (webhooks/router.py:264)
+    # whether it won, the protocol the webhook takes (webhooks/router.py:274)
     # and the reaper takes with its own 'running' guard (worker/cleanup.py:284).
     claimed = await update_job_status(
         job_id,
@@ -126,7 +126,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
         # The row went terminal between the fetch above and this write, so the
         # route that took it owns both the cost column and the meter. Report
         # that row rather than the cancellation this call did not perform:
-        # jobs/router.py:736 returns these three fields to the caller and
+        # jobs/router.py:737 returns these three fields to the caller and
         # admin/router.py:389 writes two of them into the audit log, so a
         # computed cost returned from here is a charge the audit records and
         # nobody made
@@ -164,7 +164,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
 
     # Publish SSE terminal event -- only for the route that made it terminal.
     # The only routes that can take the claim from this one publish their
-    # own terminal event on the same transition: webhooks/router.py:312 and
+    # own terminal event on the same transition: webhooks/router.py:344 and
     # worker/cleanup.py:326.
     if claimed:
         await publish_status(job_id, "cancelled", "Cancelled")

@@ -45,17 +45,21 @@ def generate_presigned_put_url(key: str, expires_in: int = 3600) -> str:
     )
 
 
-def generate_presigned_get_url(key: str, expires_in: int = 3600) -> str:
+def generate_presigned_get_url(key: str, expires_in: int = 3600, client=None) -> str:
     """Presigned GET URL for download from R2/MinIO.
 
     Args:
         key: S3 object key (path within the bucket).
         expires_in: URL expiry in seconds. Default 1 hour.
+        client: Optional boto3 S3 client to sign on. Omitted, this builds one
+            per call, because ``get_s3_client`` (:13) caches nothing. A caller
+            signing a whole set hands one in so it pays that once; signing
+            itself is local HMAC and makes no request.
 
     Returns:
         Presigned URL string that allows a GET request without credentials.
     """
-    client = get_s3_client()
+    client = client or get_s3_client()
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.s3_bucket_name, "Key": key},
@@ -273,6 +277,23 @@ def list_job_design_keys(user_id: str, job_id: str) -> list[str]:
     row was ever written for them (``backend/webhooks/router.py`` writes those
     only under its ``complete`` branch, and ``backend/worker/cleanup.py``
     writes none at all), so Storage is the only record of them.
+
+    How much a part-way run leaves here depends on the tool, and this function
+    does not: it reports what the bucket holds. BindCraft and RFdiffusion
+    upload each design as it finishes
+    (``docker/bindcraft/run_pipeline.py:1815``, with a mid-run sweep at
+    ``docker/bindcraft/run_pipeline.py:1716``, and
+    ``docker/rfdiffusion/run_pipeline.py:2108``), so their runs bank designs on
+    any failure route. BoltzGen, PxDesign and RFantibody upload once after
+    their generation loop (``docker/boltzgen/run_pipeline.py:2102``,
+    ``docker/pxdesign/run_pipeline.py:1939``,
+    ``docker/rfantibody/run_pipeline.py:1656``): a failure the container
+    catches still reaches that upload -- BoltzGen's timeout handler sets
+    ``early_failure`` at ``docker/boltzgen/run_pipeline.py:1953`` and falls
+    through to it -- but a pod killed from outside never reaches it and leaves
+    nothing. So a zero here does not distinguish an unproductive run from one
+    killed before its upload, and every caller treats the two the same way:
+    nothing served, nothing billed.
 
     Sorted so repeat calls agree on an order. The sort is lexicographic by
     key, which is a stable presentation order and NOT a quality ranking -- the

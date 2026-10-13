@@ -1,9 +1,10 @@
 """Tests for delivering the designs a failed run already saved.
 
-PRs #33-#35 made the containers upload each design as it finishes, so a run
-that times out, crashes or is killed leaves its finished designs in Storage
-instead of losing them to the ``rmtree`` in its ``finally``. Nothing served
-them: ``get_job`` read ``job_candidates``, which is written only under the
+PRs #33-#35 made the containers upload their designs to Storage before the
+``rmtree`` in the ``finally`` can take them, so a run that times out, crashes
+or is killed can leave finished designs in the bucket. How much it leaves
+depends on the tool (``backend/storage/client.py::list_job_design_keys``).
+Nothing served them: ``get_job`` read ``job_candidates``, which is written only under the
 webhook's ``complete`` branch, and the bulk download 404'd on any status other
 than ``complete``.
 
@@ -108,7 +109,11 @@ async def _get_job(pool, signer=None, **lister):
             patch("jobs.router.get_db_pool", return_value=pool),
             patch(
                 "jobs.router.generate_presigned_get_url",
-                side_effect=signer or (lambda k: f"https://signed/{k}"),
+                # Takes ``client`` because the route now hands one in
+                # (jobs/router.py:899); a stub that did not would make a
+                # signature change here look like a Storage fault, since
+                # the route degrades a raising presigner to an empty list.
+                side_effect=signer or (lambda k, client=None: f"https://signed/{k}"),
             ),
             patch("jobs.router.list_job_design_keys", **lister) as mock_list,
         ):
@@ -272,6 +277,63 @@ async def test_a_cancelled_job_serves_its_designs_too():
         PREFIX + "design_1.pdb"
     ]
     mock_list.assert_called_once_with(LAUNCHER_ID, JOB_ID)
+
+
+@pytest.mark.anyio
+async def test_the_partial_set_signs_on_one_client():
+    """Every key in the partial set is signed on one boto3 client.
+
+    ``generate_presigned_get_url`` builds a client per call when it is not
+    handed one, because ``get_s3_client`` caches nothing
+    (``backend/storage/client.py:13``), and this set is bounded only by what
+    a container managed to upload -- on a response JobPage refetches on every
+    mount.
+
+    The real presigner runs here: only ``jobs.router.get_s3_client`` is
+    replaced, so the count below is the number of clients the route actually
+    built, and the presigner's own fallback is patched separately to prove it
+    is never reached.
+    """
+    keys = [PREFIX + f"design_{i}.pdb" for i in range(1, 13)]
+    pool = _make_pool(_job_row("failed"))
+
+    s3 = MagicMock()
+    s3.generate_presigned_url = MagicMock(
+        side_effect=lambda op, Params, ExpiresIn: f"https://signed/{Params['Key']}"
+    )
+    builder = MagicMock(return_value=s3)
+
+    app.dependency_overrides[get_current_user] = _override_user()
+    app.dependency_overrides[get_active_org] = _override_active_org()
+    try:
+        with (
+            patch("jobs.router.get_db_pool", return_value=pool),
+            patch("jobs.router.get_s3_client", builder),
+            patch("storage.client.get_s3_client") as fallback,
+            patch("jobs.router.list_job_design_keys", return_value=keys),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get(
+                    f"/jobs/{JOB_ID}", cookies={"access_token": "fake-token"}
+                )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_active_org, None)
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # The URLs came out of the real presigner, signing on the injected client.
+    assert [c["download_url"] for c in body["candidates"]] == [
+        f"https://signed/{k}" for k in keys
+    ]
+    assert s3.generate_presigned_url.call_count == len(keys)
+
+    # One client for twelve keys, and the per-call fallback inside the
+    # presigner never ran.
+    builder.assert_called_once_with()
+    fallback.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -72,13 +72,13 @@ async def update_job_status(
             billing, the failure mail -- uses this to claim the row, because
             reading the status first and acting on what it read leaves a
             window in which another route can take the job. The callers
-            that claim through this flag are webhooks/router.py:264 and
+            that claim through this flag are webhooks/router.py:274 and
             jobs/service.py:110; worker/cleanup.py:284 claims the same rows
             from the other side with its own `status = 'running'` guard.
         conn: Optional connection to write on instead of taking one from the
             pool. A caller passes its own so that the claim and the writes
             the claim authorises land in one transaction; the webhook handler
-            does this (webhooks/router.py:271).
+            does this (webhooks/router.py:281).
 
     Returns:
         True when a row was written. Always True unless ``require_non_terminal``

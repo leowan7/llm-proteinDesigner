@@ -232,7 +232,17 @@ async def runpod_webhook(request: Request):
             "next_steps": output.get("next_steps", ""),
             "zero_output": zero_output,
         })
-        payload_candidates = output.get("candidates", [])
+        # `or []`, not a default: a payload with an explicit null here used
+        # to reach the candidate loop below and raise TypeError inside the
+        # transaction, which rolls the claim back and returns 500, and the
+        # redelivery that follows fails the same way, so a finished run
+        # would never go terminal. a479ac38 guarded the loop instead
+        # (`if candidates:`); the transaction moved the loop under the
+        # claim and dropped it
+        # (tests/webhooks/test_router.py::test_a_null_candidates_payload_is_not_iterated).
+        # No container sends null today -- all five send a list -- but this
+        # is an HTTP boundary, not a container contract.
+        payload_candidates = output.get("candidates") or []
 
     error_category: str | None = None
     if internal_status == "failed":
@@ -250,8 +260,8 @@ async def runpod_webhook(request: Request):
     # transaction, for two reasons. A handler that loses the claim writes
     # neither, so it cannot leave rows on a row another route has already
     # made terminal: get_job reads job_candidates only on a `complete` row
-    # (jobs/router.py:836) and its partial branch lists Storage instead
-    # (jobs/router.py:851), so those rows would reach no one
+    # (jobs/router.py:837) and its partial branch lists Storage instead
+    # (jobs/router.py:852), so those rows would reach no one
     # (tests/webhooks/test_router.py::test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows).
     # And a failure part-way through the candidate loop now rolls the claim
     # back with it, leaving the row non-terminal for a redelivery or the
@@ -294,24 +304,16 @@ async def runpod_webhook(request: Request):
                         row["id"],
                     )
 
-    if not claimed:
-        # Another route made the row terminal first. Returning here leaves the
-        # pod-termination block below unrun, which is what the pre-read guard
-        # at :207 has always done for a row that was already terminal: the
-        # route that won the transition terminates the pod, and the reaper
-        # cancels every stale pod it sweeps whether or not it claimed the row
-        # (worker/cleanup.py:309).
-        logger.info(
-            "Webhook skipped: job %s went terminal between this handler's "
-            "guard and its status update",
-            job_id,
-        )
-        return {"received": True}
-
-    # Publish SSE status update.
-    await publish_status(job_id, internal_status, internal_status.capitalize())
-
     # ---------- Terminate the GPU job to stop billing ----------
+    # Ahead of the claim check, so it runs whether or not this handler won.
+    # The pod burns money either way, and at a479ac38 every webhook that got
+    # past the pre-read guard terminated it, because there was no claim to
+    # lose. The winner is not a safe place to leave this: a cancel skips the
+    # provider call when the tool resolves to no endpoint
+    # (jobs/service.py:84). The reaper does cancel every stale pod it sweeps,
+    # claimed or not (worker/cleanup.py:309), but it only sweeps after
+    # STALE_HEARTBEAT_SECONDS
+    # (tests/webhooks/test_router.py::test_a_lost_claim_still_terminates_the_pod).
     # On RunPod this terminates the pod. On Modal the function has already
     # self-terminated before this webhook fires, so terminate_pod is a no-op.
     if stored_pod_id:
@@ -328,14 +330,27 @@ async def runpod_webhook(request: Request):
             logger.exception("Failed to terminate GPU job %s", stored_pod_id)
             sentry_sdk.capture_exception(exc)
 
+    if not claimed:
+        # Another route made the row terminal first, so it owns the status, the
+        # mail and the charge. The pod is already terminated above.
+        logger.info(
+            "Webhook skipped: job %s went terminal between this handler's "
+            "guard and its status update",
+            job_id,
+        )
+        return {"received": True}
+
+    # Publish SSE status update.
+    await publish_status(job_id, internal_status, internal_status.capitalize())
+
     # How many designs this run banked before it died. Counted once, here,
     # because two separate things turn on it: the failure mail points the
     # customer at them, and a failed run is billed exactly when there is at
     # least one. The same count feeds the `partial` flag get_job serves
-    # (jobs/router.py:912) and the reaper's own gate (worker/cleanup.py:368);
+    # (jobs/router.py:917) and the reaper's own gate (worker/cleanup.py:368);
     # all three call one function, storage/client.py::list_job_design_keys.
     # The bulk download reads the same prefix with its own paginator
-    # (jobs/router.py:610) because it archives every object it finds, CSVs
+    # (jobs/router.py:611) because it archives every object it finds, CSVs
     # included, but it counts nothing and decides no money.
     saved_designs = 0
     if internal_status == "failed":
@@ -363,7 +378,7 @@ async def runpod_webhook(request: Request):
     #
     # Finished and cancelled runs qualify. So does a failed run that banked at
     # least one design, for every tool -- Leo's call 2026-10-13: this PR makes
-    # those designs reachable (jobs/router.py:851), and they are not handed
+    # those designs reachable (jobs/router.py:852), and they are not handed
     # over for free. Such a run is settled on GPU time used, the same as a
     # finished run, and is not prorated. A run that saved nothing stays fully
     # unbilled. The condition is `saved_designs > 0`, the same value the mail
@@ -376,7 +391,7 @@ async def runpod_webhook(request: Request):
     # Exactly one of this route and the reaper bills any given job, because
     # exactly one of them wins the status transition. This handler reaches the
     # charge only when its own UPDATE claimed a non-terminal row
-    # (:264), and worker/cleanup.py reaches it only when its
+    # (:274), and worker/cleanup.py reaches it only when its
     # UPDATE claimed a row still 'running' (worker/cleanup.py:284)
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.

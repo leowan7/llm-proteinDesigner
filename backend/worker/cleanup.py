@@ -257,7 +257,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
 
         # Written for every job this sweep claims, billed or not, which is what
         # the webhook route does for every terminal job it handles
-        # (webhooks/router.py:285 and webhooks/router.py:292). Until this
+        # (webhooks/router.py:295 and webhooks/router.py:302). Until this
         # commit the sweep
         # wrote gpu_seconds and no cost, which did not matter while it metered
         # nothing; now that it charges, a NULL here would mean a real charge

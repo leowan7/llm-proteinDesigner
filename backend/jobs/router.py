@@ -52,8 +52,8 @@ MAX_SSE_PER_USER = settings.max_sse_connections_per_user
 #:
 #: ``complete`` reads them from ``job_candidates``. The other two have no row
 #: there -- the webhook writes candidates only under its ``complete`` branch
-#: (``webhooks/router.py``) -- but save-as-you-go put whatever finished into
-#: Storage, so both serve a partial set listed from the bucket.
+#: (``webhooks/router.py``) -- but whatever the run uploaded before it stopped
+#: is in Storage, so both serve a partial set listed from the bucket.
 #:
 #: ``cancelled`` is here because a cancel bills the GPU seconds already burned
 #: (``jobs/service.py::cancel_job_by_id``, the ``if gpu_seconds > 0`` block),
@@ -568,11 +568,12 @@ async def download_all_designs(
     """Download a job's design outputs as a ZIP archive.
 
     Serves every state in ``_DELIVERS_DESIGNS``: a complete run, and a failed
-    or cancelled one that still delivered designs. Save-as-you-go uploads each
-    design as it finishes, so a run that timed out, crashed or was cancelled
-    part way leaves what it produced under the same ``outputs/`` prefix this
-    reads. A non-complete run's archive is named ``_partial`` so the
-    downloaded file says so on disk.
+    or cancelled one that still delivered designs. A run that stopped part way
+    leaves whatever it had already uploaded under the same ``outputs/`` prefix
+    this reads -- how much that is depends on the tool
+    (``backend/storage/client.py::list_job_design_keys``). A non-complete
+    run's archive is named ``_partial`` so the downloaded file says so on
+    disk.
 
     Phase 12: org-scoped — any member of the active org can download outputs
     for any such job in that org. The S3 storage key prefix still uses
@@ -853,18 +854,18 @@ async def get_job(
         # webhook collects a payload's candidates only inside ``if
         # internal_status == "complete"`` (``backend/webhooks/router.py:226``)
         # and writes them only below its claim on the row (the claim at
-        # ``backend/webhooks/router.py:264``, the INSERT at
-        # ``backend/webhooks/router.py:275``), so neither a FAILED post nor a
+        # ``backend/webhooks/router.py:274``, the INSERT at
+        # ``backend/webhooks/router.py:285``), so neither a FAILED post nor a
         # COMPLETED one that lost the claim leaves any behind;
         # the reaper that fails a timed-out run writes none
         # (``backend/worker/cleanup.py::detect_stale_jobs``); and a cancel
         # writes none (``jobs/service.py::cancel_job_by_id``).
-        # Save-as-you-go still put whatever finished into Storage, so Storage
-        # is the only record of it and this lists it directly.
+        # Whatever the run uploaded before it stopped is still in Storage, so
+        # Storage is the only record of it and this lists it directly.
         #
         # No scores: per-design metrics live in job_candidates.scores, and that
         # table is written only on the complete path (webhooks/router.py:226,
-        # the INSERT at webhooks/router.py:275), so there is nothing to read
+        # the INSERT at webhooks/router.py:285), so there is nothing to read
         # for this set. ``rank`` is the key
         # order from list_job_design_keys -- a presentation order, not a
         # quality ranking.
@@ -880,18 +881,22 @@ async def get_job(
             # `passing` set, and boltzgen's size comes from its own budget
             # default, 60 outside the pilot tier and 5 inside it,
             # docker/boltzgen/run_pipeline.py:1850).
-            # generate_presigned_get_url builds a fresh boto3 client per call
-            # (storage/client.py:58), so a large set would hold the one event
-            # loop long enough to stall every other request in the process,
-            # not only this one. Signing itself is local HMAC, so no part of
-            # this needs a second hop per key.
+            # generate_presigned_get_url builds a fresh boto3 client per
+            # call unless it is handed one (storage/client.py:62), so every key
+            # in this unbounded set is signed on the one client built here
+            # (tests/jobs/test_partial_delivery.py::test_the_partial_set_signs_on_one_client).
+            # Signing is local HMAC, so no key costs a network hop, and the
+            # thread keeps even that off the one event loop. This runs on every
+            # view of a terminal job -- JobPage fetches it on mount -- so the
+            # per-call client was paid again on every refresh.
             keys = list_job_design_keys(str(row["user_id"]), job_id)
+            s3 = get_s3_client()
             return [
                 {
                     "rank": i,
                     "pdb_key": k,
                     "scores": {},
-                    "download_url": generate_presigned_get_url(k),
+                    "download_url": generate_presigned_get_url(k, client=s3),
                 }
                 for i, k in enumerate(keys, start=1)
             ]
@@ -905,7 +910,7 @@ async def get_job(
             # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
             # Captured explicitly because swallowing here stops Sentry's
             # FastApiIntegration from seeing it -- the reasoning spelled out
-            # at webhooks/router.py:323-326.
+            # at webhooks/router.py:327-329.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []

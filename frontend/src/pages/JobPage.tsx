@@ -144,8 +144,8 @@ export function JobPage() {
   const showSummary = isComplete || job.status === "cancelled";
 
   // A run that failed or was cancelled still delivers the designs it had
-  // finished: save-as-you-go uploaded each one as it was produced, and
-  // GET /jobs/{id} lists them with `partial` set. They carry no scores --
+  // already uploaded when it stopped, and GET /jobs/{id} lists them with
+  // `partial` set. They carry no scores --
   // the API sends `scores: {}` for them, because per-design metrics are
   // written to job_candidates only on the complete path -- so every number
   // on their cards renders as the em-dash CandidateCard shows for an absent
