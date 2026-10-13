@@ -6,7 +6,8 @@
  * 1. ExpiryWarningBanner (conditional — within 7 days of 30-day expiry)
  * 2. JobStatusCard (always — real-time while running, static when terminal)
  * 3. RunSummaryCard (complete or cancelled)
- * 4. "Design candidates" section heading + BindCraftZeroOutputCard or CandidateCard list (complete)
+ * 4. "Design candidates" section heading + BindCraftZeroOutputCard or CandidateCard list
+ *    (complete, or a failed/cancelled run that saved designs -- see showCandidates)
  * 5. JobFailureCard (failed)
  * 6. NextStepsCard (complete with next_steps)
  * 7. "Previous jobs" section heading + job history list (all states)
@@ -31,6 +32,7 @@ import {
   getJob,
   getJobList,
   cancelJob,
+  downloadAllDesignsUrl,
   type JobData,
   type JobListItem,
   type JobStatusEvent,
@@ -141,6 +143,16 @@ export function JobPage() {
   const isFailed = job.status === "failed";
   const showSummary = isComplete || job.status === "cancelled";
 
+  // A run that failed or was cancelled still delivers the designs it had
+  // already uploaded when it stopped, and GET /jobs/{id} lists them with
+  // `partial` set. They carry no scores --
+  // the API sends `scores: {}` for them, because per-design metrics are
+  // written to job_candidates only on the complete path -- so every number
+  // on their cards renders as the em-dash CandidateCard shows for an absent
+  // score, and Export Report stays gated on `isComplete` because a report
+  // over no metrics would have nothing to report.
+  const showCandidates = isComplete || job.partial;
+
   const isBindCraftZero =
     isComplete &&
     job.tool.toLowerCase() === "bindcraft" &&
@@ -181,11 +193,24 @@ export function JobPage() {
       )}
 
       {/* 4. Design candidates section */}
-      {isComplete && (
+      {showCandidates && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="font-display text-xl font-semibold text-foreground">Design candidates</h2>
-            {job.candidates.length > 0 && (
+            <h2 className="font-display text-xl font-semibold text-foreground">
+              {job.partial ? "Designs saved before the run stopped" : "Design candidates"}
+            </h2>
+            {/* RunSummaryCard carries this same button and renders whenever
+                showSummary, so this one covers only the state that card does
+                not: a failed run. */}
+            {job.partial && !showSummary && (
+              <Button
+                variant="outline"
+                onClick={() => window.open(downloadAllDesignsUrl(job.id), "_blank")}
+              >
+                Download all designs
+              </Button>
+            )}
+            {isComplete && job.candidates.length > 0 && (
               <Button
                 variant="outline"
                 onClick={() => {
@@ -197,6 +222,13 @@ export function JobPage() {
               </Button>
             )}
           </div>
+
+          {job.partial && (
+            <p className="text-sm text-muted-foreground">
+              This is a partial set — the designs the run had produced when it
+              stopped, without the final scoring pass, so no metrics are shown.
+            </p>
+          )}
 
           {isBindCraftZero ? (
             <BindCraftZeroOutputCard agentGuidance={job.results?.next_steps} />

@@ -140,24 +140,54 @@ async def send_failure_email(
     to_email: str,
     job_id: str,
     error_category: str,
+    saved_designs: int = 0,
 ) -> None:
     """Send a job failure notification email via Resend.
+
+    When ``saved_designs`` is positive the mail leads with the designs that
+    survived: the run uploaded them before it stopped, and the caller counted
+    them from Storage (``backend/storage/client.py::list_job_design_keys``,
+    whose docstring says which tools bank designs on which failure route).
+    Its link is the job page, which lists them for a partial run
+    (``frontend/src/pages/JobPage.tsx``) and offers the archive. At zero it is
+    the bare failure notice it has always been.
 
     Args:
         to_email: Recipient email address.
         job_id: Job UUID string (used to build the details URL).
         error_category: Human-readable error category string from the provider.
+        saved_designs: How many designs the run left in Storage. Default 0
+            keeps the plain failure wording for a run that saved nothing.
     """
     job_url = f"{settings.frontend_base_url}/jobs/{job_id}"
-    params: resend.Emails.SendParams = {
-        "from": settings.resend_from_email,
-        "to": [to_email],
-        "subject": f"Your job encountered an error — {error_category}",
-        "html": (
-            f"<p>Your job failed: {error_category}.</p>"
-            f'<p><a href="{job_url}">View details</a></p>'
-        ),
-    }
+    if saved_designs > 0:
+        designs_word = "design" if saved_designs == 1 else "designs"
+        verb = "is" if saved_designs == 1 else "are"
+        params: resend.Emails.SendParams = {
+            "from": settings.resend_from_email,
+            "to": [to_email],
+            "subject": (
+                f"Your job stopped early — {saved_designs} {designs_word} saved"
+            ),
+            "html": (
+                f"<p>Your job stopped before it finished: {error_category}.</p>"
+                f"<p>The {saved_designs} {designs_word} it had already produced "
+                f"{verb} saved and ready to download. This is a partial set — "
+                f"what the run had saved when it stopped, without the final "
+                f"scoring pass.</p>"
+                f'<p><a href="{job_url}">View and download what was saved</a></p>'
+            ),
+        }
+    else:
+        params = {
+            "from": settings.resend_from_email,
+            "to": [to_email],
+            "subject": f"Your job encountered an error — {error_category}",
+            "html": (
+                f"<p>Your job failed: {error_category}.</p>"
+                f'<p><a href="{job_url}">View details</a></p>'
+            ),
+        }
     await _send_email_safely(params, purpose="failure")
 
 

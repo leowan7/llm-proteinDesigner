@@ -45,17 +45,21 @@ def generate_presigned_put_url(key: str, expires_in: int = 3600) -> str:
     )
 
 
-def generate_presigned_get_url(key: str, expires_in: int = 3600) -> str:
+def generate_presigned_get_url(key: str, expires_in: int = 3600, client=None) -> str:
     """Presigned GET URL for download from R2/MinIO.
 
     Args:
         key: S3 object key (path within the bucket).
         expires_in: URL expiry in seconds. Default 1 hour.
+        client: Optional boto3 S3 client to sign on. Omitted, this builds one
+            per call, because ``get_s3_client`` (:13) caches nothing. A caller
+            signing a whole set hands one in so it pays that once; signing
+            itself is local HMAC and makes no request.
 
     Returns:
         Presigned URL string that allows a GET request without credentials.
     """
-    client = get_s3_client()
+    client = client or get_s3_client()
     return client.generate_presigned_url(
         "get_object",
         Params={"Bucket": settings.s3_bucket_name, "Key": key},
@@ -223,28 +227,79 @@ def delete_job_objects(user_id: str, job_id: str) -> int:
     return deleted
 
 
-def job_has_saved_designs(user_id: str, job_id: str) -> bool:
-    """True when the job's output prefix already holds at least one design PDB.
+#: Filename suffixes a saved design can carry. ``.cif`` is here for BoltzGen
+#: and PxDesign: both collect ``.cif`` designs
+#: (``docker/boltzgen/run_pipeline.py:1360``,
+#: ``docker/pxdesign/run_pipeline.py:1178``) and upload under whatever suffix
+#: they found (``Path(...).suffix``, ``docker/boltzgen/run_pipeline.py:2043-2044``,
+#: ``docker/pxdesign/run_pipeline.py:1882-1883``). BindCraft uploads under the
+#: basename of its output path (``docker/bindcraft/run_pipeline.py:1778``), so
+#: its suffix is whatever that file carries; nothing in its pipeline writes a
+#: ``.cif``. RFdiffusion and RFantibody write a literal ``.pdb``
+#: (``docker/rfdiffusion/run_pipeline.py:2107``,
+#: ``docker/rfantibody/run_pipeline.py:1596``).
+DESIGN_SUFFIXES: tuple[str, ...] = (".pdb", ".cif")
+
+
+def iter_job_design_keys(
+    user_id: str, job_id: str, suffixes: tuple[str, ...] = DESIGN_SUFFIXES
+):
+    """Yield the job's saved design keys under its ``outputs/`` prefix.
 
     Read-only counterpart to :func:`delete_job_objects`: the same
     ``list_objects_v2`` paginator, narrowed from that function's whole-job
     ``users/{user_id}/jobs/{job_id}/`` prefix to the ``outputs/`` one the
-    container uploads designs to. The webhook uses it to settle a run that
-    died after streaming designs to Storage.
+    container uploads designs to.
 
-    Only ``.pdb`` keys count. The upload endpoint flattens every container
+    Only keys ending in ``suffixes`` are yielded, default
+    :data:`DESIGN_SUFFIXES`. The upload endpoint flattens every container
     upload into that one prefix (``backend/jobs/router.py::get_upload_urls``),
     so a run's metrics CSVs land beside its designs; the target structure does
     not -- that is written under ``inputs/`` (:func:`ensure_pdb_in_s3`).
 
-    Returns False on an empty or missing prefix. Whatever botocore raises
-    propagates: the caller decides what an unreadable bucket means.
+    A generator over the paginator, with the sort left to its one caller,
+    :func:`list_job_design_keys`. Keys arrive in the paginator's order, which
+    this function does not sort. Whatever botocore raises propagates from the
+    caller's iteration: the caller decides what an unreadable bucket means.
     """
     client = get_s3_client()
     prefix = f"users/{user_id}/jobs/{job_id}/outputs/"
     paginator = client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=settings.s3_bucket_name, Prefix=prefix):
         for obj in page.get("Contents") or []:
-            if obj["Key"].endswith(".pdb"):
-                return True
-    return False
+            if obj["Key"].endswith(suffixes):
+                yield obj["Key"]
+
+
+def list_job_design_keys(user_id: str, job_id: str) -> list[str]:
+    """Every saved design key for the job, sorted by key.
+
+    The delivery path for a run whose terminal state is not ``complete``: its
+    designs reached Storage through save-as-you-go, and no ``job_candidates``
+    row was ever written for them (``backend/webhooks/router.py`` writes those
+    only under its ``complete`` branch, and ``backend/worker/cleanup.py``
+    writes none at all), so Storage is the only record of them.
+
+    How much a part-way run leaves here depends on the tool, and this function
+    does not: it reports what the bucket holds. BindCraft and RFdiffusion
+    upload each design as it finishes
+    (``docker/bindcraft/run_pipeline.py:1815``, with a mid-run sweep at
+    ``docker/bindcraft/run_pipeline.py:1716``, and
+    ``docker/rfdiffusion/run_pipeline.py:2108``), so their runs bank designs on
+    any failure route. BoltzGen, PxDesign and RFantibody upload once after
+    their generation loop (``docker/boltzgen/run_pipeline.py:2102``,
+    ``docker/pxdesign/run_pipeline.py:1939``,
+    ``docker/rfantibody/run_pipeline.py:1656``): a failure the container
+    catches still reaches that upload -- BoltzGen's timeout handler sets
+    ``early_failure`` at ``docker/boltzgen/run_pipeline.py:1953`` and falls
+    through to it -- but a pod killed from outside never reaches it and leaves
+    nothing. So a zero here does not distinguish an unproductive run from one
+    killed before its upload, and every caller treats the two the same way:
+    nothing served, nothing billed.
+
+    Sorted so repeat calls agree on an order. The sort is lexicographic by
+    key, which is a stable presentation order and NOT a quality ranking -- the
+    scores that would rank these designs are not in the database for a failed
+    run. See :func:`iter_job_design_keys` for the prefix and error contract.
+    """
+    return sorted(iter_job_design_keys(user_id, job_id))

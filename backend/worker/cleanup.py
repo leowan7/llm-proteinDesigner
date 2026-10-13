@@ -16,12 +16,14 @@ import datetime
 import logging
 
 import sentry_sdk
+from billing.stripe_client import record_gpu_usage
 from config import settings
 from db.connection import get_db_pool
 from gpu import get_provider
 from jobs.notifications import send_failure_email
+from storage.client import list_job_design_keys
 
-from worker.tasks import publish_status
+from worker.tasks import publish_status_best_effort
 
 logger = logging.getLogger(__name__)
 
@@ -243,26 +245,61 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         else:
             gpu_seconds = 0
 
-        # Mark job as failed
+        # Mark job as failed. The status guard makes this UPDATE the atomic
+        # claim on the job, and claiming is what earns the right to bill it
+        # below. The SELECT above already filtered on 'running', but a webhook
+        # for this same job can land in the window between that SELECT and
+        # this write: without the guard the sweep would overwrite a terminal
+        # row -- including a 'complete' one -- and then meter GPU time the
+        # webhook had already metered. With it, exactly one of the two routes
+        # ever transitions the row, and the other finds nothing to do.
         error_category = "Job timed out - no response from GPU"
+
+        # Written for every job this sweep claims, billed or not, which is what
+        # the webhook route does for every terminal job it handles
+        # (webhooks/router.py:299 and webhooks/router.py:306). Until this
+        # commit the sweep
+        # wrote gpu_seconds and no cost, which did not matter while it metered
+        # nothing; now that it charges, a NULL here would mean a real charge
+        # with no record on the row: the customer's run would show no cost
+        # (GET /jobs serves this column, jobs/router.py:496), the
+        # daily spend guard in this module would sum it as zero
+        # (check_daily_gpu_spend, :419) so a burst of billed timeouts
+        # could not trip the alert, and nothing in the product could be
+        # reconciled against the Stripe invoice.
+        gpu_cost_usd = round(
+            gpu_seconds * settings.gpu_price_per_second
+            * (1 + settings.gpu_markup_percent / 100),
+            4,
+        )
         async with pool.acquire() as conn:
-            await conn.execute(
+            claimed = await conn.fetchval(
                 """UPDATE public.jobs
                    SET status = 'failed',
                        error_category = $1,
                        gpu_seconds = $2,
+                       gpu_cost_usd = $3,
                        completed_at = NOW(),
                        updated_at = NOW()
-                   WHERE id = $3""",
+                   WHERE id = $4 AND status = 'running'
+                   RETURNING id""",
                 error_category,
                 gpu_seconds,
+                gpu_cost_usd,
                 job_id,
             )
 
-        logger.warning(
-            "Stale job %s marked failed (last_heartbeat=%s, gpu_seconds=%d)",
-            job_id, last_hb, gpu_seconds,
-        )
+        if claimed:
+            logger.warning(
+                "Stale job %s marked failed (last_heartbeat=%s, gpu_seconds=%d)",
+                job_id, last_hb, gpu_seconds,
+            )
+        else:
+            logger.info(
+                "Stale job %s went terminal between this sweep's SELECT and "
+                "its UPDATE; leaving its billing and mail to that route",
+                job_id,
+            )
 
         # Cancel the provider-side GPU job if present. ``cancel_job`` works
         # for both RunPod (DELETE pod) and Modal (FunctionCall.cancel).
@@ -278,10 +315,79 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
                 )
                 sentry_sdk.capture_exception(exc)
 
-        # Publish SSE failure event
-        await publish_status(job_id, "failed", "Job timed out")
+        # The pod cancel above runs either way -- an orphaned pod burns money
+        # until something kills it, and that safety net is this module's
+        # stated purpose. Everything past here must happen exactly once per
+        # job, so it belongs to whichever route claimed the row.
+        if not claimed:
+            continue
 
-        # Send failure email
+        # Publish SSE failure event. Best-effort: the claim UPDATE above has
+        # committed, so a Redis fault here must not cost the charge and the
+        # mail below -- no later sweep will pick this row up again.
+        await publish_status_best_effort(job_id, "failed", "Job timed out")
+
+        # Send failure email. This is the route a run killed from outside
+        # takes: nothing POSTed a webhook, which is why the job went stale. A
+        # container that catches its own timeout posts FAILED instead
+        # (docker/boltzgen/run_pipeline.py:1953 sets an `error` payload in the
+        # handler for its own TimeoutExpired at
+        # docker/boltzgen/run_pipeline.py:1951,
+        # which post_webhook maps to FAILED at
+        # docker/boltzgen/run_pipeline.py:807) and is counted in
+        # webhooks/router.py. Save-as-you-go may have banked designs on either
+        # route, so count them here too and let the mail point at them.
+        saved_designs = 0
+        try:
+            # Sync boto3 off the event loop, the house pattern at
+            # jobs/notifications.py:57.
+            saved_designs = len(
+                await asyncio.to_thread(
+                    list_job_design_keys, str(user_id), job_id
+                )
+            )
+        except Exception as exc:
+            # An unreadable bucket costs the mail its design count and leaves
+            # the run unbilled, rather than costing the mail itself or
+            # aborting the sweep of the remaining stale jobs. A charge must
+            # never rest on a Storage read that did not come back.
+            logger.exception(
+                "Could not count saved designs for stale job %s; leaving it "
+                "unbilled and sending the plain failure mail",
+                job_id,
+            )
+            sentry_sdk.capture_exception(exc)
+
+        # Bill the capped GPU seconds exactly when this route hands designs
+        # over -- Leo's call 2026-10-13. Before it, a run killed from outside
+        # was never metered here at all (this module wrote jobs.gpu_seconds and
+        # called nothing), so a timeout that banked designs delivered them for
+        # free. The gate is the same `saved_designs > 0` the webhook route uses
+        # and the same count the mail below reports. gpu_seconds is the figure
+        # capped at the last heartbeat plus the stale threshold above, not wall
+        # time to now, so a job that hung for hours is billed to its last sign
+        # of life.
+        if saved_designs > 0 and gpu_seconds > 0:
+            async with pool.acquire() as conn:
+                stripe_customer_id = await conn.fetchval(
+                    """SELECT public.org_stripe_customer(j.organization_id)
+                       FROM public.jobs j
+                       WHERE j.id = $1""",
+                    job_id,
+                )
+            if stripe_customer_id:
+                try:
+                    record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+                except Exception as exc:
+                    # Metering must not cost the customer their failure email
+                    # or stop the sweep: the row is already terminal, so no
+                    # later pass will pick this job up and send it.
+                    logger.exception(
+                        "Could not meter stale job %s; it stays unbilled",
+                        job_id,
+                    )
+                    sentry_sdk.capture_exception(exc)
+
         async with pool.acquire() as conn:
             user_row = await conn.fetchrow(
                 "SELECT email FROM auth.users WHERE id = $1", user_id
@@ -291,6 +397,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
                 to_email=user_row["email"],
                 job_id=job_id,
                 error_category=error_category,
+                saved_designs=saved_designs,
             )
 
         killed += 1

@@ -15,6 +15,7 @@ import json
 import logging
 import secrets
 
+import asyncpg
 import redis.asyncio as aioredis
 import sentry_sdk
 from config import settings
@@ -45,13 +46,46 @@ async def publish_status(job_id: str, status: str, stage: str) -> None:
     await r.aclose()
 
 
+async def publish_status_best_effort(job_id: str, status: str, stage: str) -> None:
+    """Publish a status event without letting Redis abort the caller.
+
+    The three routes that settle a job all publish between a claim UPDATE that
+    has already committed and the charge that follows it. An exception out of
+    ``publish_status`` there is not retried into place: the row is terminal, so
+    the reaper's sweep no longer selects it (``WHERE status = 'running'``,
+    worker/cleanup.py:203) and a webhook redelivery is dropped by the pre-read
+    guard (webhooks/router.py:211). What that would leave is a row stamped with
+    a ``gpu_cost_usd`` nothing metered, and -- on the two failure routes -- no
+    mail telling the customer the run ended.
+
+    So the event is the one thing after the claim that is swallowed here. The
+    front end does not need it to show the outcome: JobPage fetches the job on
+    mount (frontend/src/pages/JobPage.tsx:102), so a lost event costs a reload.
+
+    Callers that publish before anything irreversible keep plain
+    ``publish_status`` -- in ``run_job`` a Redis fault should still fail the
+    dispatch it is reporting.
+    """
+    try:
+        await publish_status(job_id, status, stage)
+    except Exception as exc:
+        logger.exception(
+            "Could not publish the status event for job %s; its status is "
+            "already committed and the charge below still runs",
+            job_id,
+        )
+        sentry_sdk.capture_exception(exc)
+
+
 async def update_job_status(
     job_id: str,
     status: str,
     stage: str | None = None,
     gpu_seconds: int | None = None,
     error_category: str | None = None,
-) -> None:
+    require_non_terminal: bool = False,
+    conn: asyncpg.Connection | None = None,
+) -> bool:
     """Update the job record in the DB with new status and optional fields.
 
     Handles started_at and completed_at timestamps automatically based on status
@@ -63,42 +97,89 @@ async def update_job_status(
         stage: Optional human-readable stage label to update.
         gpu_seconds: Optional GPU time consumed so far.
         error_category: Optional error category string for failed jobs.
+        require_non_terminal: When set, the UPDATE writes only a row that is
+            not already complete/failed/cancelled, and the return value says
+            whether it did. A caller that must act exactly once per job --
+            billing, the failure mail -- uses this to claim the row, because
+            reading the status first and acting on what it read leaves a
+            window in which another route can take the job. The callers
+            that claim through this flag are webhooks/router.py:278 and
+            jobs/service.py:110; worker/cleanup.py:284 claims the same rows
+            from the other side with its own `status = 'running'` guard.
+        conn: Optional connection to write on instead of taking one from the
+            pool. A caller passes its own so that the claim and the writes
+            the claim authorises land in one transaction; the webhook handler
+            does this (webhooks/router.py:285).
+
+    Returns:
+        True when a row was written. Always True unless ``require_non_terminal``
+        is set and the row was already terminal.
     """
-    pool = await get_db_pool()
-    async with pool.acquire() as conn:
-        # Build SET clause dynamically to avoid overwriting unrelated columns.
-        # $1 = status, $2 = job_id — reserved. Additional params start at $3.
-        sets = ["status = $1", "updated_at = NOW()"]
-        params: list = [status, job_id]
-        idx = 3
-
-        if stage is not None:
-            sets.append(f"stage = ${idx}")
-            params.append(stage)
-            idx += 1
-
-        if gpu_seconds is not None:
-            sets.append(f"gpu_seconds = ${idx}")
-            params.append(gpu_seconds)
-            idx += 1
-
-        if error_category is not None:
-            sets.append(f"error_category = ${idx}")
-            params.append(error_category)
-            idx += 1
-
-        # Set terminal timestamp when job reaches a terminal state.
-        if status in ("complete", "failed", "cancelled"):
-            sets.append("completed_at = NOW()")
-
-        # Set started_at on first transition to running (COALESCE preserves existing value).
-        if status == "running":
-            sets.append("started_at = COALESCE(started_at, NOW())")
-
-        await conn.execute(
-            f"UPDATE public.jobs SET {', '.join(sets)} WHERE id = $2",
-            *params,
+    if conn is not None:
+        return await _write_job_status(
+            conn, job_id, status, stage, gpu_seconds, error_category, require_non_terminal
         )
+    pool = await get_db_pool()
+    async with pool.acquire() as own_conn:
+        return await _write_job_status(
+            own_conn, job_id, status, stage, gpu_seconds, error_category, require_non_terminal
+        )
+
+
+async def _write_job_status(
+    conn: asyncpg.Connection,
+    job_id: str,
+    status: str,
+    stage: str | None,
+    gpu_seconds: int | None,
+    error_category: str | None,
+    require_non_terminal: bool,
+) -> bool:
+    """Write the status UPDATE on a given connection.
+
+    Split out of ``update_job_status`` only so that the same statement can run
+    either on a pooled connection of its own or inside a caller's transaction.
+    See ``update_job_status`` for the semantics.
+    """
+    # Build SET clause dynamically to avoid overwriting unrelated columns.
+    # $1 = status, $2 = job_id — reserved. Additional params start at $3.
+    sets = ["status = $1", "updated_at = NOW()"]
+    params: list = [status, job_id]
+    idx = 3
+
+    if stage is not None:
+        sets.append(f"stage = ${idx}")
+        params.append(stage)
+        idx += 1
+
+    if gpu_seconds is not None:
+        sets.append(f"gpu_seconds = ${idx}")
+        params.append(gpu_seconds)
+        idx += 1
+
+    if error_category is not None:
+        sets.append(f"error_category = ${idx}")
+        params.append(error_category)
+        idx += 1
+
+    # Set terminal timestamp when job reaches a terminal state.
+    if status in ("complete", "failed", "cancelled"):
+        sets.append("completed_at = NOW()")
+
+    # Set started_at on first transition to running (COALESCE preserves existing value).
+    if status == "running":
+        sets.append("started_at = COALESCE(started_at, NOW())")
+
+    sql = f"UPDATE public.jobs SET {', '.join(sets)} WHERE id = $2"
+    if not require_non_terminal:
+        await conn.execute(sql, *params)
+        return True
+    claimed = await conn.fetchval(
+        sql + " AND status NOT IN ('complete', 'failed', 'cancelled')"
+        " RETURNING id",
+        *params,
+    )
+    return claimed is not None
 
 
 async def run_job(ctx: dict, job_id: str) -> None:

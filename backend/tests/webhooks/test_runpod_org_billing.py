@@ -85,6 +85,15 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
 
+    # The handler claims the job inside conn.transaction() and writes the
+    # candidate and results rows there (webhooks/router.py:276-305). asyncpg
+    # returns an async context manager from a sync call, so this cannot be a
+    # plain AsyncMock attribute.
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+
     pool = AsyncMock()
     pool.acquire = MagicMock(return_value=ctx)
     return pool, captured
@@ -101,7 +110,7 @@ async def test_webhook_completion_resolves_customer_via_org_resolver():
     with patch("webhooks.router.get_db_pool", return_value=pool), \
          patch("webhooks.router.record_gpu_usage") as mock_meter, \
          patch("webhooks.router.update_job_status", new=AsyncMock()), \
-         patch("webhooks.router.publish_status", new=AsyncMock()), \
+         patch("webhooks.router.publish_status_best_effort", new=AsyncMock()), \
          patch("webhooks.router.send_completion_email", new=AsyncMock()), \
          patch("webhooks.router.send_failure_email", new=AsyncMock()), \
          patch("webhooks.router.get_provider") as mock_provider, \
@@ -151,7 +160,7 @@ async def test_webhook_completion_skips_billing_if_org_has_no_customer():
     with patch("webhooks.router.get_db_pool", return_value=pool), \
          patch("webhooks.router.record_gpu_usage") as mock_meter, \
          patch("webhooks.router.update_job_status", new=AsyncMock()), \
-         patch("webhooks.router.publish_status", new=AsyncMock()), \
+         patch("webhooks.router.publish_status_best_effort", new=AsyncMock()), \
          patch("webhooks.router.send_completion_email", new=AsyncMock()), \
          patch("webhooks.router.send_failure_email", new=AsyncMock()), \
          patch("webhooks.router.get_provider") as mock_provider, \

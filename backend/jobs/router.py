@@ -9,13 +9,17 @@ Provides:
 - GET  /jobs/{job_id}/download — download all designs as a ZIP archive
 """
 
+import asyncio
 import datetime
-import io
 import json
+import logging
+import shutil
 import uuid as uuid_mod
 import zipfile
+from collections.abc import Iterator
 
 import redis.asyncio as aioredis
+import sentry_sdk
 from agent.jobspec import JobSpec
 from auth.dependencies import get_current_user
 from auth.org_dependencies import require_role
@@ -28,17 +32,64 @@ from fastapi.responses import StreamingResponse
 from middleware.rate_limit import limiter
 from pydantic import BaseModel
 from storage.client import (
+    DESIGN_SUFFIXES,
     generate_presigned_get_url,
     generate_presigned_put_url,
     get_s3_client,
+    list_job_design_keys,
 )
 
 from jobs.dispatch import launch_job
 from jobs.service import TOOL_IMAGES, cancel_job_by_id
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 MAX_SSE_PER_USER = settings.max_sse_connections_per_user
+
+#: Terminal states whose designs this module serves.
+#:
+#: ``complete`` reads them from ``job_candidates``. The other two have no row
+#: there -- the webhook writes candidates only under its ``complete`` branch
+#: (``webhooks/router.py``) -- but whatever the run uploaded before it stopped
+#: is in Storage, so both serve a partial set listed from the bucket.
+#:
+#: ``cancelled`` is here because a cancel bills the GPU seconds already burned
+#: (``jobs/service.py::cancel_job_by_id``, the ``if claimed and gpu_seconds > 0``
+#: block at jobs/service.py:184),
+#: and taking the money while the output stays unreachable is the same defect
+#: as on the failed path.
+_DELIVERS_DESIGNS: tuple[str, ...] = ("complete", "failed", "cancelled")
+
+
+class _ChunkSink:
+    """Collects what ``ZipFile`` writes so a generator can hand it onward.
+
+    ``ZipFile`` needs only ``write`` and ``flush`` from its output. Finding no
+    ``tell``, it wraps this in its own ``_Tellable`` and writes data
+    descriptors instead of seeking back to patch each entry's header, so the
+    archive never has to be seekable -- and so never has to be held whole.
+    That what comes out of that path still opens is pinned by
+    ``tests/jobs/test_partial_delivery.py::test_the_archive_is_served_as_it_is_built``.
+    """
+
+    def __init__(self) -> None:
+        self._chunks: list[bytes] = []
+
+    def write(self, data: bytes) -> int:
+        self._chunks.append(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def drain(self) -> bytes:
+        """Everything written since the last drain, which it hands over."""
+        joined = b"".join(self._chunks)
+        self._chunks.clear()
+        return joined
+
 
 
 async def _check_sse_limit(user_id: str) -> None:
@@ -515,10 +566,18 @@ async def download_all_designs(
     user_id: str = Depends(get_current_user),
     org_id: str = Depends(require_role("owner", "scientist", "viewer")),
 ):
-    """Download all design outputs for a completed job as a ZIP archive.
+    """Download a job's design outputs as a ZIP archive.
+
+    Serves every state in ``_DELIVERS_DESIGNS``: a complete run, and a failed
+    or cancelled one that still delivered designs. A run that stopped part way
+    leaves whatever it had already uploaded under the same ``outputs/`` prefix
+    this reads -- how much that is depends on the tool
+    (``backend/storage/client.py::list_job_design_keys``). A non-complete
+    run's archive is named ``_partial`` so the downloaded file says so on
+    disk.
 
     Phase 12: org-scoped — any member of the active org can download outputs
-    for any complete job in that org. The S3 storage key prefix still uses
+    for any such job in that org. The S3 storage key prefix still uses
     the row's original ``user_id`` (the launcher) since storage paths are
     immutable; we read that from the job row, not from the caller.
 
@@ -531,7 +590,9 @@ async def download_all_designs(
         StreamingResponse with media_type="application/zip".
 
     Raises:
-        HTTPException 404: If the job does not exist or is not complete.
+        HTTPException 404: If the job does not exist, is in a state outside
+            ``_DELIVERS_DESIGNS``, or is a non-complete run with no design
+            file in Storage.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -540,27 +601,96 @@ async def download_all_designs(
             job_id,
             org_id,
         )
-    if not row or row["status"] != "complete":
+    if not row or row["status"] not in _DELIVERS_DESIGNS:
         raise HTTPException(status_code=404, detail="No completed job found")
 
     # Storage prefix is keyed to the original launcher's user_id, not the caller.
     storage_user_id = str(row["user_id"])
     s3 = get_s3_client()
     prefix = f"users/{storage_user_id}/jobs/{job_id}/outputs/"
-    objects = s3.list_objects_v2(Bucket=settings.s3_bucket_name, Prefix=prefix)
 
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for obj in objects.get("Contents", []):
-            body = s3.get_object(Bucket=settings.s3_bucket_name, Key=obj["Key"])["Body"].read()
-            filename = obj["Key"].split("/")[-1]
-            zf.writestr(filename, body)
+    def _list_objects() -> list[dict]:
+        # Paginated because a bare list_objects_v2 stops at 1000 keys and
+        # num_designs caps far above that -- 20000 for rfantibody
+        # (agent/wizard.py:114) and pxdesign (agent/wizard.py:166), 60000 for
+        # boltzgen (agent/wizard.py:139), each enforced at
+        # agent/tools.py:643 -- so a large run's archive was
+        # silently short. It also reads every page list_job_design_keys does,
+        # which puts every design GET /jobs/{id} lists in the archive.
+        return [
+            obj
+            for page in s3.get_paginator("list_objects_v2").paginate(
+                Bucket=settings.s3_bucket_name, Prefix=prefix
+            )
+            for obj in page.get("Contents") or []
+        ]
 
-    buffer.seek(0)
+    contents = await asyncio.to_thread(_list_objects)
+
+    is_partial = row["status"] != "complete"
+    if is_partial and not any(
+        o["Key"].endswith(DESIGN_SUFFIXES) for o in contents
+    ):
+        # Nothing was streamed before the run died, so there is no partial set
+        # to serve. A complete run with an empty prefix keeps its pre-existing
+        # behaviour of an empty archive rather than a 404.
+        raise HTTPException(status_code=404, detail="No designs found for this job")
+
+    def _stream_archive() -> Iterator[bytes]:
+        # Streamed rather than built in memory because paginating the listing
+        # above removed the implicit 1000-key cap that used to bound this, and
+        # num_designs allows far more (agent/wizard.py:114, agent/wizard.py:166
+        # and agent/wizard.py:139): a
+        # whole archive held in a BytesIO makes one download of a large run a
+        # process-wide memory event. Each object arrives 64KiB at a time and
+        # the sink is drained after every entry, so what is resident is one
+        # design's compressed bytes and a read buffer rather than the archive
+        # (tests/jobs/test_partial_delivery.py::test_the_archive_is_served_as_it_is_built).
+        #
+        # Starlette hands a sync iterator to iterate_in_threadpool
+        # (starlette/responses.py:236 in starlette 1.3.1, the non-AsyncIterable
+        # branch), so the blocking boto3 calls stay off the event loop as
+        # they did when this was one asyncio.to_thread hop.
+        sink = _ChunkSink()
+        with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for obj in contents:
+                with zf.open(obj["Key"].split("/")[-1], "w") as entry:
+                    try:
+                        shutil.copyfileobj(
+                            s3.get_object(Bucket=settings.s3_bucket_name, Key=obj["Key"])["Body"],
+                            entry,
+                            65536,
+                        )
+                    except Exception as exc:
+                        # The 200 and its headers went out before this
+                        # generator was first pulled (Starlette sends
+                        # `http.response.start`, then iterates:
+                        # starlette/responses.py:249 at 1.3.1), so a fault cannot
+                        # become a 500. The client keeps the bytes it already
+                        # has and the archive ends with no central directory
+                        # -- a file that will not open. Re-raised rather than
+                        # swallowed, because a short archive must not look
+                        # finished; captured first so the event names the job
+                        # and the key, which a generic handler further up the
+                        # stack would not.
+                        logger.exception(
+                            "Archive stream for job %s failed on key %s; the "
+                            "client keeps a truncated zip",
+                            job_id,
+                            obj["Key"],
+                        )
+                        sentry_sdk.capture_exception(exc)
+                        raise
+                if chunk := sink.drain():
+                    yield chunk
+        if chunk := sink.drain():  # the central directory zipfile writes on close
+            yield chunk
+
+    suffix = "designs_partial" if is_partial else "designs"
     return StreamingResponse(
-        iter([buffer.read()]),
+        _stream_archive(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="job_{job_id}_designs.zip"'},
+        headers={"Content-Disposition": f'attachment; filename="job_{job_id}_{suffix}.zip"'},
     )
 
 
@@ -704,6 +834,7 @@ async def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     candidates = []
+    partial = False
     if row["status"] == "complete":
         async with pool.acquire() as conn:
             cand_rows = await conn.fetch(
@@ -719,6 +850,72 @@ async def get_job(
             }
             for r in cand_rows
         ]
+    elif row["status"] in _DELIVERS_DESIGNS:
+        # A run that did not complete has no job_candidates rows to read. The
+        # webhook collects a payload's candidates only inside ``if
+        # internal_status == "complete"`` (``backend/webhooks/router.py:230``)
+        # and writes them only below its claim on the row (the claim at
+        # ``backend/webhooks/router.py:278``, the INSERT at
+        # ``backend/webhooks/router.py:289``), so neither a FAILED post nor a
+        # COMPLETED one that lost the claim leaves any behind;
+        # the reaper that fails a timed-out run writes none
+        # (``backend/worker/cleanup.py::detect_stale_jobs``); and a cancel
+        # writes none (``jobs/service.py::cancel_job_by_id``).
+        # Whatever the run uploaded before it stopped is still in Storage, so
+        # Storage is the only record of it and this lists it directly.
+        #
+        # No scores: per-design metrics live in job_candidates.scores, and that
+        # table is written only on the complete path (webhooks/router.py:230,
+        # the INSERT at webhooks/router.py:289), so there is nothing to read
+        # for this set. ``rank`` is the key
+        # order from list_job_design_keys -- a presentation order, not a
+        # quality ranking.
+        def _list_and_sign() -> list[dict]:
+            # Signed in here rather than in a comprehension on the event
+            # loop because nothing in backend/ bounds this set. The complete
+            # branch above signs the job_candidates rows a container chose
+            # to report; this one signs whatever Storage holds under the
+            # job's prefix, and every cap on that lives in a container's own
+            # filter, under docker/, which no module in backend/ imports
+            # (docker/pxdesign/run_pipeline.py:1867 and
+            # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
+            # `passing` set, and boltzgen's size comes from its own budget
+            # default, 60 outside the pilot tier and 5 inside it,
+            # docker/boltzgen/run_pipeline.py:1850).
+            # generate_presigned_get_url builds a fresh boto3 client per
+            # call unless it is handed one (storage/client.py:62), so every key
+            # in this unbounded set is signed on the one client built here
+            # (tests/jobs/test_partial_delivery.py::test_the_partial_set_signs_on_one_client).
+            # Signing is local HMAC, so no key costs a network hop, and the
+            # thread keeps even that off the one event loop. This runs on every
+            # view of a terminal job -- JobPage fetches it on mount -- so the
+            # per-call client was paid again on every refresh.
+            keys = list_job_design_keys(str(row["user_id"]), job_id)
+            s3 = get_s3_client()
+            return [
+                {
+                    "rank": i,
+                    "pdb_key": k,
+                    "scores": {},
+                    "download_url": generate_presigned_get_url(k, client=s3),
+                }
+                for i, k in enumerate(keys, start=1)
+            ]
+
+        try:
+            candidates = await asyncio.to_thread(_list_and_sign)
+        except Exception as exc:
+            # A Storage fault, listing or signing, degrades to the old empty
+            # list rather than failing the whole job read, which also serves
+            # the status and the error category the caller came for
+            # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
+            # Captured explicitly because swallowing here stops Sentry's
+            # FastApiIntegration from seeing it -- the reasoning spelled out
+            # at webhooks/router.py:329-332.
+            logger.exception("Could not list saved designs for job %s", job_id)
+            sentry_sdk.capture_exception(exc)
+            candidates = []
+        partial = bool(candidates)
 
     return {
         "id": str(row["id"]),
@@ -732,6 +929,10 @@ async def get_job(
         "error_category": row["error_category"],
         "results": json.loads(row["results"]) if row["results"] else None,
         "candidates": candidates,
+        # True only on a run that failed or was cancelled and still delivered
+        # designs, so a caller can tell "these are all of them" from "these are
+        # the ones that survived". Always False for a complete run.
+        "partial": partial,
         "job_spec": json.loads(row["job_spec"]) if row["job_spec"] else None,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
     }

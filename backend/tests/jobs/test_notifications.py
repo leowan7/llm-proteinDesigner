@@ -3,6 +3,8 @@
 Covers:
 - Completion email sent via Resend with correct fields
 - Failure email sent with error category
+- Failure email of a run that saved designs leads with them, and says the set
+  is partial
 
 Implementation target: Plan 03-03.
 """
@@ -119,3 +121,70 @@ class TestJobNotifications:
         assert "privacy@bindwave.com" in call_params["html"]
         assert "ranomics" not in call_params["html"].lower()
         assert "Bindwave" in call_params["subject"]
+
+    @pytest.mark.anyio
+    async def test_a_failure_that_saved_designs_leads_with_them(self):
+        """A partial run's mail points at the designs instead of only the error.
+
+        The run still failed, so the mail says so, but burying that two designs
+        survived under a bare failure notice is what the delivery work exists
+        to stop. The wording also has to prevent the customer reading a partial
+        set as a finished one: it names the count, calls the set partial, and
+        says the final scoring pass is missing.
+        """
+        mock_send = MagicMock()
+
+        with (
+            patch("resend.Emails.send", mock_send),
+            patch("jobs.notifications.settings") as mock_settings,
+        ):
+            mock_settings.resend_api_key = "re_test"
+            mock_settings.resend_from_email = "Bindwave <jobs@bindwave.com>"
+            mock_settings.app_base_url = "http://localhost:8000"
+            from jobs.notifications import send_failure_email
+            await send_failure_email(
+                to_email="scientist@example.com",
+                job_id="job-456",
+                error_category="Timed out",
+                saved_designs=2,
+            )
+
+        call_params = mock_send.call_args[0][0]
+
+        assert "2 designs saved" in call_params["subject"]
+        assert "Timed out" in call_params["html"]
+        assert "2 designs" in call_params["html"]
+        assert "partial set" in call_params["html"]
+        assert "without the final" in call_params["html"]
+        assert "/jobs/job-456" in call_params["html"]
+
+    @pytest.mark.anyio
+    async def test_a_single_saved_design_is_not_pluralised(self):
+        """One design is "1 design ... is saved", not "1 designs ... are".
+
+        Worth a test because the failure mail is the first thing a customer
+        sees after a run they paid for died, and one is the boundary of the
+        branch that announces designs at all (``if saved_designs > 0``,
+        ``jobs/notifications.py:163``), for every tool rather than a billed one.
+        """
+        mock_send = MagicMock()
+
+        with (
+            patch("resend.Emails.send", mock_send),
+            patch("jobs.notifications.settings") as mock_settings,
+        ):
+            mock_settings.resend_api_key = "re_test"
+            mock_settings.resend_from_email = "Bindwave <jobs@bindwave.com>"
+            mock_settings.app_base_url = "http://localhost:8000"
+            from jobs.notifications import send_failure_email
+            await send_failure_email(
+                to_email="scientist@example.com",
+                job_id="job-456",
+                error_category="Timed out",
+                saved_designs=1,
+            )
+
+        call_params = mock_send.call_args[0][0]
+
+        assert "1 design saved" in call_params["subject"]
+        assert "The 1 design it had already produced is saved" in call_params["html"]
