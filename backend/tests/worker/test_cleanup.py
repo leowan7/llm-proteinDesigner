@@ -371,7 +371,7 @@ async def test_a_stale_job_that_saved_nothing_is_not_billed():
     assert mock_email.call_args[1]["saved_designs"] == 0
     # Three: the stale SELECT, the claiming UPDATE, and the email SELECT
     # (worker/cleanup.py:391) that every swept job gets. The fourth the billed
-    # path opens -- the Stripe customer lookup at worker/cleanup.py:371 -- is
+    # path opens -- the Stripe customer lookup at worker/cleanup.py:371-372 -- is
     # skipped, because that block is gated on saved_designs > 0.
     assert mock_pool.acquire.call_count == 3
 
