@@ -646,9 +646,9 @@ async def download_all_designs(
         # (tests/jobs/test_partial_delivery.py::test_the_archive_is_served_as_it_is_built).
         #
         # Starlette hands a sync iterator to iterate_in_threadpool
-        # (starlette/responses.py:236, the non-AsyncIterable branch), so the
-        # blocking boto3 calls stay off the event loop as they did when this
-        # was one asyncio.to_thread hop.
+        # (starlette/responses.py:236 in starlette 1.3.1, the non-AsyncIterable
+        # branch), so the blocking boto3 calls stay off the event loop as
+        # they did when this was one asyncio.to_thread hop.
         sink = _ChunkSink()
         with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for obj in contents:
@@ -663,7 +663,7 @@ async def download_all_designs(
                         # The 200 and its headers went out before this
                         # generator was first pulled (Starlette sends
                         # `http.response.start`, then iterates:
-                        # starlette/responses.py:249), so a fault here cannot
+                        # starlette/responses.py:249 at 1.3.1), so a fault cannot
                         # become a 500. The client keeps the bytes it already
                         # has and the archive ends with no central directory
                         # -- a file that will not open. Re-raised rather than

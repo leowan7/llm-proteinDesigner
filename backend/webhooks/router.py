@@ -241,8 +241,8 @@ async def runpod_webhook(request: Request):
 
     # Update DB status. This write is also the claim on the job. The guard at
     # :207 is only a pre-read, and the reaper can take the row in the window
-    # between that read and this write (worker/cleanup.py:276 claims it the
-    # same way, from the other side), so everything below here that must
+    # between that read and this write (worker/cleanup.py:276-285 claims it
+    # the same way, from the other side), so everything below that must
     # happen once per job is gated on having won the transition.
     #
     # The claim and the two writes that record what the run produced -- the
@@ -377,7 +377,7 @@ async def runpod_webhook(request: Request):
     # exactly one of them wins the status transition. This handler reaches the
     # charge only when its own UPDATE claimed a non-terminal row
     # (:264), and worker/cleanup.py reaches it only when its
-    # UPDATE claimed a row still 'running' (worker/cleanup.py:276)
+    # UPDATE claimed a row still 'running' (worker/cleanup.py:284)
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.
     # record_gpu_usage keys its meter event on the job id as a second line of

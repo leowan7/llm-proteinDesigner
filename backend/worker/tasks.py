@@ -73,7 +73,7 @@ async def update_job_status(
             reading the status first and acting on what it read leaves a
             window in which another route can take the job. The callers
             that claim through this flag are webhooks/router.py:264 and
-            jobs/service.py:110; worker/cleanup.py:276 claims the same rows
+            jobs/service.py:110; worker/cleanup.py:284 claims the same rows
             from the other side with its own `status = 'running'` guard.
         conn: Optional connection to write on instead of taking one from the
             pool. A caller passes its own so that the claim and the writes

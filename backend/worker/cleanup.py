@@ -264,7 +264,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # with no record on the row: the customer's run would show no cost
         # (GET /jobs serves this column, jobs/router.py:495), the
         # daily spend guard in this module would sum it as zero
-        # (check_daily_gpu_spend, :415) so a burst of billed timeouts
+        # (check_daily_gpu_spend, :417) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be
         # reconciled against the Stripe invoice.
         gpu_cost_usd = round(
