@@ -85,6 +85,15 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
 
+    # The handler claims the job inside conn.transaction() and writes the
+    # candidate and results rows there (webhooks/router.py:262-264). asyncpg
+    # returns an async context manager from a sync call, so this cannot be a
+    # plain AsyncMock attribute.
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+
     pool = AsyncMock()
     pool.acquire = MagicMock(return_value=ctx)
     return pool, captured

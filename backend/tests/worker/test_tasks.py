@@ -223,7 +223,7 @@ async def test_update_job_status_claims_a_row_that_is_not_terminal():
     """``require_non_terminal`` makes the UPDATE an atomic claim.
 
     The webhook route charges a customer on the strength of winning this one
-    write (webhooks/router.py:247), so the guard and the
+    write (webhooks/router.py:264), so the guard and the
     RETURNING have to reach the DB in the statement itself. A pre-read cannot
     stand in for them: the row can change between the read and the write,
     which is the window worker/cleanup.py's sweep opens
@@ -278,7 +278,7 @@ async def test_update_job_status_is_an_unconditional_write_by_default():
     (:204, :228, :272). None of them is claiming anything, so the default
     must stay the statement it was before the claim was added -- no status
     guard, no RETURNING, and the same ``execute`` call. The two callers that
-    do claim pass the flag explicitly (webhooks/router.py:247,
+    do claim pass the flag explicitly (webhooks/router.py:264,
     jobs/service.py:110).
     """
     conn = AsyncMock()
@@ -293,3 +293,47 @@ async def test_update_job_status_is_an_unconditional_write_by_default():
     assert "NOT IN" not in sql
     assert "RETURNING" not in sql
     conn.fetchval.assert_not_called()
+
+
+async def test_update_job_status_claims_on_a_caller_s_own_connection():
+    """A caller that passes a connection is written on that connection.
+
+    The webhook handler opens a transaction and claims inside it
+    (webhooks/router.py:262-272) so that a failure in the candidate writes
+    rolls the claim back with them. That only holds if the claim actually
+    runs on the connection it was handed: a claim that quietly took a second
+    connection from the pool would commit on its own, outside the caller's
+    transaction, and the rollback would leave a terminal row behind. So this
+    pins both halves -- the statement lands on the caller's connection, and
+    the pool is never touched.
+    """
+    caller_conn = AsyncMock()
+    caller_conn.fetchval = AsyncMock(return_value="job-uuid")
+
+    with patch("worker.tasks.get_db_pool", new_callable=AsyncMock) as mock_pool_getter:
+        claimed = await update_job_status(
+            "job-uuid", "complete", require_non_terminal=True, conn=caller_conn
+        )
+
+    assert claimed is True
+    mock_pool_getter.assert_not_called()
+    sql = caller_conn.fetchval.call_args[0][0]
+    assert "AND status NOT IN ('complete', 'failed', 'cancelled')" in sql
+    assert "RETURNING id" in sql
+
+
+async def test_update_job_status_writes_unconditionally_on_a_caller_s_connection():
+    """The default write honours a caller's connection too.
+
+    Same contract as the claim above, for the branch that does not claim:
+    whichever statement runs, it runs where the caller said.
+    """
+    caller_conn = AsyncMock()
+
+    with patch("worker.tasks.get_db_pool", new_callable=AsyncMock) as mock_pool_getter:
+        claimed = await update_job_status("job-uuid", "running", conn=caller_conn)
+
+    assert claimed is True
+    mock_pool_getter.assert_not_called()
+    assert "NOT IN" not in caller_conn.execute.call_args[0][0]
+    caller_conn.fetchval.assert_not_called()

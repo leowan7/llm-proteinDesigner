@@ -27,6 +27,7 @@ import hmac
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from httpx import ASGITransport, AsyncClient
 from main import app
 
@@ -62,6 +63,16 @@ def _make_ctx(conn):
     ctx = AsyncMock()
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
+    # asyncpg's conn.transaction() is a sync call returning an async context
+    # manager. Left as a plain AsyncMock attribute it would return a
+    # coroutine, which `async with` rejects, so every connection handed to
+    # the handler gets one: the claim and the writes it authorises run inside
+    # it (webhooks/router.py:263). __aexit__ returns False so an exception
+    # raised inside the block propagates, as a real transaction's does.
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
     return ctx
 
 
@@ -885,13 +896,12 @@ async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim(
     })
     conn2 = AsyncMock()
     conn2.fetchrow = AsyncMock(return_value={"status": "running"})
-    conn3 = AsyncMock()   # INSERT job_candidates
-    conn4 = AsyncMock()   # UPDATE results, gpu_cost_usd
-    conn5 = AsyncMock()   # SELECT org_stripe_customer
-    conn6 = AsyncMock()   # SELECT email
-    conn6.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
+    conn3 = AsyncMock()   # claim txn: INSERT job_candidates, UPDATE results
+    conn4 = AsyncMock()   # SELECT org_stripe_customer
+    conn5 = AsyncMock()   # SELECT email
+    conn5.fetchrow = AsyncMock(return_value={"email": "test@example.com"})
 
-    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5, conn6)
+    mock_pool = _make_pool(conn1, conn2, conn3, conn4, conn5)
 
     acquires_at_claim = []
 
@@ -919,7 +929,7 @@ async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim(
 
     with (
         patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
-        patch("webhooks.router.update_job_status", side_effect=_claim),
+        patch("webhooks.router.update_job_status", side_effect=_claim) as mock_update,
         patch("webhooks.router.publish_status", new_callable=AsyncMock),
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch("webhooks.router.record_gpu_usage"),
@@ -936,11 +946,15 @@ async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim(
 
     assert response.status_code == 200
 
-    # Only the two pre-claim reads had been taken when the claim fired.
-    assert acquires_at_claim == [2]
+    # The claim fired on the third connection -- the one it shares with the
+    # writes below it -- not on either of the two pre-claim reads.
+    assert acquires_at_claim == [3]
+    assert mock_update.call_args[1]["conn"] is conn3
+    conn3.transaction.assert_called_once()
 
-    # And the rows were written, on the connection taken after it.
-    assert conn3.execute.await_count == 2
+    # And all three writes the claim authorises landed on it: both candidate
+    # rows and the results column.
+    assert conn3.execute.await_count == 3
     first = conn3.execute.await_args_list[0][0]
     assert "INSERT INTO public.job_candidates" in first[0]
     assert first[1] == JOB_ID
@@ -948,6 +962,7 @@ async def test_the_candidate_rows_of_a_complete_run_are_written_after_the_claim(
     assert first[3] == "k1.pdb"
     assert json.loads(first[4]) == {"ipae": 0.3}
     assert json.loads(conn3.execute.await_args_list[1][0][4]) == {}
+    assert "SET results" in conn3.execute.await_args_list[2][0][0]
 
 
 async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
@@ -957,13 +972,14 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
     COMPLETED. The handler then returns at the lost-claim guard, and any
     job_candidates rows it had already written would sit on a row that is
     `failed`: get_job reads that table only when the status is 'complete'
-    (jobs/router.py:834), so the customer of a run that actually finished
+    (jobs/router.py:836), so the customer of a run that actually finished
     would be served the partial branch's unscored Storage listing
-    (jobs/router.py:849) while the scored rows sat unread.
+    (jobs/router.py:851) while the scored rows sat unread.
 
-    Pinned by the pool: two connections are available, the ones the handler
-    needs before the claim. A third acquire -- the INSERT -- raises
-    StopIteration rather than passing quietly.
+    Pinned on the connection the claim shares with those writes: it is
+    available and the handler does take it, because the claim now runs inside
+    its transaction (webhooks/router.py:262-264), but nothing is executed on
+    it once the claim comes back False.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -975,8 +991,9 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
     })
     conn2 = AsyncMock()
     conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+    conn3 = AsyncMock()   # claim txn -- taken, and left unwritten
 
-    mock_pool = _make_pool(conn1, conn2)
+    mock_pool = _make_pool(conn1, conn2, conn3)
 
     mock_provider = AsyncMock()
     mock_provider.terminate_pod = AsyncMock()
@@ -1020,12 +1037,13 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
     mock_update.assert_called_once()
     assert mock_update.call_args[1]["require_non_terminal"] is True
 
-    # The two connections the handler is allowed were both used, and neither
-    # of them ran an INSERT: the only writes attempted were the pre-claim
-    # reads.
-    assert mock_pool.acquire.call_count == 2
+    # The transaction connection was taken, and nothing ran on it: no INSERT,
+    # no results write. The two reads above the claim are all that touched the
+    # database.
+    assert mock_pool.acquire.call_count == 3
     conn1.execute.assert_not_called()
     conn2.execute.assert_not_called()
+    conn3.execute.assert_not_called()
 
     mock_billing.assert_not_called()
     mock_email.assert_not_called()
@@ -1044,9 +1062,8 @@ async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
     once per job -- the cost write, the SSE event, the Storage read, the
     charge, the failure mail -- belongs to the route that won it.
 
-    Pinned by the pool itself: only the two connections the handler needs
-    before the claim are available, so a third acquire raises rather than
-    passing quietly.
+    Pinned on the connection the claim runs on: it is taken, and after the
+    claim comes back False nothing is executed on it.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -1061,8 +1078,9 @@ async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
     # duplicate webhook.
     conn2 = AsyncMock()
     conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+    conn3 = AsyncMock()   # claim txn -- taken, and left unwritten
 
-    mock_pool = _make_pool(conn1, conn2)
+    mock_pool = _make_pool(conn1, conn2, conn3)
 
     mock_provider = AsyncMock()
     mock_provider.terminate_pod = AsyncMock()
@@ -1105,4 +1123,103 @@ async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
     mock_fail_email.assert_not_called()
     mock_publish.assert_not_called()
     mock_list.assert_not_called()
-    assert mock_pool.acquire.call_count == 2
+    assert mock_pool.acquire.call_count == 3
+    conn3.execute.assert_not_called()
+
+
+async def test_a_failed_candidate_insert_rolls_the_claim_back():
+    """A candidate INSERT that raises takes the claim down with it.
+
+    The claim is what makes the row terminal, and the candidate rows are what
+    record the run. Written in that order on separate connections, a failure
+    part-way through the loop would leave a `complete` row holding some of its
+    candidates, a NULL `results`, no mail and no charge -- and the redelivered
+    webhook would be dropped by the pre-read guard (webhooks/router.py:207),
+    so nothing would ever repair it. Before the claim existed the same failure
+    ran above an unconditional status write
+    (``git show a479ac38:backend/webhooks/router.py``, the INSERT loop at
+    :242-255 above the write at :262) and left the row 'running', where a
+    redelivery or the reaper could still settle it.
+
+    What this pins is the structure that restores that property: the claim and
+    the INSERT run on one connection, inside one transaction, and the
+    exception leaves the transaction block rather than being swallowed. The
+    rollback itself is asyncpg's contract for an exception escaping
+    ``conn.transaction()``, not something a mock can demonstrate; this test
+    does not exercise a database.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    # The claim txn connection: the first candidate INSERT fails on it.
+    conn3 = AsyncMock()
+    conn3.execute = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+    mock_pool = _make_pool(conn1, conn2, conn3)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    payload = json.dumps({
+        "id": JOB_ID,
+        "pod_id": POD_ID,
+        "status": "COMPLETED",
+        "output": {
+            "candidate_count": 2,
+            "candidates": [
+                {"rank": 1, "pdb_key": "k1.pdb", "scores": {"ipae": 0.3}},
+                {"rank": 2, "pdb_key": "k2.pdb", "scores": {"ipae": 0.4}},
+            ],
+            "next_steps": "Run AlphaFold validation",
+            "job_spec": {"tool": "bindcraft"},
+        },
+    }).encode()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch(
+            "webhooks.router.update_job_status",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_completion_email", new_callable=AsyncMock) as mock_email,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            with pytest.raises(RuntimeError, match="connection reset"):
+                await client.post(
+                    "/webhooks/runpod",
+                    content=payload,
+                    headers={"Content-Type": "application/json"},
+                )
+
+    # The claim ran on the same connection as the INSERT that failed, inside
+    # the transaction that connection opened.
+    mock_update.assert_called_once()
+    assert mock_update.call_args[1]["conn"] is conn3
+    conn3.transaction.assert_called_once()
+    conn3.execute.assert_awaited_once()
+    assert "INSERT INTO public.job_candidates" in conn3.execute.await_args[0][0]
+
+    # The exception was handed to the transaction's __aexit__ rather than
+    # swallowed inside the block -- that is what asyncpg rolls back on.
+    aexit_args = conn3.transaction.return_value.__aexit__.await_args[0]
+    assert aexit_args[0] is RuntimeError
+
+    # And nothing downstream of the writes ran: no terminal SSE event, no
+    # charge, no mail, and the pod was left for the reaper to cancel.
+    mock_publish.assert_not_called()
+    mock_billing.assert_not_called()
+    mock_email.assert_not_called()
+    mock_provider.terminate_pod.assert_not_called()
