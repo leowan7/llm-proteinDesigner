@@ -227,13 +227,15 @@ def delete_job_objects(user_id: str, job_id: str) -> int:
     return deleted
 
 
-#: Filename suffixes a saved design can carry. Three tools derive the suffix
-#: from the file their pipeline produced, so any of them can upload a
-#: ``.cif``: BoltzGen and PxDesign take ``Path(...).suffix``
-#: (``docker/boltzgen/run_pipeline.py:2043-2044``,
-#: ``docker/pxdesign/run_pipeline.py:1882-1883``) and BindCraft uploads under
-#: the basename of its output path (``docker/bindcraft/run_pipeline.py:1778``).
-#: RFdiffusion and RFantibody write a literal ``.pdb``
+#: Filename suffixes a saved design can carry. ``.cif`` is here for BoltzGen
+#: and PxDesign: both collect ``.cif`` designs
+#: (``docker/boltzgen/run_pipeline.py:1360``,
+#: ``docker/pxdesign/run_pipeline.py:1178``) and upload under whatever suffix
+#: they found (``Path(...).suffix``, ``docker/boltzgen/run_pipeline.py:2043-2044``,
+#: ``docker/pxdesign/run_pipeline.py:1882-1883``). BindCraft uploads under the
+#: basename of its output path (``docker/bindcraft/run_pipeline.py:1778``), so
+#: its suffix is whatever that file carries; nothing in its pipeline writes a
+#: ``.cif``. RFdiffusion and RFantibody write a literal ``.pdb``
 #: (``docker/rfdiffusion/run_pipeline.py:2107``,
 #: ``docker/rfantibody/run_pipeline.py:1596``).
 DESIGN_SUFFIXES: tuple[str, ...] = (".pdb", ".cif")

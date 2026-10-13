@@ -474,10 +474,12 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_is_billed_when_it_save
     rfdiffusion is the tool here because it was one of the excluded ones, not
     because it fails to stream: its container uploads each design as its
     scores parse (``docker/rfdiffusion/run_pipeline.py:2108``, inside the
-    per-design loop, added by #33). The tuple was simply never widened past
-    bindcraft as #33-#35 added that streaming to every container, so a crash
-    mid-run delivered designs nothing charged for. That gap is what this
-    closes.
+    per-design loop). The tuple was simply never widened past bindcraft --
+    and not every container streams per design anyway: boltzgen, pxdesign and
+    rfantibody upload once after their generation loop
+    (``backend/storage/client.py::list_job_design_keys``). So a crash mid-run
+    delivered rfdiffusion designs that nothing charged for. That gap is what
+    this closes.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -980,7 +982,7 @@ async def test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows():
 
     Pinned on the connection the claim shares with those writes: it is
     available and the handler does take it, because the claim now runs inside
-    its transaction (webhooks/router.py:276-274), but nothing is executed on
+    its transaction (webhooks/router.py:276-278), but nothing is executed on
     it once the claim comes back False.
     """
     conn1 = AsyncMock()

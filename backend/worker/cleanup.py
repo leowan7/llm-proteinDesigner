@@ -262,7 +262,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # wrote gpu_seconds and no cost, which did not matter while it metered
         # nothing; now that it charges, a NULL here would mean a real charge
         # with no record on the row: the customer's run would show no cost
-        # (GET /jobs serves this column, jobs/router.py:495), the
+        # (GET /jobs serves this column, jobs/router.py:496), the
         # daily spend guard in this module would sum it as zero
         # (check_daily_gpu_spend, :419) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be

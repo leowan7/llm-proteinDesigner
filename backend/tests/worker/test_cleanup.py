@@ -312,7 +312,7 @@ async def test_cleanup_stale_jobs():
     # wrote gpu_seconds and no cost until it started metering, which was
     # harmless while it billed nothing. A real charge against a NULL cost
     # shows the customer's run as free (GET /jobs serves this column,
-    # jobs/router.py:495) and check_daily_gpu_spend in this module
+    # jobs/router.py:496) and check_daily_gpu_spend in this module
     # sums it as zero (worker/cleanup.py:419), so a burst of billed
     # timeouts could not trip the alert.
     assert "gpu_cost_usd = $3" in execute_sql
@@ -369,8 +369,10 @@ async def test_a_stale_job_that_saved_nothing_is_not_billed():
     # The customer still hears about the failure, with nothing to collect.
     mock_email.assert_called_once()
     assert mock_email.call_args[1]["saved_designs"] == 0
-    # Only the stale SELECT and the claiming UPDATE: no customer lookup for a
-    # meter event that is not happening.
+    # Three: the stale SELECT, the claiming UPDATE, and the email SELECT
+    # (worker/cleanup.py:391) that every swept job gets. The fourth the billed
+    # path opens -- the Stripe customer lookup at worker/cleanup.py:371 -- is
+    # skipped, because that block is gated on saved_designs > 0.
     assert mock_pool.acquire.call_count == 3
 
 

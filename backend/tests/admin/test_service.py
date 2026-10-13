@@ -236,7 +236,7 @@ async def test_a_redis_fault_on_the_cancels_publish_still_meters():
     """The cancel route meters even when the SSE event cannot be sent.
 
     This is test_cancel_records_billing with one thing changed: the publish at
-    jobs/service.py:172 raises. It sits between a claim that has committed and
+    jobs/service.py:175 raises. It sits between a claim that has committed and
     the meter at jobs/service.py:193, and the row is terminal afterwards, so
     nothing retries this charge.
     """

@@ -1,9 +1,9 @@
 """Tests for delivering the designs a failed run already saved.
 
-PRs #33-#35 made the containers upload their designs to Storage before the
-``rmtree`` in the ``finally`` can take them, so a run that times out, crashes
-or is killed can leave finished designs in the bucket. How much it leaves
-depends on the tool (``backend/storage/client.py::list_job_design_keys``).
+The containers upload their designs to Storage before the ``rmtree`` in the
+``finally`` can take them, so a run that times out, crashes or is killed can
+leave finished designs in the bucket. How much it leaves depends on the tool
+(``backend/storage/client.py::list_job_design_keys``).
 Nothing served them: ``get_job`` read ``job_candidates``, which is written only under the
 webhook's ``complete`` branch, and the bulk download 404'd on any status other
 than ``complete``.

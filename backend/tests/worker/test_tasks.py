@@ -352,7 +352,7 @@ async def test_publish_status_best_effort_swallows_a_redis_fault():
 
     Each of them publishes between a claim UPDATE that has already committed
     and the charge that follows it (webhooks/router.py:349,
-    worker/cleanup.py:328 and jobs/service.py:172), so an exception escaping
+    worker/cleanup.py:328 and jobs/service.py:175), so an exception escaping
     the publish would skip a charge for GPU time already burned and, on the
     two failure routes, the mail that tells the customer the run ended.
 
