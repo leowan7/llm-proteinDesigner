@@ -354,12 +354,16 @@ async def runpod_webhook(request: Request):
     # over for free. Such a run is settled on GPU time used, the same as a
     # finished run, and is not prorated. A run that saved nothing stays fully
     # unbilled. The condition is `saved_designs > 0`, the same value the mail
-    # below reports, so delivery and billing cannot drift apart per tool.
+    # below reports and the same function get_job's `partial` flag calls
+    # (storage/client.py::list_job_design_keys), so no tool is billed on a
+    # different count than the one deciding what is served. The shared
+    # function is all that holds them equal; nothing checks it. `cancelled`
+    # is billed with no design condition at all, as it was before.
     #
     # Exactly one of this route and the reaper bills any given job, because
     # exactly one of them wins the status transition. This handler reaches the
     # charge only when its own UPDATE claimed a non-terminal row
-    # (:260), and worker/cleanup.py reaches it only when its
+    # (:259), and worker/cleanup.py reaches it only when its
     # UPDATE claimed a row still 'running' (worker/cleanup.py:275)
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.

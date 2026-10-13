@@ -661,7 +661,7 @@ async def download_all_designs(
                         # The 200 and its headers went out before this
                         # generator was first pulled (Starlette sends
                         # `http.response.start`, then iterates:
-                        # starlette/responses.py:236), so a fault here cannot
+                        # starlette/responses.py:249), so a fault here cannot
                         # become a 500. The client keeps the bytes it already
                         # has and the archive ends with no central directory
                         # -- a file that will not open. Re-raised rather than
@@ -898,7 +898,7 @@ async def get_job(
             # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
             # Captured explicitly because swallowing here stops Sentry's
             # FastApiIntegration from seeing it -- the reasoning spelled out
-            # at webhooks/router.py:295.
+            # at webhooks/router.py:312-314.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []
