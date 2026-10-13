@@ -842,17 +842,23 @@ async def get_job(
         # order from list_job_design_keys -- a presentation order, not a
         # quality ranking.
         def _list_and_sign() -> list[dict]:
-            # Signed in here rather than in a comprehension on the event loop
-            # because this set is bounded only by num_designs -- 60000 for
-            # boltzgen (agent/wizard.py:139) -- where the complete branch above
-            # signs job_candidates rows, which the run's own budget caps at 500
-            # (agent/wizard.py:142-149). generate_presigned_get_url builds a
-            # fresh boto3 client per call (storage/client.py:58) and one call
-            # measured ~5 ms on this machine, so signing a large partial run
-            # inline would hold the one event loop for tens of seconds and
-            # stall every other request in the process, not only this one.
-            # Signing itself is local HMAC, so no part of this needs a second
-            # hop per key.
+            # Signed in here rather than in a comprehension on the event
+            # loop because nothing in backend/ bounds this set. The complete
+            # branch above signs job_candidates rows, which the run's own
+            # budget caps at 500 (agent/wizard.py:142-149); this one signs
+            # whatever Storage holds under the job's prefix, and every cap on
+            # that lives in a container's own filter -- five trees under
+            # docker/ that this service does not own and does not deploy with
+            # (docker/pxdesign/run_pipeline.py:1867 and
+            # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
+            # `passing` set, and boltzgen's size comes from its own budget
+            # default of 60, docker/boltzgen/run_pipeline.py:1850).
+            # generate_presigned_get_url builds a fresh boto3 client per call
+            # (storage/client.py:58) and one call measured ~5 ms on this
+            # machine, so a set that grew past a few hundred would hold the one
+            # event loop for seconds and stall every other request in the
+            # process, not only this one. Signing itself is local HMAC, so no
+            # part of this needs a second hop per key.
             keys = list_job_design_keys(str(row["user_id"]), job_id)
             return [
                 {
