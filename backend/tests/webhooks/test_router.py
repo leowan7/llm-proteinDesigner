@@ -213,9 +213,9 @@ async def test_webhook_failed_job():
     This is the zero-saved-designs side of the billing rule: a crashed run is
     billed only when Storage holds at least one of its designs, so one that
     saved none stays free. Since 2026-10-13 that applies to every tool rather
-    than the three that streamed mid-run, and the one Storage read the handler
-    makes decides both the charge and the mail -- which the assertion on the
-    patched lookup pins.
+    than the single one the deleted tuple named, and the one Storage read the
+    handler makes decides both the charge and the mail -- which the assertion
+    on the patched lookup pins.
 
     Verifies:
     - Returns 200 with {"received": True}
@@ -449,18 +449,22 @@ async def test_webhook_failed_job_of_a_non_streaming_tool_is_billed_when_it_save
 
     This test asserted the opposite until this commit. It pinned
     ``_STREAMS_DESIGNS_MID_RUN``, a tuple in webhooks/router.py -- deleted by
-    this commit, so there is no line left to cite -- that billed a failed run
-    only if its tool was one of the three whose container streamed designs
-    mid-run, and it checked that an rfdiffusion run whose designs
-    Storage held was handed them for free. Leo's call on 2026-10-13 is that
-    delivery and billing are one predicate for every tool, so that tuple and
-    the test that pinned it are both gone. The gate is now "the run failed and
-    Storage holds at least one design", which this rfdiffusion run meets.
+    this commit, so there is no line left to cite -- which held exactly one
+    tool at this branch's base, ``("bindcraft",)``
+    (``git show a479ac38:backend/webhooks/router.py``, line 56). A failed run
+    of every other tool was handed its saved designs for free, and this test
+    checked that for rfdiffusion. Leo's call on 2026-10-13 is that delivery
+    and billing are one predicate for every tool, so that tuple and the test
+    that pinned it are both gone. The gate is now "the run failed and Storage
+    holds at least one design", which this rfdiffusion run meets.
 
-    rfdiffusion is the tool here precisely because it was the excluded case:
-    its container uploads after the GPU subprocess finishes rather than as
-    each design lands, so before this change a crash after its upload loop
-    delivered designs that were never charged for.
+    rfdiffusion is the tool here because it was one of the excluded ones, not
+    because it fails to stream: its container uploads each design as its
+    scores parse (``docker/rfdiffusion/run_pipeline.py:2108``, inside the
+    per-design loop, added by #33). The tuple was simply never widened past
+    bindcraft as #33-#35 added that streaming to every container, so a crash
+    mid-run delivered designs nothing charged for. That gap is what this
+    closes.
     """
     conn1 = AsyncMock()
     conn1.fetchrow = AsyncMock(return_value={
@@ -858,3 +862,79 @@ async def test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again
     mock_fail_email.assert_not_called()
     # Not even read: the guard returns above the count.
     mock_list.assert_not_called()
+
+
+async def test_a_webhook_that_loses_the_status_claim_is_not_billed_or_mailed():
+    """The reaper taking the row mid-handler stops the charge and the mail.
+
+    The other order -- reaper first, webhook after -- is
+    ``test_a_webhook_for_a_job_the_reaper_already_failed_is_not_billed_again``,
+    which returns at the pre-read guard (webhooks/router.py:207).
+    This is the window that guard cannot cover: the row still reads 'running'
+    when the handler looks, and the sweep claims it before the handler's own
+    UPDATE lands. The claim comes back False and everything that must happen
+    once per job -- the cost write, the SSE event, the Storage read, the
+    charge, the failure mail -- belongs to the route that won it.
+
+    Pinned by the pool itself: only the two connections the handler needs
+    before the claim are available, so a third acquire raises rather than
+    passing quietly.
+    """
+    conn1 = AsyncMock()
+    conn1.fetchrow = AsyncMock(return_value={
+        "id": JOB_ID,
+        "user_id": "user-uuid",
+        "started_at": STARTED_AT,
+        "runpod_job_id": POD_ID,
+        "tool": "bindcraft",
+    })
+
+    # The pre-read still sees a running job -- this is the race, not a late
+    # duplicate webhook.
+    conn2 = AsyncMock()
+    conn2.fetchrow = AsyncMock(return_value={"status": "running"})
+
+    mock_pool = _make_pool(conn1, conn2)
+
+    mock_provider = AsyncMock()
+    mock_provider.terminate_pod = AsyncMock()
+
+    with (
+        patch("webhooks.router.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch(
+            "webhooks.router.update_job_status",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as mock_update,
+        patch("webhooks.router.publish_status", new_callable=AsyncMock) as mock_publish,
+        patch("webhooks.router.get_provider", return_value=mock_provider),
+        patch("webhooks.router.record_gpu_usage") as mock_billing,
+        patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
+        # Storage holds a design, so the charge would fire if the handler got
+        # that far: what stops it is losing the claim, not an empty bucket.
+        patch(
+            "webhooks.router.list_job_design_keys",
+            return_value=["users/user-uuid/jobs/" + JOB_ID + "/outputs/design_1.pdb"],
+        ) as mock_list,
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/webhooks/runpod",
+                content=_failed_payload(),
+                headers={"Content-Type": "application/json"},
+            )
+
+    assert response.status_code == 200
+    assert response.json() == {"received": True}
+
+    # The claim was attempted, and attempted as a claim.
+    mock_update.assert_called_once()
+    assert mock_update.call_args[1]["require_non_terminal"] is True
+
+    # Nothing after it ran.
+    mock_billing.assert_not_called()
+    mock_fail_email.assert_not_called()
+    mock_publish.assert_not_called()
+    mock_list.assert_not_called()
+    assert mock_pool.acquire.call_count == 2

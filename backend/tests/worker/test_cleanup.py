@@ -98,6 +98,8 @@ async def test_cleanup_orphan_pods_terminates():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await cleanup_orphan_pods()
 
     assert count == 1
@@ -135,6 +137,8 @@ async def test_cleanup_orphan_pods_no_orphans():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await cleanup_orphan_pods()
 
     assert count == 0
@@ -183,6 +187,8 @@ async def test_cleanup_orphan_pods_non_kendrew_pods_skipped():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await cleanup_orphan_pods()
 
     assert count == 0
@@ -263,6 +269,8 @@ async def test_cleanup_stale_jobs():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await detect_stale_jobs()
 
     assert count == 1
@@ -297,6 +305,17 @@ async def test_cleanup_stale_jobs():
     # The capped figure, not wall time to now: this job never sent a
     # heartbeat, so it is billed from started_at to started_at + threshold.
     assert billed_seconds == STALE_HEARTBEAT_SECONDS
+
+    # ...and the charge is on the job row, not only in Stripe. This sweep
+    # wrote gpu_seconds and no cost until it started metering, which was
+    # harmless while it billed nothing. A real charge against a NULL cost
+    # shows the customer's run as free (GET /jobs serves this column,
+    # jobs/router.py:495) and check_daily_gpu_spend in this module
+    # sums it as zero (worker/cleanup.py:412), so a burst of billed
+    # timeouts could not trip the alert.
+    assert "gpu_cost_usd = $3" in execute_sql
+    # 1800 billable seconds at the rates this test sets: 0.0000917/s + 400%.
+    assert conn2.fetchval.call_args[0][3] == 0.8253
 
 
 async def test_a_stale_job_that_saved_nothing_is_not_billed():
@@ -339,6 +358,8 @@ async def test_a_stale_job_that_saved_nothing_is_not_billed():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await detect_stale_jobs()
 
     assert count == 1
@@ -391,6 +412,8 @@ async def test_a_stale_job_another_route_already_finished_is_not_billed_or_maile
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await detect_stale_jobs()
 
     # No second charge, no second mail, no second SSE event, and not counted
@@ -444,6 +467,8 @@ async def test_a_storage_fault_leaves_a_stale_job_unbilled():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await detect_stale_jobs()
 
     assert count == 1
@@ -466,6 +491,8 @@ async def test_cleanup_stale_jobs_none_stale():
         patch("worker.cleanup.settings") as mock_settings,
     ):
         mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
         count = await detect_stale_jobs()
 
     assert count == 0

@@ -517,3 +517,86 @@ async def test_the_sink_hands_over_each_entry_once():
     sink.write(mutable)
     mutable[0:1] = b"X"
     assert sink.drain() == b"cd"
+
+
+async def test_a_fault_part_way_through_the_archive_is_captured_not_silent():
+    """A broken object mid-archive leaves a short zip under a 200.
+
+    ``http.response.start`` goes out before the generator is first pulled, so
+    once bytes are flowing there is no route back to a 500: the client keeps
+    what it received and the archive ends with no central directory, which is
+    a file that will not open. Nothing retries and the status line says
+    success, so the explicit capture is the only server-side signal that a
+    download of a partial set was itself partial -- which is what this pins,
+    together with the 200 that cannot be taken back and the bytes that do not
+    open.
+    """
+    keys = [PREFIX + f"design_{i}.pdb" for i in range(1, 6)]
+    s3 = _s3_mock(*keys, body=random.Random(2).randbytes(70_000))
+    serve_object = s3.get_object.side_effect
+    broken = keys[2]
+
+    def _break_on_the_third(Bucket, Key):
+        if Key == broken:
+            raise OSError("connection reset mid-archive")
+        return serve_object(Bucket=Bucket, Key=Key)
+
+    s3.get_object.side_effect = _break_on_the_third
+
+    delivered = []
+
+    async def receive():
+        if delivered:
+            await anyio.sleep_forever()
+        delivered.append(True)
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    served = bytearray()
+    start = {}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            start.update(message)
+        elif message["type"] == "http.response.body" and message.get("body"):
+            served.extend(message["body"])
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.1"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": f"/jobs/{JOB_ID}/download",
+        "raw_path": f"/jobs/{JOB_ID}/download".encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"test")],
+        "client": ("test-client", 1234),
+        "server": ("test", 80),
+    }
+
+    app.dependency_overrides[get_current_user] = _override_user()
+    app.dependency_overrides[get_active_org] = _override_active_org()
+    try:
+        with (
+            patch("jobs.router.get_db_pool", return_value=_make_pool(_job_row("failed"))),
+            patch("jobs.router.get_s3_client", return_value=s3),
+            patch("jobs.router.sentry_sdk.capture_exception") as mock_capture,
+        ):
+            with pytest.raises(Exception):
+                await app(scope, receive, send)
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_active_org, None)
+
+    # The customer was already told this was a 200.
+    assert start["status"] == 200
+
+    # The fault reached Sentry, carrying the exception the fetch raised.
+    mock_capture.assert_called_once()
+    assert isinstance(mock_capture.call_args[0][0], OSError)
+
+    # ...and what the client holds is not an archive.
+    assert served, "no bytes were sent before the fault"
+    with pytest.raises(zipfile.BadZipFile):
+        zipfile.ZipFile(io.BytesIO(bytes(served))).namelist()

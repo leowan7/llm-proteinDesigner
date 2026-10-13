@@ -651,11 +651,32 @@ async def download_all_designs(
         with zipfile.ZipFile(sink, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for obj in contents:
                 with zf.open(obj["Key"].split("/")[-1], "w") as entry:
-                    shutil.copyfileobj(
-                        s3.get_object(Bucket=settings.s3_bucket_name, Key=obj["Key"])["Body"],
-                        entry,
-                        65536,
-                    )
+                    try:
+                        shutil.copyfileobj(
+                            s3.get_object(Bucket=settings.s3_bucket_name, Key=obj["Key"])["Body"],
+                            entry,
+                            65536,
+                        )
+                    except Exception as exc:
+                        # The 200 and its headers went out before this
+                        # generator was first pulled (Starlette sends
+                        # `http.response.start`, then iterates:
+                        # starlette/responses.py:236), so a fault here cannot
+                        # become a 500. The client keeps the bytes it already
+                        # has and the archive ends with no central directory
+                        # -- a file that will not open. Re-raised rather than
+                        # swallowed, because a short archive must not look
+                        # finished; captured first so the event names the job
+                        # and the key, which a generic handler further up the
+                        # stack would not.
+                        logger.exception(
+                            "Archive stream for job %s failed on key %s; the "
+                            "client keeps a truncated zip",
+                            job_id,
+                            obj["Key"],
+                        )
+                        sentry_sdk.capture_exception(exc)
+                        raise
                 if chunk := sink.drain():
                     yield chunk
         if chunk := sink.drain():  # the central directory zipfile writes on close
@@ -847,18 +868,16 @@ async def get_job(
             # branch above signs job_candidates rows, which the run's own
             # budget caps at 500 (agent/wizard.py:142-149); this one signs
             # whatever Storage holds under the job's prefix, and every cap on
-            # that lives in a container's own filter -- five trees under
-            # docker/ that this service does not own and does not deploy with
-            # (docker/pxdesign/run_pipeline.py:1867 and
-            # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
+            # that lives in a container's own filter, under docker/, which no
+            # module in backend/ imports (docker/pxdesign/run_pipeline.py:1867
+            # and docker/boltzgen/run_pipeline.py:2021 each upload a filtered
             # `passing` set, and boltzgen's size comes from its own budget
             # default of 60, docker/boltzgen/run_pipeline.py:1850).
             # generate_presigned_get_url builds a fresh boto3 client per call
-            # (storage/client.py:58) and one call measured ~5 ms on this
-            # machine, so a set that grew past a few hundred would hold the one
-            # event loop for seconds and stall every other request in the
-            # process, not only this one. Signing itself is local HMAC, so no
-            # part of this needs a second hop per key.
+            # (storage/client.py:58), so a large set would hold the one event
+            # loop long enough to stall every other request in the process,
+            # not only this one. Signing itself is local HMAC, so no part of
+            # this needs a second hop per key.
             keys = list_job_design_keys(str(row["user_id"]), job_id)
             return [
                 {
@@ -876,11 +895,10 @@ async def get_job(
             # A Storage fault, listing or signing, degrades to the old empty
             # list rather than failing the whole job read, which also serves
             # the status and the error category the caller came for
-            # (tests/jobs/test_partial_delivery.py
-            # ::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
-            # Captured explicitly because
-            # swallowing here stops Sentry's FastApiIntegration from seeing it
-            # -- the reasoning spelled out at webhooks/router.py:295.
+            # (tests/jobs/test_partial_delivery.py::test_a_signing_failure_degrades_the_same_way_as_an_unreadable_bucket).
+            # Captured explicitly because swallowing here stops Sentry's
+            # FastApiIntegration from seeing it -- the reasoning spelled out
+            # at webhooks/router.py:295.
             logger.exception("Could not list saved designs for job %s", job_id)
             sentry_sdk.capture_exception(exc)
             candidates = []

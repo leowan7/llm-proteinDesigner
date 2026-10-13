@@ -1,5 +1,5 @@
-"""Tests for ``storage/client.py::list_job_design_keys``, the one reader of a
-job's ``outputs/`` prefix.
+"""Tests for ``storage/client.py::list_job_design_keys``, the function that
+counts and names a job's saved designs.
 
 It decides delivery: for a run whose terminal state is ``failed`` or
 ``cancelled`` it is the only record of the designs save-as-you-go banked,
@@ -10,8 +10,13 @@ URLs a customer downloads.
 Since 2026-10-13 it also decides money on both failure routes: a failed run
 is billed exactly when this returns at least one key
 (``webhooks/router.py``, ``worker/cleanup.py::detect_stale_jobs``). That is
-one predicate for both, which is the point -- there is no second reader that
-could disagree with it about which objects under the prefix are designs.
+one predicate for both, which is the point.
+
+The bulk download reads the same prefix with its own paginator
+(``jobs/router.py:610``) because it archives every object it
+finds, not only the designs. It reuses this module's ``DESIGN_SUFFIXES`` for
+its own "is there anything to serve" check (``jobs/router.py:629``),
+so the two cannot disagree about which objects are structures.
 
 So the prefix it reads and the suffixes it accepts are pinned here. The
 webhook, reaper and jobs tests patch it out and assert the call, so this file

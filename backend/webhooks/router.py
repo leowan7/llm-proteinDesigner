@@ -251,14 +251,32 @@ async def runpod_webhook(request: Request):
         error_info = payload.get("error", {})
         error_category = error_info.get("category", "Pipeline error")
 
-    # Update DB status.
-    await update_job_status(
+    # Update DB status. This write is also the claim on the job. The guard at
+    # :207 is only a pre-read, and the reaper can take the row in the window
+    # between that read and this write (worker/cleanup.py:275 claims it the
+    # same way, from the other side), so everything below here that must
+    # happen once per job is gated on having won the transition.
+    claimed = await update_job_status(
         job_id,
         internal_status,
         stage=internal_status.capitalize(),
         gpu_seconds=gpu_seconds,
         error_category=error_category,
+        require_non_terminal=True,
     )
+    if not claimed:
+        # Another route made the row terminal first. Returning here leaves the
+        # pod-termination block below unrun, which is what the pre-read guard
+        # at :207 has always done for a row that was already terminal: the
+        # route that won the transition terminates the pod, and the reaper
+        # cancels every stale pod it sweeps whether or not it claimed the row
+        # (worker/cleanup.py:308).
+        logger.info(
+            "Webhook skipped: job %s went terminal between this handler's "
+            "guard and its status update",
+            job_id,
+        )
+        return {"received": True}
 
     # Persist cost and results.
     if results_json:
@@ -300,11 +318,12 @@ async def runpod_webhook(request: Request):
     # How many designs this run banked before it died. Counted once, here,
     # because two separate things turn on it: the failure mail points the
     # customer at them, and a failed run is billed exactly when there is at
-    # least one. Both are the same predicate by construction: this count, the
-    # `partial` flag get_job serves (jobs/router.py:887) and the reaper's own
-    # count (worker/cleanup.py:320) all come from one function,
-    # storage/client.py::list_job_design_keys, which is the only reader of that
-    # prefix left in backend/.
+    # least one. The same count feeds the `partial` flag get_job serves
+    # (jobs/router.py:905) and the reaper's own gate (worker/cleanup.py:337);
+    # all three call one function, storage/client.py::list_job_design_keys.
+    # The bulk download reads the same prefix with its own paginator
+    # (jobs/router.py:610) because it archives every object it finds, CSVs
+    # included, but it counts nothing and decides no money.
     saved_designs = 0
     if internal_status == "failed":
         try:
@@ -331,20 +350,23 @@ async def runpod_webhook(request: Request):
     #
     # Finished and cancelled runs qualify. So does a failed run that banked at
     # least one design, for every tool -- Leo's call 2026-10-13: this PR makes
-    # those designs reachable (jobs/router.py:828), and they are not handed
+    # those designs reachable (jobs/router.py:849), and they are not handed
     # over for free. Such a run is settled on GPU time used, the same as a
     # finished run, and is not prorated. A run that saved nothing stays fully
     # unbilled. The condition is `saved_designs > 0`, the same value the mail
     # below reports, so delivery and billing cannot drift apart per tool.
     #
-    # Exactly one of this route and the reaper bills any given job. Whichever
-    # makes the row terminal first excludes the other: a late webhook for a
-    # job the reaper already failed returns at the double-processing guard
-    # above, and worker/cleanup.py only claims rows still 'running'
-    # (worker/cleanup.py::detect_stale_jobs, whose UPDATE is guarded on that
-    # status and bills only when it claimed the row). record_gpu_usage keys
-    # its meter event on the job id as a second line of defence
-    # (billing/stripe_client.py:219).
+    # Exactly one of this route and the reaper bills any given job, because
+    # exactly one of them wins the status transition. This handler reaches the
+    # charge only when its own UPDATE claimed a non-terminal row
+    # (:260), and worker/cleanup.py reaches it only when its
+    # UPDATE claimed a row still 'running' (worker/cleanup.py:275)
+    # -- two guards that cannot both succeed, since whichever writes first
+    # makes the row terminal. The loser takes the early return above.
+    # record_gpu_usage keys its meter event on the job id as a second line of
+    # defence (billing/stripe_client.py:219), but it is a backstop: Stripe
+    # deduplicates that key for 24 hours per its own docstring there, so the
+    # guarantee is the transition, not the key.
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and

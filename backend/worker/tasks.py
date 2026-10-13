@@ -51,7 +51,8 @@ async def update_job_status(
     stage: str | None = None,
     gpu_seconds: int | None = None,
     error_category: str | None = None,
-) -> None:
+    require_non_terminal: bool = False,
+) -> bool:
     """Update the job record in the DB with new status and optional fields.
 
     Handles started_at and completed_at timestamps automatically based on status
@@ -63,6 +64,19 @@ async def update_job_status(
         stage: Optional human-readable stage label to update.
         gpu_seconds: Optional GPU time consumed so far.
         error_category: Optional error category string for failed jobs.
+        require_non_terminal: When set, the UPDATE writes only a row that is
+            not already complete/failed/cancelled, and the return value says
+            whether it did. A caller that must act exactly once per job --
+            billing, the failure mail -- uses this to claim the row, because
+            reading the status first and acting on what it read leaves a
+            window in which another route can take the job
+            (webhooks/router.py:259 is that caller;
+            worker/cleanup.py:275 claims the same rows from the
+            other side with its own `status = 'running'` guard).
+
+    Returns:
+        True when a row was written. Always True unless ``require_non_terminal``
+        is set and the row was already terminal.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
@@ -95,10 +109,16 @@ async def update_job_status(
         if status == "running":
             sets.append("started_at = COALESCE(started_at, NOW())")
 
-        await conn.execute(
-            f"UPDATE public.jobs SET {', '.join(sets)} WHERE id = $2",
+        sql = f"UPDATE public.jobs SET {', '.join(sets)} WHERE id = $2"
+        if not require_non_terminal:
+            await conn.execute(sql, *params)
+            return True
+        claimed = await conn.fetchval(
+            sql + " AND status NOT IN ('complete', 'failed', 'cancelled')"
+            " RETURNING id",
             *params,
         )
+        return claimed is not None
 
 
 async def run_job(ctx: dict, job_id: str) -> None:

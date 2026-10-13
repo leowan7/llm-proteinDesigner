@@ -18,7 +18,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Import the functions under test AFTER setting TESTING env
-from worker.tasks import publish_status
+from worker.tasks import publish_status, update_job_status
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -213,3 +213,80 @@ async def test_publish_status():
 
     # Redis connection was closed after publishing
     mock_redis.aclose.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: update_job_status as a claim
+# ---------------------------------------------------------------------------
+
+async def test_update_job_status_claims_a_row_that_is_not_terminal():
+    """``require_non_terminal`` makes the UPDATE an atomic claim.
+
+    The webhook route charges a customer on the strength of winning this one
+    write (webhooks/router.py:259), so the guard and the
+    RETURNING have to reach the DB in the statement itself. A pre-read cannot
+    stand in for them: the row can change between the read and the write,
+    which is the window worker/cleanup.py's sweep opens
+    (worker/cleanup.py:275 claims the same rows from the other
+    side).
+    """
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value="job-uuid")
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
+
+    with patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool):
+        claimed = await update_job_status(
+            "job-uuid", "failed", require_non_terminal=True
+        )
+
+    assert claimed is True
+    sql = conn.fetchval.call_args[0][0]
+    assert "AND status NOT IN ('complete', 'failed', 'cancelled')" in sql
+    assert "RETURNING id" in sql
+    # The guarded path must not also fire the blind write.
+    conn.execute.assert_not_called()
+
+
+async def test_update_job_status_reports_a_row_another_route_already_took():
+    """A claim that writes nothing comes back False.
+
+    This is the value the webhook route tests for before it bills or mails
+    (webhooks/router.py:267). asyncpg's ``fetchval``
+    returns None when the UPDATE matched no row, which is what a terminal
+    status does to the guard above.
+    """
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(return_value=None)
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
+
+    with patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool):
+        claimed = await update_job_status(
+            "job-uuid", "failed", require_non_terminal=True
+        )
+
+    assert claimed is False
+
+
+async def test_update_job_status_is_an_unconditional_write_by_default():
+    """Every other caller keeps the blind write it had.
+
+    run_job drives a job through 'running' twice (worker/tasks.py:176,
+    :291) and the cancel path writes 'cancelled'
+    (jobs/service.py:103); none of them is claiming anything, so the
+    default must stay the statement it was before the claim was added -- no
+    status guard, no RETURNING, and the same ``execute`` call.
+    """
+    conn = AsyncMock()
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(return_value=_make_ctx(conn))
+
+    with patch("worker.tasks.get_db_pool", new_callable=AsyncMock, return_value=mock_pool):
+        claimed = await update_job_status("job-uuid", "running")
+
+    assert claimed is True
+    sql = conn.execute.call_args[0][0]
+    assert "NOT IN" not in sql
+    assert "RETURNING" not in sql
+    conn.fetchval.assert_not_called()
