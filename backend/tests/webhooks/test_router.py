@@ -28,6 +28,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import stripe
 from httpx import ASGITransport, AsyncClient
 from main import app
 
@@ -389,7 +390,11 @@ async def test_webhook_failed_job_with_saved_designs_is_billed():
     mock_ok_email.assert_not_called()
 
 
-async def test_a_metering_failure_still_emails_the_customer():
+@pytest.mark.parametrize("meter_error, cleared", [
+    (stripe.InvalidRequestError("No such customer", None), True),
+    (stripe.APIConnectionError("read timed out"), False),
+])
+async def test_a_metering_failure_still_emails_the_customer(meter_error, cleared):
     """A Stripe error must not swallow the failure notice.
 
     Before this rule a failed run could not reach record_gpu_usage at all, so
@@ -432,7 +437,7 @@ async def test_a_metering_failure_still_emails_the_customer():
         patch("webhooks.router.get_provider", return_value=mock_provider),
         patch(
             "webhooks.router.record_gpu_usage",
-            side_effect=RuntimeError("stripe is down"),
+            side_effect=meter_error,
         ) as mock_billing,
         patch("webhooks.router.send_completion_email", new_callable=AsyncMock),
         patch("webhooks.router.send_failure_email", new_callable=AsyncMock) as mock_fail_email,
@@ -451,6 +456,12 @@ async def test_a_metering_failure_still_emails_the_customer():
 
     # The metering was attempted, and raised
     mock_billing.assert_called_once()
+
+    # A refusal clears the flag mark_metered set. A timeout may follow an
+    # event Stripe recorded, so the flag stays.
+    assert conn4.execute.called is cleared
+    if cleared:
+        assert "SET metered = FALSE" in conn4.execute.call_args.args[0]
 
     # The customer still got told, on a 200 the provider will not retry
     assert response.status_code == 200

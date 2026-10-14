@@ -193,6 +193,55 @@ def check_payment_method(stripe_customer_id: str) -> bool:
     return bool(customer.invoice_settings.default_payment_method)
 
 
+async def mark_metered(conn: asyncpg.Connection, job_id: str) -> str | None:
+    """Set jobs.metered on a job and return the Stripe customer to meter it to.
+
+    Returns None, and leaves the row unchanged, when the job's org resolves to
+    no Stripe customer. The spend and revenue reads count a failed or
+    cancelled job only when the flag is set.
+    """
+    return await conn.fetchval(
+        """UPDATE public.jobs j
+              SET metered = TRUE
+            WHERE j.id = $1
+              AND public.org_stripe_customer(j.organization_id) IS NOT NULL
+        RETURNING public.org_stripe_customer(j.organization_id)""",
+        job_id,
+    )
+
+
+# The SDK raises these for a 400/404 reply other than an idempotency_error,
+# for a 401, 403 or 429 reply, or (AuthenticationError) when no API key is
+# set, before any request is sent (stripe/_api_requestor.py:403-441 and :590,
+# stripe==14.4.1).
+_METER_REFUSED = (
+    stripe.InvalidRequestError,
+    stripe.AuthenticationError,
+    stripe.PermissionError,
+    stripe.RateLimitError,
+)
+
+
+async def unmark_metered(
+    conn: asyncpg.Connection, job_id: str, exc: Exception,
+) -> None:
+    """Clear jobs.metered when exc is one of _METER_REFUSED.
+
+    Any other error, such as a connection failure or a 5xx, can follow a meter
+    event Stripe recorded, so the flag stays set and the run keeps reading as
+    charged. A database error here is logged and swallowed, so the caller goes
+    on to handle the meter error it already holds.
+    """
+    if not isinstance(exc, _METER_REFUSED):
+        return
+    try:
+        await conn.execute(
+            "UPDATE public.jobs SET metered = FALSE WHERE id = $1", job_id,
+        )
+    except Exception:
+        logger.exception("Could not clear jobs.metered on job %s", job_id)
+
+
 def record_gpu_usage(stripe_customer_id: str, job_id: str, gpu_seconds: int) -> None:
     """Record GPU usage as a Stripe Billing Meter event.
 

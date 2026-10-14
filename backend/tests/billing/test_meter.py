@@ -7,9 +7,11 @@ Covers:
 Implementation target: Plan 03-02.
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from billing.stripe_client import record_gpu_usage
+import pytest
+import stripe
+from billing.stripe_client import record_gpu_usage, unmark_metered
 
 
 class TestGPUUsageMeter:
@@ -41,3 +43,18 @@ class TestGPUUsageMeter:
             assert isinstance(call_payload["value"], str), (
                 f"Payload 'value' must be str, got {type(call_payload['value'])}"
             )
+
+
+@pytest.mark.parametrize("exc, cleared", [
+    (stripe.InvalidRequestError("No such customer", None), True),
+    (stripe.AuthenticationError("bad key"), True),
+    (stripe.PermissionError("restricted key"), True),
+    (stripe.RateLimitError("too many requests"), True),
+    (stripe.APIConnectionError("read timed out"), False),
+    (stripe.APIError("internal error"), False),
+    (RuntimeError("anything else"), False),
+])
+async def test_unmark_metered_clears_only_on_a_stripe_refusal(exc, cleared):
+    conn = AsyncMock()
+    await unmark_metered(conn, "job-abc", exc)
+    assert conn.execute.called is cleared

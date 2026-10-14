@@ -14,7 +14,7 @@ import json
 import logging
 
 import asyncpg
-from billing.stripe_client import record_gpu_usage
+from billing.stripe_client import mark_metered, record_gpu_usage, unmark_metered
 from config import settings
 from fastapi import HTTPException
 from gpu import endpoint_for_tool, get_provider
@@ -102,7 +102,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     from worker.tasks import publish_status_best_effort, update_job_status
 
     # Update DB status, and claim the job in the same write. The reaper now
-    # meters a run it sweeps (worker/cleanup.py:380), so this route can no
+    # meters a run it sweeps (worker/cleanup.py:375), so this route can no
     # longer settle a job another route has already settled: the flag makes
     # the status write conditional on the row being non-terminal and reports
     # whether it won, the protocol the webhook takes (webhooks/router.py:278)
@@ -127,7 +127,7 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
         # route that took it owns both the cost column and the meter. Report
         # that row rather than the cancellation this call did not perform:
         # jobs/router.py:738 returns these three fields to the caller and
-        # admin/router.py:389 writes two of them into the audit log, so a
+        # admin/router.py:401 writes two of them into the audit log, so a
         # computed cost returned from here is a charge the audit records and
         # nobody made
         # (tests/admin/test_service.py::test_a_cancel_that_loses_the_claim_reports_the_row_that_won).
@@ -183,14 +183,13 @@ async def cancel_job_by_id(job_id: str, pool: asyncpg.Pool) -> dict:
     # organization_id through public.org_stripe_customer.
     if claimed and gpu_seconds > 0:
         async with pool.acquire() as conn:
-            stripe_customer_id = await conn.fetchval(
-                """SELECT public.org_stripe_customer(j.organization_id)
-                   FROM public.jobs j
-                   WHERE j.id = $1""",
-                job_id,
-            )
-        if stripe_customer_id:
-            record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+            stripe_customer_id = await mark_metered(conn, job_id)
+            if stripe_customer_id:
+                try:
+                    record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+                except Exception as exc:
+                    await unmark_metered(conn, job_id, exc)
+                    raise
 
     return {
         "status": settled_status,

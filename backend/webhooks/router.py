@@ -27,7 +27,7 @@ import json
 import logging
 
 import sentry_sdk
-from billing.stripe_client import record_gpu_usage
+from billing.stripe_client import mark_metered, record_gpu_usage, unmark_metered
 from config import settings
 from db.connection import get_db_pool
 from fastapi import APIRouter, HTTPException, Request
@@ -404,7 +404,7 @@ async def runpod_webhook(request: Request):
     # -- two guards that cannot both succeed, since whichever writes first
     # makes the row terminal. The loser takes the early return above.
     # record_gpu_usage keys its meter event on the job id as a second line of
-    # defence (billing/stripe_client.py:219), but it is a backstop: Stripe
+    # defence (billing/stripe_client.py:268), but it is a backstop: Stripe
     # deduplicates that key for 24 hours per its own docstring there, so the
     # guarantee is the transition, not the key.
     #
@@ -423,25 +423,21 @@ async def runpod_webhook(request: Request):
 
     if should_bill and gpu_seconds > 0:
         async with pool.acquire() as conn:
-            stripe_customer_id = await conn.fetchval(
-                """SELECT public.org_stripe_customer(j.organization_id)
-                   FROM public.jobs j
-                   WHERE j.id = $1""",
-                job_id,
-            )
-        if stripe_customer_id:
-            try:
-                record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
-            except Exception as exc:
-                # Metering must not cost the customer their failure email: the
-                # row is already terminal, so a retry returns at the
-                # double-processing guard above and the mail would never go
-                # out. Pinned by
-                # test_a_metering_failure_still_emails_the_customer.
-                logger.exception(
-                    "Could not meter job %s; it stays unbilled", job_id
-                )
-                sentry_sdk.capture_exception(exc)
+            stripe_customer_id = await mark_metered(conn, job_id)
+            if stripe_customer_id:
+                try:
+                    record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+                except Exception as exc:
+                    # Metering must not cost the customer their failure email:
+                    # the row is already terminal, so a retry returns at the
+                    # double-processing guard above and the mail would never go
+                    # out. Pinned by
+                    # test_a_metering_failure_still_emails_the_customer.
+                    logger.exception(
+                        "Could not meter job %s; it stays unbilled", job_id
+                    )
+                    sentry_sdk.capture_exception(exc)
+                    await unmark_metered(conn, job_id, exc)
 
     # Send email notification.
     async with pool.acquire() as conn:
