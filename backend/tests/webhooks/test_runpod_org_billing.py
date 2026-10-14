@@ -143,6 +143,8 @@ async def test_webhook_completion_resolves_customer_via_org_resolver():
         f"Expected public.org_stripe_customer query; got: {captured['queries']}"
     )
     assert "j.organization_id" in resolver_queries[0]
+    # ...through mark_metered, so the spend reads count a failed run it bills.
+    assert "SET metered = TRUE" in resolver_queries[0]
 
     # record_gpu_usage called with the org-resolved customer
     assert mock_meter.called

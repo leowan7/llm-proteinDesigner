@@ -21,6 +21,7 @@ os.environ.setdefault("TESTING", "true")
 import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import stripe
 from worker.cleanup import (
     MAX_POD_LIFETIME_SECONDS,
     STALE_HEARTBEAT_SECONDS,
@@ -298,6 +299,9 @@ async def test_cleanup_stale_jobs():
     assert mock_email.call_args[1]["saved_designs"] == 2
     assert mock_list.call_args[0] == ("user-stale", "job-stale-uuid")
 
+    # The customer comes from mark_metered, so the spend reads count the run.
+    assert "SET metered = TRUE" in conn3.fetchval.call_args.args[0]
+
     # ...and the run is billed, because it banked designs this route now
     # hands over. Before 2026-10-13 this module metered nothing at all.
     mock_billing.assert_called_once()
@@ -313,11 +317,60 @@ async def test_cleanup_stale_jobs():
     # harmless while it billed nothing. A real charge against a NULL cost
     # shows the customer's run as free (GET /jobs serves this column,
     # jobs/router.py:496) and check_daily_gpu_spend in this module
-    # sums it as zero (worker/cleanup.py:419), so a burst of billed
+    # sums it as zero (worker/cleanup.py:415), so a burst of billed
     # timeouts could not trip the alert.
     assert "gpu_cost_usd = $3" in execute_sql
     # 1800 billable seconds at the rates this test sets: 0.0000917/s + 400%.
     assert conn2.fetchval.call_args[0][3] == 0.8253
+
+
+async def test_a_stale_job_whose_meter_call_raises_is_left_unmetered():
+    """A Stripe refusal clears jobs.metered, and the customer is still mailed."""
+    stale_job_row = {
+        "id": "job-stale-uuid",
+        "user_id": "user-stale",
+        "started_at": STALE_STARTED_AT,
+        "last_heartbeat_at": None,
+        "runpod_job_id": "pod-stale-xyz",
+    }
+    conn1 = AsyncMock()
+    conn1.fetch = AsyncMock(return_value=[stale_job_row])
+    conn2 = AsyncMock()
+    conn2.fetchval = AsyncMock(return_value="job-stale-uuid")
+    conn3 = AsyncMock()
+    conn3.fetchval = AsyncMock(return_value="cus_stale")
+    conn4 = AsyncMock()
+    conn4.fetchrow = AsyncMock(return_value={"email": "stale@example.com"})
+
+    mock_pool = AsyncMock()
+    mock_pool.acquire = MagicMock(side_effect=[
+        _make_ctx(conn1), _make_ctx(conn2), _make_ctx(conn3), _make_ctx(conn4),
+    ])
+
+    with (
+        patch("worker.cleanup.get_db_pool", new_callable=AsyncMock, return_value=mock_pool),
+        patch("worker.cleanup.get_provider", return_value=AsyncMock()),
+        patch("worker.cleanup.publish_status_best_effort", new_callable=AsyncMock),
+        patch("worker.cleanup.send_failure_email", new_callable=AsyncMock) as mock_email,
+        patch(
+            "worker.cleanup.record_gpu_usage",
+            side_effect=stripe.InvalidRequestError("No such customer", None),
+        ) as mock_billing,
+        patch(
+            "worker.cleanup.list_job_design_keys",
+            return_value=["users/user-stale/jobs/job-stale-uuid/outputs/design_1.pdb"],
+        ),
+        patch("worker.cleanup.settings") as mock_settings,
+    ):
+        mock_settings.runpod_api_key = "test-api-key"
+        mock_settings.gpu_price_per_second = 0.0000917
+        mock_settings.gpu_markup_percent = 400.0
+        count = await detect_stale_jobs()
+
+    assert count == 1
+    mock_billing.assert_called_once()
+    assert "SET metered = FALSE" in conn3.execute.call_args.args[0]
+    mock_email.assert_called_once()
 
 
 async def test_a_stale_job_that_saved_nothing_is_not_billed():
@@ -370,7 +423,7 @@ async def test_a_stale_job_that_saved_nothing_is_not_billed():
     mock_email.assert_called_once()
     assert mock_email.call_args[1]["saved_designs"] == 0
     # Three: the stale SELECT, the claiming UPDATE, and the email SELECT
-    # (worker/cleanup.py:391) that every swept job gets. The fourth the billed
+    # (worker/cleanup.py:387) that every swept job gets. The fourth the billed
     # path opens -- the Stripe customer lookup at worker/cleanup.py:371-372 -- is
     # skipped, because that block is gated on saved_designs > 0.
     assert mock_pool.acquire.call_count == 3

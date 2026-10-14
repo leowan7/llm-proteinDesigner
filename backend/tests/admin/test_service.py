@@ -18,6 +18,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import stripe
 from fastapi import HTTPException
 from jobs.service import cancel_job_by_id
 
@@ -75,6 +76,7 @@ def _make_pool_for_cancel(job_row, stripe_customer_id=None):
         _make_ctx(update_conn),
         _make_ctx(cust_conn),
     ])
+    pool.cust_conn = cust_conn
     return pool
 
 
@@ -118,12 +120,12 @@ async def test_cancel_job_not_found():
 async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     """A cancel landing on a row another route already took settles nothing.
 
-    The reaper meters the runs it sweeps (worker/cleanup.py:380), so a cancel
+    The reaper meters the runs it sweeps (worker/cleanup.py:375), so a cancel
     arriving just after a sweep claimed the same row would otherwise be the
     second charge for one job, on a different second count -- the reaper's
     capped figure against this route's wall-clock one. Stripe's idempotency
     key is a backstop with a 24-hour expiry
-    (billing/stripe_client.py:219), not the guard; the guard is the status
+    (billing/stripe_client.py:268), not the guard; the guard is the status
     transition, which this route now has to win.
 
     Behind the claim: the cost write, the Stripe meter, and the SSE terminal
@@ -131,7 +133,7 @@ async def test_a_cancel_that_loses_the_claim_reports_the_row_that_won():
     worker/cleanup.py:328). The 404 lookup and the provider cancel are in
     front of it and still run. The response body reports the winning row --
     jobs/router.py:738 hands these three fields to the caller and
-    admin/router.py:389 writes two of them into the audit log, so returning a
+    admin/router.py:401 writes two of them into the audit log, so returning a
     cancellation that did not happen would be an audited charge nobody made.
     """
     started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
@@ -230,6 +232,36 @@ async def test_cancel_records_billing():
     assert gpu_seconds > 0
     # record_gpu_usage called with (stripe_customer_id, job_id, gpu_seconds)
     mock_record.assert_called_once_with("cus_billing", "job-002", gpu_seconds)
+    # ...through mark_metered, so the spend reads count the cancelled run.
+    assert "SET metered = TRUE" in mock_pool.cust_conn.fetchval.call_args.args[0]
+
+
+async def test_a_cancel_whose_meter_call_raises_clears_the_flag():
+    """A Stripe refusal still propagates, but jobs.metered is cleared first."""
+    started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)
+    job_row = {
+        "runpod_job_id": "rp-job-002",
+        "job_spec": json.dumps({"tool": "bindcraft"}),
+        "started_at": started_at,
+        "user_id": "uid-2",
+    }
+    mock_pool = _make_pool_for_cancel(job_row, "cus_billing")
+    mock_provider = AsyncMock()
+    mock_provider.cancel_job = AsyncMock()
+
+    with (
+        patch("jobs.service.get_provider", return_value=mock_provider),
+        patch(
+            "jobs.service.record_gpu_usage",
+            MagicMock(side_effect=stripe.InvalidRequestError("No such customer", None)),
+        ),
+        patch("worker.tasks.update_job_status", new_callable=AsyncMock),
+        patch("worker.tasks.publish_status", new_callable=AsyncMock),
+        pytest.raises(stripe.InvalidRequestError),
+    ):
+        await cancel_job_by_id("job-002", mock_pool)
+
+    assert "SET metered = FALSE" in mock_pool.cust_conn.execute.call_args.args[0]
 
 
 async def test_a_redis_fault_on_the_cancels_publish_still_meters():
@@ -237,7 +269,7 @@ async def test_a_redis_fault_on_the_cancels_publish_still_meters():
 
     This is test_cancel_records_billing with one thing changed: the publish at
     jobs/service.py:175 raises. It sits between a claim that has committed and
-    the meter at jobs/service.py:193, and the row is terminal afterwards, so
+    the meter at jobs/service.py:189, and the row is terminal afterwards, so
     nothing retries this charge.
     """
     started_at = datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=60)

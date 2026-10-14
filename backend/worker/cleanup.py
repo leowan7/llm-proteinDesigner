@@ -16,7 +16,7 @@ import datetime
 import logging
 
 import sentry_sdk
-from billing.stripe_client import record_gpu_usage
+from billing.stripe_client import mark_metered, record_gpu_usage, unmark_metered
 from config import settings
 from db.connection import get_db_pool
 from gpu import get_provider
@@ -264,7 +264,7 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # with no record on the row: the customer's run would show no cost
         # (GET /jobs serves this column, jobs/router.py:496), the
         # daily spend guard in this module would sum it as zero
-        # (check_daily_gpu_spend, :419) so a burst of billed timeouts
+        # (check_daily_gpu_spend, :414) so a burst of billed timeouts
         # could not trip the alert, and nothing in the product could be
         # reconciled against the Stripe invoice.
         gpu_cost_usd = round(
@@ -369,24 +369,20 @@ async def detect_stale_jobs(ctx: dict | None = None) -> int:
         # of life.
         if saved_designs > 0 and gpu_seconds > 0:
             async with pool.acquire() as conn:
-                stripe_customer_id = await conn.fetchval(
-                    """SELECT public.org_stripe_customer(j.organization_id)
-                       FROM public.jobs j
-                       WHERE j.id = $1""",
-                    job_id,
-                )
-            if stripe_customer_id:
-                try:
-                    record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
-                except Exception as exc:
-                    # Metering must not cost the customer their failure email
-                    # or stop the sweep: the row is already terminal, so no
-                    # later pass will pick this job up and send it.
-                    logger.exception(
-                        "Could not meter stale job %s; it stays unbilled",
-                        job_id,
-                    )
-                    sentry_sdk.capture_exception(exc)
+                stripe_customer_id = await mark_metered(conn, job_id)
+                if stripe_customer_id:
+                    try:
+                        record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+                    except Exception as exc:
+                        # Metering must not cost the customer their failure
+                        # email or stop the sweep: the row is already terminal,
+                        # so no later pass will pick this job up and send it.
+                        logger.exception(
+                            "Could not meter stale job %s; it stays unbilled",
+                            job_id,
+                        )
+                        sentry_sdk.capture_exception(exc)
+                        await unmark_metered(conn, job_id, exc)
 
         async with pool.acquire() as conn:
             user_row = await conn.fetchrow(
