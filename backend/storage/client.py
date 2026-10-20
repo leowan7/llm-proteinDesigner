@@ -286,10 +286,11 @@ def list_job_design_keys(user_id: str, job_id: str) -> list[str]:
     (``docker/bindcraft/run_pipeline.py:1815``, with a mid-run sweep at
     ``docker/bindcraft/run_pipeline.py:1716``, and
     ``docker/rfdiffusion/run_pipeline.py:2108``), so their runs bank designs on
-    any failure route. BoltzGen, PxDesign and RFantibody upload once after
-    their generation loop (``docker/boltzgen/run_pipeline.py:2102``,
-    ``docker/pxdesign/run_pipeline.py:1939``,
-    ``docker/rfantibody/run_pipeline.py:1656``): a failure the container
+    any failure route. RFantibody uploads each design RF2 finishes from its
+    keepalive tick (``docker/rfantibody/run_pipeline.py::_DesignStreamer``).
+    BoltzGen and PxDesign upload once after their generation loop
+    (``docker/boltzgen/run_pipeline.py:2102``,
+    ``docker/pxdesign/run_pipeline.py:1939``): a failure the container
     catches still reaches that upload -- BoltzGen's timeout handler sets
     ``early_failure`` at ``docker/boltzgen/run_pipeline.py:1953`` and falls
     through to it -- but a pod killed from outside never reaches it and leaves
