@@ -1024,7 +1024,9 @@ def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
 def _complete_qv_records(qv_path: str) -> list[tuple[str, str, list[str]]]:
     """Return ``(tag, score_str, pdb_lines)`` for each finished record in a .qv.
 
-    RF2 writes one record per design, each in a single append-mode open
+    Upstream behaviour, read from RFantibody's source and not checkable from
+    this repo: RF2 writes one record per design, each in a single append-mode
+    open
     (upstream ``src/rfantibody/util/quiver.py::Quiver.add_pdb`` at
     RFANTIBODY_SHA, called from ``rf2/modules/model_runner.py::write_output``),
     so the next record's ``QV_TAG`` line is only written once the previous
@@ -1035,6 +1037,8 @@ def _complete_qv_records(qv_path: str) -> list[tuple[str, str, list[str]]]:
     ``pdb_lines`` follows ``Quiver.get_pdblines``, which is what qvextract
     writes: every line after the tag except ``QV_SCORE``.
     """
+    # ponytail: re-reads the whole .qv on every tick; keep a byte offset if
+    # runs of hundreds of designs make that read heavy.
     try:
         with open(qv_path) as fh:
             lines = fh.readlines()
@@ -1064,7 +1068,8 @@ class _DesignStreamer:
     (tools-hub shared/job_recovery.py::reconstruct).
 
     Each finished record is written to ``out_dir`` as ``<tag>.pdb``, the name
-    qvextract gives the same record (upstream ``quiver.py::qvextract``), so
+    qvextract gives the same record (upstream ``quiver.py::qvextract``, not
+    checkable from this repo), so
     main()'s upload loop sees one name per design whichever side uploads it.
 
     ``shipped`` maps tag -> upload filename already in Storage. ``stop`` is
@@ -1866,8 +1871,8 @@ def main():
 
             # new_candidate only for designs the streamer did not already
             # offer, so one pdb_key is never offered under two ranks. It is
-            # sent whether or not the upload landed: a recovered run that has
-            # any partial at all is rebuilt from partials alone
+            # sent whether or not the upload landed; tools-hub drops a partial
+            # whose file is not in Storage when it rebuilds a stopped run
             # (tools-hub shared/job_recovery.py::reconstruct).
             new_cand = None
             if not already_streamed:
