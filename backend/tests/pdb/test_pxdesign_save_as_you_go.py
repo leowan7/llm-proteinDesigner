@@ -75,7 +75,7 @@ def _write_design(output_dir, stem, seed="seed_000", end=True, quiesced=True):
     os.makedirs(design_dir, exist_ok=True)
     path = os.path.join(design_dir, f"{stem}.pdb")
     with open(path, "w") as fh:
-        fh.write(f"ATOM      1  CA  ALA A   1       0.000   0.000   0.000\n")
+        fh.write("ATOM      1  CA  ALA A   1       0.000   0.000   0.000\n")
         if end:
             fh.write("END\n")
     if quiesced:
