@@ -188,7 +188,9 @@ def keepalive_heartbeat(
     job_id: str,
     stage: str,
     num_designs: int,
-    interval_s: int = 300,
+    interval_s: int = 60,
+    on_tick=None,
+    stop_event: "threading.Event | None" = None,
 ):
     """Fire periodic heartbeats while a long-running subprocess executes.
 
@@ -198,23 +200,47 @@ def keepalive_heartbeat(
     STALE_HEARTBEAT_SECONDS (1800s = 30 min). Stage 3 (RF2) commonly runs
     >30 min, so without a keepalive every session dies mid-run.
 
+    The 60 s default is also the billing cadence on a live-charged run:
+    tools-hub meters and runs its balance stop only when a heartbeat arrives
+    (tools-hub webhooks/modal.py::_handle_heartbeat), so the gap between
+    beats is how far a run can overrun the balance.
+
+    ``on_tick`` runs after each beat and may return ``(stage, completed)``
+    to replace what later beats report; ``_DesignStreamer.sweep`` uses it to
+    ship designs out of the still-running RF2 subprocess. ``stop_event`` is
+    shared with that callback so a stop lands between two designs.
+
     Usage::
 
         with keepalive_heartbeat(webhook_url, job_id, "Running RF2", 2):
             stage_rf2(...)
 
     The thread is a daemon so an unexpected termination of the main
-    pipeline will not leave it hanging. ``stop_event.set()`` on context
-    exit causes the thread to drop out of the wait loop cleanly.
+    pipeline will not leave it hanging. On context exit the thread is joined
+    for up to 180 s -- one in-flight upload, the 30 s signing POST plus the
+    120 s PUT -- so a sweep cannot still be signing a name while main()'s
+    upload loop signs the same one.
     """
-    stop_event = threading.Event()
+    stop_event = stop_event if stop_event is not None else threading.Event()
+    state = {"stage": stage, "done": 0}
 
     def _run() -> None:
         while not stop_event.wait(interval_s):
             try:
-                send_heartbeat(webhook_url, job_id, stage, 0, num_designs)
+                send_heartbeat(
+                    webhook_url, job_id, state["stage"], state["done"],
+                    max(num_designs, state["done"]),
+                )
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.warning("keepalive heartbeat failed: %s", exc)
+            if on_tick is not None and not stop_event.is_set():
+                try:
+                    update = on_tick()
+                except Exception as exc:
+                    logger.warning("keepalive tick callback failed: %s", exc)
+                else:
+                    if update is not None:
+                        state["stage"], state["done"] = update
 
     thread = threading.Thread(target=_run, daemon=True, name=f"keepalive-{stage}")
     thread.start()
@@ -222,6 +248,12 @@ def keepalive_heartbeat(
         yield
     finally:
         stop_event.set()
+        thread.join(timeout=180)
+        if thread.is_alive():
+            logger.warning(
+                "Keepalive thread still running after a 180s join; an "
+                "in-flight design upload may overlap the final upload loop"
+            )
 
 
 def download_input(url: str, dest_path: str) -> None:
@@ -420,6 +452,41 @@ def upload_output(url: str, file_path: str) -> None:
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Upload failed for {file_path}: HTTP {resp.status_code}")
     logger.info("Uploaded %s (%d bytes)", file_path, len(data))
+
+
+def _upload_one(
+    upload_endpoint: str, job_token: str, filename: str, file_path: str,
+) -> bool:
+    """Request one upload URL and PUT one file. True when the object landed.
+
+    One request per file rather than one batch, as in
+    docker/bindcraft/run_pipeline.py::_upload_one: tools-hub fails the whole
+    upload-urls request when one name fails to sign
+    (tools-hub webhooks/uploads.py::_handle), and signing a name already in
+    Storage is expected to fail because the signed upload does not upsert
+    (tools-hub shared/storage.py::presigned_output_put_url; read from the
+    code, not observed). Once designs stream mid-run, most names are already
+    there by the end, so a batch would take the rest down with them.
+
+    Never raises. False also covers a PUT that timed out client-side after
+    the object landed; the caller lists such a design in failed_uploads, and
+    main() still puts its PDB inline on the result webhook.
+    """
+    if not (upload_endpoint and job_token and filename):
+        return False
+    if not (file_path and os.path.exists(file_path)):
+        logger.warning("No file on disk to upload for %s (%s)", filename, file_path)
+        return False
+    try:
+        url = request_upload_urls(upload_endpoint, job_token, [filename]).get(filename)
+        if not url:
+            logger.warning("No upload URL returned for %s", filename)
+            return False
+        upload_output(url, file_path)
+        return True
+    except Exception as exc:
+        logger.warning("Upload of %s failed: %s", filename, exc)
+        return False
 
 
 def run_command(
@@ -855,30 +922,56 @@ def parse_scores_tsv(tsv_path: str) -> list[dict]:
             )
             design_name = Path(design_name).stem
 
-            scores = {}
-            for metric, keys, default in [
-                ("pAE", ["pae", "mean_pae"], 99.0),
-                ("ipAE", ["interaction_pae", "ipae", "i_pae"], 99.0),
-                ("pLDDT", ["pred_lddt", "plddt", "mean_plddt", "avg_plddt"], 0.0),
-                ("ipTM", ["iptm", "ip_tm", "iptm_score"], 0.0),
-                ("pTM", ["ptm", "p_tm"], 0.0),
-            ]:
-                for key in keys:
-                    if key in row_lower and row_lower[key]:
-                        scores[metric] = _safe_float(row_lower[key], default)
-                        break
-
-            # pred_lddt may be on the 0..1 scale; normalize to 0..100 for UX.
-            if "pLDDT" in scores and scores["pLDDT"] <= 1.0:
-                scores["pLDDT"] = scores["pLDDT"] * 100.0
-
             results.append({
                 "design_name": design_name,
-                "scores": scores,
+                "scores": _map_scores(row_lower),
             })
 
     logger.info("Parsed %d designs from scores TSV", len(results))
     return results
+
+
+def _map_scores(row_lower: dict) -> dict:
+    """Map one design's raw score columns (lowercased keys) to UI metrics.
+
+    Shared by parse_scores_tsv (the qvscorefile TSV) and _DesignStreamer
+    (the QV_SCORE line of a predictions.qv record), so a streamed design and
+    the final result score it the same way.
+    """
+    scores = {}
+    for metric, keys, default in [
+        ("pAE", ["pae", "mean_pae"], 99.0),
+        ("ipAE", ["interaction_pae", "ipae", "i_pae"], 99.0),
+        ("pLDDT", ["pred_lddt", "plddt", "mean_plddt", "avg_plddt"], 0.0),
+        ("ipTM", ["iptm", "ip_tm", "iptm_score"], 0.0),
+        ("pTM", ["ptm", "p_tm"], 0.0),
+    ]:
+        for key in keys:
+            if key in row_lower and row_lower[key]:
+                scores[metric] = _safe_float(row_lower[key], default)
+                break
+
+    # pred_lddt may be on the 0..1 scale; normalize to 0..100 for UX.
+    if "pLDDT" in scores and scores["pLDDT"] <= 1.0:
+        scores["pLDDT"] = scores["pLDDT"] * 100.0
+    return scores
+
+
+def _label(scores: dict) -> bool:
+    """Stamp scores["filter_status"] from the in silico thresholds; True on pass."""
+    pae = scores.get("pAE")
+    plddt = scores.get("pLDDT")
+    ipae = scores.get("ipAE")
+    is_pass = (
+        pae is not None
+        and plddt is not None
+        and ipae is not None
+        and pae <= PAE_THRESHOLD
+        and plddt >= PLDDT_THRESHOLD
+        and ipae <= IPAE_THRESHOLD
+    )
+    scores["filter_status"] = "pass" if is_pass else "below threshold"
+    return is_pass
 
 
 def filter_and_rank(designs: list[dict]) -> list[dict]:
@@ -890,23 +983,7 @@ def filter_and_rank(designs: list[dict]) -> list[dict]:
     threshold" so the UI can show all of them. The in silico thresholds
     now drive a label, not a gate.
     """
-    pass_count = 0
-    for design in designs:
-        scores = design["scores"]
-        pae = scores.get("pAE")
-        plddt = scores.get("pLDDT")
-        ipae = scores.get("ipAE")
-        is_pass = (
-            pae is not None
-            and plddt is not None
-            and ipae is not None
-            and pae <= PAE_THRESHOLD
-            and plddt >= PLDDT_THRESHOLD
-            and ipae <= IPAE_THRESHOLD
-        )
-        scores["filter_status"] = "pass" if is_pass else "below threshold"
-        if is_pass:
-            pass_count += 1
+    pass_count = sum(_label(design["scores"]) for design in designs)
 
     ranked = list(designs)
     ranked.sort(key=lambda x: x["scores"].get("ipAE", 99.0))
@@ -918,6 +995,143 @@ def filter_and_rank(designs: list[dict]) -> list[dict]:
         PAE_THRESHOLD, PLDDT_THRESHOLD, IPAE_THRESHOLD,
     )
     return ranked
+
+
+_RF2_STAGE = "Running RF2 validation"
+
+
+def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
+    """Build the per-design heartbeat partial for one design.
+
+    The streamer and main()'s upload loop both build it here, so the two
+    carry the same ``pdb_key`` for a design: tools-hub dedupes
+    ``_partial_candidates`` on that exact string
+    (tools-hub webhooks/modal.py::_hb_merge_inputs). rfantibody has no ipTM,
+    so ``iptm`` is null and ipAE travels as ``i_pae``.
+    """
+    plddt_v = scores.get("pLDDT")
+    ipae_v = scores.get("ipAE")
+    return {
+        "rank": rank,
+        "pdb_key": pdb_key,
+        "iptm": None,
+        "plddt": round(float(plddt_v), 4) if plddt_v is not None else None,
+        "i_pae": round(float(ipae_v), 4) if ipae_v is not None else None,
+        "filter_status": scores.get("filter_status") or "pass",
+    }
+
+
+def _complete_qv_records(qv_path: str) -> list[tuple[str, str, list[str]]]:
+    """Return ``(tag, score_str, pdb_lines)`` for each finished record in a .qv.
+
+    RF2 writes one record per design, each in a single append-mode open
+    (upstream ``src/rfantibody/util/quiver.py::Quiver.add_pdb`` at
+    RFANTIBODY_SHA, called from ``rf2/modules/model_runner.py::write_output``),
+    so the next record's ``QV_TAG`` line is only written once the previous
+    record's file handle closed. A record followed by another ``QV_TAG`` is
+    therefore complete; the last record may still be mid-write and is left
+    for main(), which extracts it once RF2 has exited.
+
+    ``pdb_lines`` follows ``Quiver.get_pdblines``, which is what qvextract
+    writes: every line after the tag except ``QV_SCORE``.
+    """
+    try:
+        with open(qv_path) as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        return []
+    records: list[list] = []
+    for line in lines:
+        if line.startswith("QV_TAG"):
+            parts = line.split()
+            records.append([parts[1] if len(parts) > 1 else "", "", []])
+        elif not records:
+            continue
+        elif line.startswith("QV_SCORE"):
+            parts = line.split(maxsplit=2)
+            records[-1][1] = parts[2].strip() if len(parts) > 2 else ""
+        else:
+            records[-1][2].append(line)
+    return [(tag, score, body) for tag, score, body in records[:-1]]
+
+
+class _DesignStreamer:
+    """Ship each design RF2 finishes while its subprocess is still running.
+
+    Without this every design reaches Storage only after RF2 exits, so a run
+    stopped by the hub mid-RF2 delivers nothing it had already paid for: the
+    hub rebuilds a stopped run only from bytes already in Storage
+    (tools-hub shared/job_recovery.py::reconstruct).
+
+    Each finished record is written to ``out_dir`` as ``<tag>.pdb``, the name
+    qvextract gives the same record (upstream ``quiver.py::qvextract``), so
+    main()'s upload loop sees one name per design whichever side uploads it.
+
+    ``shipped`` maps tag -> upload filename already in Storage. ``stop`` is
+    shared with the keepalive thread that drives ``sweep``, so a stop lands
+    between two designs.
+    """
+
+    def __init__(
+        self,
+        predictions_qv: str,
+        out_dir: str,
+        upload_endpoint: str,
+        job_token: str,
+        webhook_url: str,
+        job_id: str,
+        num_designs: int,
+    ) -> None:
+        self.shipped: dict[str, str] = {}
+        self.stop = threading.Event()
+        self._qv = predictions_qv
+        self._out_dir = out_dir
+        self._upload_endpoint = upload_endpoint
+        self._job_token = job_token
+        self._webhook_url = webhook_url
+        self._job_id = job_id
+        self._num_designs = num_designs
+
+    def sweep(self) -> tuple[str, int]:
+        """Upload and beat every newly finished design. Returns (stage, count).
+
+        Ranks are arrival order, 1..n; main()'s result re-ranks by ipAE.
+        One beat per design, landed or not, so a storage outage that makes
+        each upload burn its full timeout still beats between designs.
+        new_candidate rides only on a landed upload, so the live page is not
+        handed a pdb_key whose bytes are not in Storage yet.
+        """
+        for tag, score_str, pdb_lines in _complete_qv_records(self._qv):
+            if self.stop.is_set():
+                logger.info("Design sweep stopping; %d shipped", len(self.shipped))
+                break
+            if not tag or tag in self.shipped or "/" in tag:
+                continue
+            filename = f"{tag}.pdb"
+            path = os.path.join(self._out_dir, filename)
+            os.makedirs(self._out_dir, exist_ok=True)
+            with open(path, "w") as fh:
+                fh.writelines(pdb_lines)
+            raw = dict(part.partition("=")[::2] for part in score_str.split("|"))
+            scores = _map_scores({k.strip().lower(): v for k, v in raw.items() if k})
+            _label(scores)
+            landed = _upload_one(
+                self._upload_endpoint, self._job_token, filename, path,
+            )
+            if landed:
+                self.shipped[tag] = filename
+                logger.info(
+                    "Streamed design %s (%d so far) to the hub",
+                    filename, len(self.shipped),
+                )
+            send_heartbeat(
+                self._webhook_url, self._job_id, _RF2_STAGE,
+                len(self.shipped), max(self._num_designs, len(self.shipped)),
+                new_candidate=_new_candidate(
+                    len(self.shipped), filename, scores,
+                ) if landed else None,
+            )
+        return _RF2_STAGE, len(self.shipped)
 
 
 def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
@@ -1494,8 +1708,15 @@ def main():
         # subprocess.run, :432) and RuntimeError for a nonzero exit (:444);
         # the payload recorded below is the one this stage posts today.
         early_failure: dict | None = None
+        streamer = _DesignStreamer(
+            predictions_qv, top_hits_dir, upload_endpoint, job_token,
+            webhook_url, job_id, num_designs,
+        )
         try:
-            with keepalive_heartbeat(webhook_url, job_id, "Running RF2 validation", num_designs):
+            with keepalive_heartbeat(
+                webhook_url, job_id, _RF2_STAGE, num_designs,
+                on_tick=streamer.sweep, stop_event=streamer.stop,
+            ):
                 stage_rf2(
                     sequences_qv, predictions_qv,
                     recycles=rf2_recycles,
@@ -1569,7 +1790,6 @@ def main():
         # matching PDB (which `continue` past) don't leave rank gaps in
         # the surviving candidates (mirrors the boltzgen fix).
         candidates = []
-        filenames_to_upload = []
         emitted_rank = 0
 
         for design in passing:
@@ -1593,8 +1813,13 @@ def main():
             emitted_rank += 1
             rank = emitted_rank
 
-            upload_filename = f"design_{rank:03d}.pdb"
-            filenames_to_upload.append(upload_filename)
+            # The file's own name (<tag>.pdb from qvextract), not
+            # design_{rank}.pdb, so a design keeps the name _DesignStreamer
+            # already shipped it under: a rank-based name would put a
+            # streamed design in Storage twice, and the hub dedupes partials
+            # on the exact pdb_key string. top_hits_dir is one flat
+            # directory, so the basenames are unique.
+            upload_filename = os.path.basename(local_file)
 
             # pdb_key MUST share basename with upload_filename so the
             # web service's resolver finds the Storage object at
@@ -1611,91 +1836,60 @@ def main():
                 "upload_filename": upload_filename,
             })
 
-            # Emit per-design heartbeat with the candidate for live UI
-            # streaming. Score-key mapping: rfantibody uses pAE / pLDDT /
-            # ipAE; we map ipAE to the contract field i_pae and leave iptm
-            # null (rfantibody has no ipTM). filter_status from the
-            # in-script filter (passes if it reached filter_and_rank; pilot
-            # fallback stamps "below threshold" on the scores dict). pdb_key
-            # is None because uploads are batched after the loop completes
-            # and the frontend handles missing pdb_key.
-            try:
-                scores_d = design.get("scores", {}) or {}
-                plddt_v = scores_d.get("pLDDT", scores_d.get("plddt"))
-                ipae_v = scores_d.get("ipAE", scores_d.get("i_pAE", scores_d.get("ipae")))
-                fstatus = scores_d.get("filter_status") or "pass"
-                new_cand = {
-                    "rank": rank,
-                    "pdb_key": None,
-                    "iptm": None,
-                    "plddt": round(float(plddt_v), 4) if plddt_v is not None else None,
-                    "i_pae": round(float(ipae_v), 4) if ipae_v is not None else None,
-                    "filter_status": fstatus,
-                }
-            except Exception as exc:
-                logger.debug("Failed to build new_candidate: %s", exc)
-                new_cand = None
-            if webhook_url and job_id:
-                send_heartbeat(
-                    webhook_url, job_id, "Ranking candidates",
-                    rank, len(passing),
-                    new_candidate=new_cand,
-                )
-
-        if filenames_to_upload:
-            filenames_to_upload.append("metrics.csv")
-
         # ----- Upload outputs -----
+        # Designs the streamer shipped mid-RF2 are already in Storage and are
+        # not re-signed (see _upload_one). Every other file is uploaded one
+        # request at a time, and any that does not land goes into
+        # failed_uploads, which tools-hub reads to keep the inline b64
+        # structures instead of dropping them as "already in Storage".
+        designs_total = max(num_designs, len(candidates))
         send_heartbeat(
             webhook_url, job_id, "Uploading results",
-            len(candidates), len(candidates),
+            len(streamer.shipped), designs_total,
         )
 
-        upload_urls = {}
-        url_exchange_error = None
-        if upload_endpoint and job_token and filenames_to_upload:
-            try:
-                upload_urls = request_upload_urls(
-                    upload_endpoint, job_token, filenames_to_upload,
-                )
-            except RuntimeError as exc:
-                logger.error("Failed to get upload URLs: %s", exc)
-                url_exchange_error = str(exc)
-
         failed_uploads = []
-        if filenames_to_upload and not upload_urls:
-            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
-            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
-            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
-            # failed_uploads is already surfaced to tools-hub via result_payload and already makes
-            # _slim_result_for_persist KEEP the inline b64 structures rather than drop them as
-            # "already in Storage". Telling it the truth is enough - the bug was only the silence.
-            logger.error(
-                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
-                "so the run is not reported as a clean success",
-                url_exchange_error or "empty response", len(filenames_to_upload),
-            )
-            failed_uploads.extend(filenames_to_upload)
+        delivered = 0
+        # Live ranks continue the streamer's arrival numbering, so a design
+        # it never reached does not take a rank a streamed design holds.
+        live_rank = len(streamer.shipped)
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate["local_file"]
-            if upload_filename in upload_urls and os.path.exists(local_file):
-                try:
-                    upload_output(upload_urls[upload_filename], local_file)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload %s: %s", upload_filename, exc)
-                    failed_uploads.append(upload_filename)
+            already_streamed = Path(local_file).stem in streamer.shipped
+            if already_streamed or _upload_one(
+                upload_endpoint, job_token, upload_filename, local_file,
+            ):
+                delivered += 1
+            else:
+                failed_uploads.append(upload_filename)
+
+            # new_candidate only for designs the streamer did not already
+            # offer, so one pdb_key is never offered under two ranks. It is
+            # sent whether or not the upload landed: a recovered run that has
+            # any partial at all is rebuilt from partials alone
+            # (tools-hub shared/job_recovery.py::reconstruct).
+            new_cand = None
+            if not already_streamed:
+                live_rank += 1
+                new_cand = _new_candidate(
+                    live_rank, upload_filename, candidate["scores"],
+                )
+            if webhook_url and job_id:
+                send_heartbeat(
+                    webhook_url, job_id, "Uploading candidates",
+                    max(len(streamer.shipped), delivered), designs_total,
+                    new_candidate=new_cand,
+                )
 
         # ----- Upload metrics CSV -----
         if candidates:
             metrics_csv_path = os.path.join(work_dir, "metrics.csv")
             write_metrics_csv(metrics_csv_path, candidates)
-            if "metrics.csv" in upload_urls:
-                try:
-                    upload_output(upload_urls["metrics.csv"], metrics_csv_path)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload metrics CSV: %s", exc)
-                    failed_uploads.append("metrics.csv")
+            if not _upload_one(
+                upload_endpoint, job_token, "metrics.csv", metrics_csv_path,
+            ):
+                failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
