@@ -411,7 +411,7 @@ def _upload_one(
 
     One request per file rather than one batch, as in
     docker/bindcraft/run_pipeline.py::_upload_one and
-    docker/rfantibody/run_pipeline.py::_upload_one: tools-hub fails the whole
+    docker/rfdiffusion/run_pipeline.py::_upload_one: tools-hub fails the whole
     upload-urls request when one name fails to sign
     (tools-hub webhooks/uploads.py::_handle), and signing a name already in
     Storage is expected to fail because the signed upload does not upsert
@@ -1412,11 +1412,22 @@ def _in_design_dir(path: str) -> bool:
     Streaming is the only caller that sees that state, so it filters here
     rather than narrowing find_design_files, which runs after PXDesign exits
     and whose fallback is the reason some runs delivered anything at all.
+
+    ``orig_designed`` is deliberately absent, though find_design_files layer 1
+    reads it (:1202). A design that PXDesign also copies to a passing-* or
+    converted_pdbs directory would be two files for one design, which _norm
+    cannot reconcile -- it resolves spellings of ONE path -- so both would land
+    in Storage under different names and a stopped run would show the design
+    twice (tools-hub shared/job_recovery.py::reconstruct returns one candidate
+    per matched partial). Whether that ever happens is unverified: this repo
+    cannot read PXDesign's write path, and find_design_files' own docstring
+    records converted_pdbs as the only observed layout. Leaving it out costs
+    at most streaming an orig_designed-only design, which the end-of-run
+    upload loop still delivers.
     """
     parents = {part for part in Path(path).parts[:-1]}
     return bool(parents & {
         "converted_pdbs", "passing-AF2-IG-easy", "passing-AF2-IG",
-        "orig_designed",
     })
 
 
@@ -1524,9 +1535,11 @@ class _DesignStreamer:
 
         Ranks are arrival order, 1..n; the final result re-ranks by ipTM.
         One beat per design, landed or not, so a storage outage that makes
-        each upload burn its full timeout still beats between designs and
-        cannot starve the keepalive (tools-hub's stale-heartbeat cron fails a
-        run after STALE_HEARTBEAT_SECONDS). new_candidate rides only on a
+        each upload burn its full timeout still reports progress between
+        designs instead of going quiet for the whole sweep. No deadline is
+        being met: tools-hub has no stale-heartbeat threshold (its only
+        reaper, cron/sweep_stuck_jobs.py::sweep_stuck_jobs, goes on job age,
+        default 6 h). new_candidate rides only on a
         landed upload, so the live page is never handed a pdb_key whose bytes
         are not in Storage yet.
         """
@@ -2019,12 +2032,14 @@ def run_webhook_tier(job_payload: dict) -> None:
         )
         heartbeat_stop = streamer.stop
 
-        # 60 s, not 300: tools-hub meters a live-charged run and runs its
-        # balance stop only when a heartbeat arrives
-        # (tools-hub webhooks/modal.py::_handle_heartbeat), so the gap
-        # between beats is how far a run can overrun the balance. The sweep
-        # after each beat is what gives a stopped run the designs it paid
-        # for.
+        # 60 s, not 300, because the sweep rides the beat: a finished design
+        # waits up to one interval before it is uploaded, and a run stopped
+        # inside that window loses it. tools-hub bills a live run from
+        # started_at on a cron tick, not per beat
+        # (tools-hub shared/jobs.py::meter_live_runs), so the cadence bounds
+        # lost work, not the money: the one beat that does gate money is the
+        # first, which stamps started_at and starts the meter
+        # (tools-hub webhooks/modal.py::_handle_heartbeat).
         def _keepalive() -> None:
             state = {"done": 0}
             while not heartbeat_stop.wait(60):
