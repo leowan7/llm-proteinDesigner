@@ -208,12 +208,15 @@ def test_a_pdb_still_being_written_is_not_complete(tmp_path):
 
 
 def test_an_empty_file_is_not_complete(tmp_path):
-    path = _write_design(str(tmp_path), "sample_0")
-    with open(path, "w"):
-        pass
+    """A .cif, so only the size check can reject it: an empty .pdb is rejected
+    by the END check instead, which leaves the size check unproven."""
+    design_dir = tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
+    design_dir.mkdir(parents=True)
+    path = design_dir / "sample_0.cif"
+    path.write_bytes(b"")
     old = time.time() - (pxd._QUIESCE_SECONDS + 5)
     os.utime(path, (old, old))
-    assert pxd._looks_complete(path, time.time()) is False
+    assert pxd._looks_complete(str(path), time.time()) is False
 
 
 def test_a_quiesced_cif_is_complete_without_an_end_record(tmp_path):
