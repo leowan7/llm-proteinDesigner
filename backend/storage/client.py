@@ -230,9 +230,13 @@ def delete_job_objects(user_id: str, job_id: str) -> int:
 #: Filename suffixes a saved design can carry. ``.cif`` is here for BoltzGen
 #: and PxDesign: both collect ``.cif`` designs
 #: (``docker/boltzgen/run_pipeline.py:1360``,
-#: ``docker/pxdesign/run_pipeline.py:1178``) and upload under whatever suffix
-#: they found (``Path(...).suffix``, ``docker/boltzgen/run_pipeline.py:2043-2044``,
-#: ``docker/pxdesign/run_pipeline.py:1882-1883``). BindCraft uploads under the
+#: ``docker/pxdesign/run_pipeline.py::find_design_files``) and upload under
+#: whatever suffix they found: BoltzGen as ``design_{rank:03d}{ext}``
+#: (``Path(...).suffix``, ``docker/boltzgen/run_pipeline.py:2043-2044``),
+#: PxDesign under the design file's own basename
+#: (``docker/pxdesign/run_pipeline.py::_assign_upload_name``, which the mid-run
+#: streamer and the final upload loop share so a streamed design keeps one
+#: name). BindCraft uploads under the
 #: basename of its output path (``docker/bindcraft/run_pipeline.py:1778``), so
 #: its suffix is whatever that file carries; nothing in its pipeline writes a
 #: ``.cif``. RFdiffusion and RFantibody write a literal ``.pdb``
@@ -287,11 +291,12 @@ def list_job_design_keys(user_id: str, job_id: str) -> list[str]:
     ``docker/bindcraft/run_pipeline.py:1716``, and
     ``docker/rfdiffusion/run_pipeline.py:2108``), so their runs bank designs on
     any failure route. RFantibody uploads each design RF2 finishes from its
-    keepalive tick (``docker/rfantibody/run_pipeline.py::_DesignStreamer``).
-    BoltzGen and PxDesign upload once after their generation loop
-    (``docker/boltzgen/run_pipeline.py:2102``,
-    ``docker/pxdesign/run_pipeline.py:1939``): a failure the container
-    catches still reaches that upload -- BoltzGen's timeout handler sets
+    keepalive tick (``docker/rfantibody/run_pipeline.py::_DesignStreamer``), and
+    PxDesign does the same for each design it finds complete under
+    ``converted_pdbs`` (``docker/pxdesign/run_pipeline.py::_DesignStreamer``).
+    BoltzGen uploads once after its generation loop
+    (``docker/boltzgen/run_pipeline.py:2102``): a failure the container
+    catches still reaches that upload -- its timeout handler sets
     ``early_failure`` at ``docker/boltzgen/run_pipeline.py:1953`` and falls
     through to it -- but a pod killed from outside never reaches it and leaves
     nothing. So a zero here does not distinguish an unproductive run from one

@@ -498,10 +498,11 @@ def run_command(
             elapsed, head_tail,
         )
         # Two routes raise TimeoutExpired and only one of them killed the
-        # child: the in-loop deadline check (:437-440) kills before it raises,
-        # the proc.wait() after the readline loop (:446) does not. The caller
-        # catches the RuntimeError below and now reads output_dir instead of
-        # discarding it (:1806), so an un-killed PXDesign could still be
+        # child: the in-loop deadline check in the readline loop above kills
+        # before it raises, the ``proc.wait(timeout=...)`` after that loop does
+        # not. The caller catches the RuntimeError below and now reads
+        # output_dir instead of discarding it (``run_webhook_tier``'s
+        # ``except RuntimeError``), so an un-killed PXDesign could still be
         # writing into the directory being uploaded. Killing here covers both
         # routes; kill() is a no-op once the in-loop branch has reaped it. It
         # signals the direct child only -- whether pxdesign spawns workers
@@ -514,14 +515,15 @@ def run_command(
         except subprocess.TimeoutExpired:
             # Still running 30s after the kill. Leave run_command as
             # TimeoutExpired rather than the RuntimeError below so the caller,
-            # which catches RuntimeError only (:1806), does not fall through
-            # and read this directory; the failure reaches the handler at the
-            # end of run_webhook_tier (:2053) instead.
+            # which catches RuntimeError only, does not fall through
+            # and read this directory; the failure reaches the
+            # ``except Exception`` handler at the end of run_webhook_tier
+            # instead.
             # Build a fresh one from the configured timeout rather than
             # re-raising the 30s reap, whose message would report 30 seconds
             # as the run's own timeout. That handler uploads no design out of
             # a directory a live process still owns; the raw-capture tar in
-            # its finally (:2066) does still archive the work dir, but a
+            # that handler's ``finally`` does still archive the work dir, but a
             # diagnostic tarball is not a delivered structure. The type and
             # the number are pinned by
             # test_a_pxdesign_child_surviving_the_kill_keeps_its_output_unread.
@@ -1379,9 +1381,11 @@ def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
     (tools-hub webhooks/modal.py::_hb_merge_inputs). ``pAE`` is the
     interaction PAE in this tool's parser and travels as ``i_pae``.
 
-    A streamed design is passed an empty ``scores``: summary.csv is written
-    only when PXDesign exits (locate_summary_csv, run_pxdesign), so no score
-    exists mid-run. tools-hub keeps the measurements it is given and drops
+    A streamed design is passed an empty ``scores``: this repo reads
+    summary.csv only after PXDesign exits (``locate_summary_csv`` is called
+    from the webhook tier after ``run_pxdesign`` returns), and when PXDesign
+    itself writes the file is not readable from this repo -- so the streamer
+    has no score to pass. tools-hub keeps the measurements it is given and drops
     ``filter_status`` from a partial when it rebuilds a stopped run
     (tools-hub shared/job_recovery.py::_candidate_from_partial), so nulls
     here do not become a verdict.
@@ -2063,8 +2067,8 @@ def run_webhook_tier(job_payload: dict) -> None:
         # under output_dir on the container's disk. Catch it here and fall
         # through to the parse/upload code below rather than letting it reach
         # the handler at the bottom of this function, so those designs are
-        # uploaded instead of discarded. run_command raises RuntimeError for
-        # both the timeout (:492) and a nonzero exit (:508); the payload
+        # uploaded instead of discarded. run_command raises RuntimeError on
+        # both of its failure routes, the timeout and a nonzero exit; the payload
         # recorded below is the one that handler posts today.
         early_failure: dict | None = None
         try:
@@ -2242,7 +2246,7 @@ def run_webhook_tier(job_payload: dict) -> None:
         # Inline base64 of each candidate's PDB so candidate_table.html can
         # render the 3D-viewer + PDB-download buttons (otherwise it falls
         # through to the em-dash branch keyed on pdb_content_b64). Mirrors
-        # the smoke path's _candidate_from_design helper at line 1045.
+        # the smoke path's ``_candidate_from_design`` helper.
         # PXDesign emits .cif or .pdb depending on output config — convert
         # CIF -> PDB via gemmi before encoding so the frontend mol viewer
         # gets a consistent format.
@@ -2282,14 +2286,14 @@ def run_webhook_tier(job_payload: dict) -> None:
         }
         if early_failure:
             # PXDesign died, so the run still reports its failure
-            # (post_webhook keys the status off "error", :543) and the designs
+            # (post_webhook keys the status off "error") and the designs
             # collected above are in Storage.
             #
-            # Uploading them is necessary but not yet sufficient: this repo's
-            # API serves a job's designs only once it completed
-            # (backend/jobs/router.py:706-707 and :543-544), so a failed
-            # run's designs sit in Storage unserved. Serving them is not part
-            # of this change.
+            # The bulk download serves them: its gate is
+            # ``_DELIVERS_DESIGNS``, which covers "failed" and "cancelled" as
+            # well as "complete" (backend/jobs/router.py::download_all_designs),
+            # and it lists the same ``outputs/`` prefix the uploads above wrote
+            # to (backend/storage/client.py::list_job_design_keys).
             #
             # The inline structures are left out because the backend reads a
             # webhook's output only when the run completed (the

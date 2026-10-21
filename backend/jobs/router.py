@@ -877,11 +877,18 @@ async def get_job(
             # to report; this one signs whatever Storage holds under the
             # job's prefix, and every cap on that lives in a container's own
             # filter, under docker/, which no module in backend/ imports
-            # (docker/pxdesign/run_pipeline.py:1867 and
-            # docker/boltzgen/run_pipeline.py:2021 each upload a filtered
-            # `passing` set, and boltzgen's size comes from its own budget
+            # (docker/boltzgen/run_pipeline.py:2021 uploads a filtered
+            # `passing` set, and its size comes from its own budget
             # default, 60 outside the pilot tier and 5 inside it,
-            # docker/boltzgen/run_pipeline.py:1850).
+            # docker/boltzgen/run_pipeline.py:1850). PxDesign's final loop
+            # uploads its own `passing` set, but its mid-run streamer
+            # (docker/pxdesign/run_pipeline.py::_DesignStreamer) uploads every
+            # design it finds complete under converted_pdbs and the passing-*
+            # directories, and converted_pdbs holds every converted design,
+            # not only the summary.csv rows that `passing` is built from
+            # (docker/pxdesign/run_pipeline.py::find_design_files, layer 2), so
+            # for a pxdesign run this set can hold more keys than the run's
+            # passing designs. Nothing bounds it here.
             # generate_presigned_get_url builds a fresh boto3 client per
             # call unless it is handed one (storage/client.py:62), so every key
             # in this unbounded set is signed on the one client built here
