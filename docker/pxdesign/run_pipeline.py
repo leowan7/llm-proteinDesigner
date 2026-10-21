@@ -1470,7 +1470,7 @@ def _looks_complete(path: str, now: float) -> bool:
         # not a cut at a line boundary inside the atom_site loop: that
         # parses cleanly with fewer residues (measured on the 4-residue
         # file backend/tests/pdb/test_pxdesign_save_as_you_go.py writes:
-        # 72 of its 75 lines -> 3 residues, no error). So the size has to
+        # 72 of its 74 lines -> 3 residues, no error). So the size has to
         # hold still across two sweeps first, which a file still being
         # written cannot do.
         #
@@ -1606,12 +1606,20 @@ class _DesignStreamer:
         are not in Storage yet.
         """
         now = time.time()
-        paths = sorted({
-            _norm(path) for path in find_design_files(self._output_dir).values()
-            if _norm(path) not in self.shipped
+        # Deduplicate BEFORE the filters, not after: find_design_files
+        # registers every file twice, under path.stem and path.name
+        # (:1208-1209), so .values() yields each path twice. Filtering first
+        # called _looks_complete twice per file in one sweep, and its
+        # size-stillness check passed on the second call -- "still across two
+        # sweeps" collapsed to "seen twice in one sweep", which is always
+        # true. Each file now gets exactly one _looks_complete per sweep.
+        found = {_norm(path) for path in find_design_files(self._output_dir).values()}
+        paths = sorted(
+            path for path in found
+            if path not in self.shipped
             and _in_design_dir(path)
             and _looks_complete(path, now)
-        })
+        )
         if not paths:
             return _RUNNING_STAGE, len(self.shipped)
         for path in paths:

@@ -237,9 +237,10 @@ def _write_cif(design_dir, stem, truncate_to=1.0):
     Written by gemmi rather than by hand so the complete case is a file
     gemmi itself accepts; ``truncate_to`` is the fraction kept, which is
     what a design cut off mid-line looks like on disk. Four residues so a
-    cut at a line boundary leaves a file that still parses -- with one
-    residue there is nothing left to parse and the parse would reject it
-    for the wrong reason.
+    cut at a line boundary leaves a file that still parses: 72 of this
+    file's 74 lines parse to 3 residues. A 1-residue file cannot show that
+    -- measured, its own last two lines cut parse to 0 residues -- so the
+    parse would reject it for the wrong reason.
     """
     design_dir.mkdir(parents=True, exist_ok=True)
     atoms = []
@@ -357,6 +358,38 @@ def test_sweep_ships_each_finished_design_once(tmp_path, monkeypatch):
     assert rec.streamed[0]["iptm"] is None
     assert rec.streamed[0]["plddt"] is None
 
+
+def test_sweep_waits_a_whole_beat_before_shipping_a_cif(tmp_path, monkeypatch):
+    """The size-stillness check has to survive its own caller.
+
+    find_design_files registers every file twice, under stem and name, so
+    sweep sees each path twice per pass. Filtering before deduplicating
+    called _looks_complete twice in one sweep, the second call matched the
+    size the first had just recorded, and a line-boundary-truncated cif
+    shipped on sweep 1 -- then sat in shipped, which the end-of-run loop
+    reads as already_streamed. Direct _looks_complete tests cannot see
+    this; only one through sweep() can.
+    """
+    rec = _Recorder()
+    rec.install(monkeypatch)
+    design_dir = _cif_dir(tmp_path)
+    path = _write_cif(design_dir, "spec_sample_0")
+    full = path.read_text()
+    rows = full.split(chr(10))
+    path.write_text(chr(10).join(rows[: len(rows) - 3]) + chr(10))
+    _quiesce(path)
+    streamer = _streamer(str(tmp_path))
+
+    assert streamer.sweep() == (pxd._RUNNING_STAGE, 0)
+    assert rec.upload_names == []
+
+    path.write_text(full)  # the writer finishes between two sweeps
+    _quiesce(path)
+    assert streamer.sweep() == (pxd._RUNNING_STAGE, 0)  # size moved
+    assert rec.upload_names == []
+
+    assert streamer.sweep() == (pxd._RUNNING_STAGE, 1)
+    assert rec.upload_names == ["spec_sample_0.cif"]
 
 def test_a_second_sweep_with_nothing_new_ships_nothing(tmp_path, monkeypatch):
     rec = _Recorder()
