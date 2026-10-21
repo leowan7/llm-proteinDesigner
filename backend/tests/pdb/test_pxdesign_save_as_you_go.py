@@ -259,6 +259,11 @@ def _write_cif(design_dir, stem, truncate_to=1.0):
     text = structure.make_mmcif_document().as_string()
     path = design_dir / f"{stem}.cif"
     path.write_text(text[: int(len(text) * truncate_to)])
+    # The source goes away: it is a .pdb with an END record sitting in a
+    # swept directory, so once it ages past _QUIESCE_SECONDS the sweep ships
+    # it as a second design and the cif assertions fail. That made the sweep
+    # test depend on finishing within 10s of writing the file.
+    pdb.unlink()
     _quiesce(path)
     return path
 
