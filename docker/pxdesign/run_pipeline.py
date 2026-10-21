@@ -404,6 +404,44 @@ def upload_output(url: str, file_path: str) -> None:
     logger.info("Uploaded %s (%d bytes)", file_path, len(data))
 
 
+def _upload_one(
+    upload_endpoint: str, job_token: str, filename: str, file_path: str,
+) -> bool:
+    """Request one upload URL and PUT one file. True when the object landed.
+
+    One request per file rather than one batch, as in
+    docker/bindcraft/run_pipeline.py::_upload_one and
+    docker/rfdiffusion/run_pipeline.py::_upload_one: tools-hub fails the whole
+    upload-urls request when one name fails to sign
+    (tools-hub webhooks/uploads.py::_handle), and signing a name already in
+    Storage is expected to fail because the signed upload does not upsert
+    (tools-hub shared/storage.py::presigned_output_put_url; read from that
+    code, not observed here). Once designs stream mid-run most names are
+    already there by the end, so one batch would take the rest down with them.
+
+    Never raises. False also covers a PUT that timed out client-side after
+    the object landed; the caller lists such a design in failed_uploads, and
+    the result webhook still carries its structure inline.
+    """
+    if not (upload_endpoint and job_token and filename):
+        return False
+    if not (file_path and os.path.exists(file_path)):
+        logger.warning("No file on disk to upload for %s (%s)", filename, file_path)
+        return False
+    try:
+        url = request_upload_urls(
+            upload_endpoint, job_token, [filename],
+        ).get(filename)
+        if not url:
+            logger.warning("No upload URL returned for %s", filename)
+            return False
+        upload_output(url, file_path)
+        return True
+    except Exception as exc:
+        logger.warning("Upload of %s failed: %s", filename, exc)
+        return False
+
+
 def run_command(
     cmd: list[str], timeout: int = 3600, cwd: str | None = None,
 ) -> str:
@@ -460,10 +498,11 @@ def run_command(
             elapsed, head_tail,
         )
         # Two routes raise TimeoutExpired and only one of them killed the
-        # child: the in-loop deadline check (:437-440) kills before it raises,
-        # the proc.wait() after the readline loop (:446) does not. The caller
-        # catches the RuntimeError below and now reads output_dir instead of
-        # discarding it (:1806), so an un-killed PXDesign could still be
+        # child: the in-loop deadline check in the readline loop above kills
+        # before it raises, the ``proc.wait(timeout=...)`` after that loop does
+        # not. The caller catches the RuntimeError below and now reads
+        # output_dir instead of discarding it (``run_webhook_tier``'s
+        # ``except RuntimeError``), so an un-killed PXDesign could still be
         # writing into the directory being uploaded. Killing here covers both
         # routes; kill() is a no-op once the in-loop branch has reaped it. It
         # signals the direct child only -- whether pxdesign spawns workers
@@ -476,14 +515,15 @@ def run_command(
         except subprocess.TimeoutExpired:
             # Still running 30s after the kill. Leave run_command as
             # TimeoutExpired rather than the RuntimeError below so the caller,
-            # which catches RuntimeError only (:1806), does not fall through
-            # and read this directory; the failure reaches the handler at the
-            # end of run_webhook_tier (:2053) instead.
+            # which catches RuntimeError only, does not fall through
+            # and read this directory; the failure reaches the
+            # ``except Exception`` handler at the end of run_webhook_tier
+            # instead.
             # Build a fresh one from the configured timeout rather than
             # re-raising the 30s reap, whose message would report 30 seconds
             # as the run's own timeout. That handler uploads no design out of
             # a directory a live process still owns; the raw-capture tar in
-            # its finally (:2066) does still archive the work dir, but a
+            # that handler's ``finally`` does still archive the work dir, but a
             # diagnostic tarball is not a delivered structure. The type and
             # the number are pinned by
             # test_a_pxdesign_child_surviving_the_kill_keeps_its_output_unread.
@@ -1326,6 +1366,286 @@ def run_pxdesign(
         run_command(fallback_cmd, timeout=timeout, cwd=PXDESIGN_DIR)
 
 
+_RUNNING_STAGE = "Running PXDesign"
+
+# A streamed file must stop changing for this long before it is uploaded.
+_QUIESCE_SECONDS = 10.0
+
+
+def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
+    """Build the per-design heartbeat partial for one design.
+
+    The streamer and the webhook tier's upload loop both build it here, so
+    the two carry the same ``pdb_key`` for a design: tools-hub dedupes
+    ``_partial_candidates`` on that exact string
+    (tools-hub webhooks/modal.py::_hb_merge_inputs). ``pAE`` is the
+    interaction PAE in this tool's parser and travels as ``i_pae``.
+
+    A streamed design is passed an empty ``scores``: this repo reads
+    summary.csv only after PXDesign exits (``locate_summary_csv`` is called
+    from the webhook tier after ``run_pxdesign`` returns), and when PXDesign
+    itself writes the file is not readable from this repo -- so the streamer
+    has no score to pass. tools-hub keeps the measurements it is given and drops
+    ``filter_status`` from a partial when it rebuilds a stopped run
+    (tools-hub shared/job_recovery.py::_candidate_from_partial), so nulls
+    here do not become a verdict.
+    """
+    iptm_v = scores.get("ipTM", scores.get("iptm"))
+    plddt_v = scores.get("pLDDT", scores.get("plddt"))
+    ipae_v = scores.get("pAE", scores.get("i_pAE", scores.get("ipae")))
+
+    def _num(value) -> float | None:
+        return round(float(value), 4) if isinstance(value, (int, float)) else None
+
+    return {
+        "rank": rank,
+        "pdb_key": pdb_key,
+        "iptm": _num(iptm_v),
+        "plddt": _num(plddt_v),
+        "i_pae": _num(ipae_v),
+        "filter_status": scores.get("filter_status") or "pass",
+    }
+
+
+def _in_design_dir(path: str) -> bool:
+    """True when a path sits in one of PXDesign's design output directories.
+
+    find_design_files layers 1 and 2 only read those directories, but its
+    layer-3 fallback rglobs the whole output directory when they are still
+    empty -- which mid-run they are, before the first design is converted.
+    Streaming is the only caller that sees that state, so it filters here
+    rather than narrowing find_design_files, which runs after PXDesign exits
+    and whose fallback is the reason some runs delivered anything at all.
+
+    ``orig_designed`` is deliberately absent, though find_design_files layer 1
+    reads it (:1202). A design that PXDesign also copies to a passing-* or
+    converted_pdbs directory would be two files for one design, which _norm
+    cannot reconcile -- it resolves spellings of ONE path -- so both would land
+    in Storage under different names and a stopped run would show the design
+    twice (tools-hub shared/job_recovery.py::reconstruct returns one candidate
+    per matched partial). Whether that ever happens is unverified: this repo
+    cannot read PXDesign's write path, and find_design_files' own docstring
+    records converted_pdbs as the only observed layout. Leaving it out costs
+    at most streaming an orig_designed-only design, which the end-of-run
+    upload loop still delivers.
+
+    The three directories that ARE swept carry the same hazard between
+    them: a design present in converted_pdbs and in a passing-* directory
+    under a different basename is two paths _norm cannot reconcile, so it
+    would be streamed twice. A SHARED basename cannot: find_design_files
+    indexes on stem and name with setdefault, so its layer 1 (the passing-*
+    directories) wins that key and layer 2 adds no second path under it.
+    Whether the differing-basename case happens is unverified from this
+    repo -- PXDesign's write path is not readable here. Dropping the
+    passing-* directories would close it and lose every design of a run
+    whose converted_pdbs is empty, the case layer 1 reads them for; the
+    duplicate costs a repeated row on a stopped run's page.
+    """
+    parents = {part for part in Path(path).parts[:-1]}
+    return bool(parents & {
+        "converted_pdbs", "passing-AF2-IG-easy", "passing-AF2-IG",
+    })
+
+
+def _looks_complete(path: str, now: float) -> bool:
+    """True when a design file on disk looks fully written.
+
+    PXDesign's write path is not readable from this repo (upstream is cloned
+    into the image at build time), so unlike bindcraft there is no verified
+    two-step signal that a design is finished. Two heuristics instead: the
+    file has not changed for _QUIESCE_SECONDS, and a .pdb carries a trailing
+    END record. Both fail safe -- a file that misses either waits for the
+    next sweep, or for the upload loop that runs after PXDesign has exited.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return False
+    if stat.st_size <= 0 or now - stat.st_mtime < _QUIESCE_SECONDS:
+        return False
+    if not path.endswith(".pdb"):
+        # mmCIF has no trailing-record signal, so two checks instead, and
+        # neither alone is enough. The parse rejects a cut that lands
+        # mid-line (ValueError) and a header-only file (no residues), but
+        # not a cut at a line boundary inside the atom_site loop: that
+        # parses cleanly with fewer residues (measured on the 4-residue
+        # file backend/tests/pdb/test_pxdesign_save_as_you_go.py writes:
+        # 72 of its 74 lines -> 3 residues, no error). So the size has to
+        # hold still across two sweeps first, which a file still being
+        # written cannot do.
+        #
+        # ponytail: _QUIESCE_SECONDS gives 10s of mtime stillness, this
+        # gives one sweep interval (~60s) of size stillness. Ceiling: a
+        # writer stalled for a whole interval at a line boundary still
+        # passes both, and a file that passes is never re-checked -- it
+        # goes into ``shipped``, which the upload loop reads as
+        # ``already_streamed``. Closing that needs PXDesign's write
+        # protocol (a .done marker, or a temp name renamed on close),
+        # which this repo cannot see.
+        key = _norm(path)
+        with _NAME_LOCK:
+            seen = _LAST_SIZE.get(key)
+            _LAST_SIZE[key] = stat.st_size
+        if seen != stat.st_size:
+            return False
+        try:
+            import gemmi  # noqa: PLC0415
+
+            structure = gemmi.read_structure(path)
+        except Exception:
+            return False
+        return sum(len(chain) for model in structure for chain in model) > 0
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, stat.st_size - 512))
+            tail = fh.read()
+    except OSError:
+        return False
+    return any(line.startswith(b"END") for line in tail.splitlines())
+
+
+def _norm(path: str) -> str:
+    """Canonical key for one design file on disk.
+
+    The streamer finds a design through find_design_files while the upload
+    loop may reach the same file through resolve_design_local_path's
+    chosen_struct_path or summary_csv_dir branches, which can spell it
+    differently. Keying on the resolved path means one design gets one name
+    and is recognised as already shipped rather than uploaded twice.
+    """
+    try:
+        return os.path.realpath(path)
+    except OSError:
+        return path
+
+
+# ponytail: one lock for the one streamer a process has, not one per dict.
+_NAME_LOCK = threading.Lock()
+
+# Under _NAME_LOCK too: resolved design path -> the size the previous sweep
+# saw. Grows by one entry per design the run produces and is never pruned;
+# the process exits with the run.
+_LAST_SIZE: dict[str, int] = {}
+
+
+def _assign_upload_name(path: str, assigned: dict[str, str]) -> str:
+    """Stable upload filename for one design file; mutates ``assigned``.
+
+    The file's own basename, not design_{rank}: a rank is only known once
+    summary.csv has been parsed, which is after PXDesign exits, so a
+    rank-based name cannot be given to a design that streams mid-run. The
+    design files live under one converted_pdbs directory per seed, so two
+    seeds can hold the same stem; a repeat gets a __N suffix rather than
+    overwriting the first design's object in Storage.
+
+    Under _NAME_LOCK because both the sweep thread and the end-of-run
+    upload loop call this on the same ``assigned`` dict: the loop starts
+    after ``keepalive_thread.join(timeout=180)``, which can return with the
+    thread still alive. Read-then-write without it can hand two designs the
+    same name, and the second upload is then refused as an existing key.
+    """
+    with _NAME_LOCK:
+        key = _norm(path)
+        if key in assigned:
+            return assigned[key]
+        stem, ext = os.path.splitext(os.path.basename(path))
+        taken = set(assigned.values())
+        name = f"{stem}{ext}"
+        n = 2
+        while name in taken:
+            name = f"{stem}__{n}{ext}"
+            n += 1
+        assigned[key] = name
+        return name
+
+
+class _DesignStreamer:
+    """Ship each design PXDesign finishes while its subprocess still runs.
+
+    Without this every design reaches Storage only after PXDesign exits, so a
+    run the hub stops mid-pipeline delivers nothing it had already paid for:
+    the hub rebuilds a stopped run only from bytes already in Storage
+    (tools-hub shared/job_recovery.py::reconstruct).
+
+    ``shipped`` maps resolved local path (_norm) -> upload filename already in
+    Storage, and ``assigned`` holds every name handed out under the same key,
+    so a retry after a failed upload reuses the first name. ``stop`` is shared with the keepalive
+    thread that drives ``sweep``, so a stop lands between two designs.
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        upload_endpoint: str,
+        job_token: str,
+        webhook_url: str,
+        job_id: str,
+        num_designs: int,
+    ) -> None:
+        self.shipped: dict[str, str] = {}
+        self.assigned: dict[str, str] = {}
+        self.stop = threading.Event()
+        self._output_dir = output_dir
+        self._upload_endpoint = upload_endpoint
+        self._job_token = job_token
+        self._webhook_url = webhook_url
+        self._job_id = job_id
+        self._num_designs = num_designs
+
+    def sweep(self) -> tuple[str, int]:
+        """Upload and beat every newly finished design. Returns (stage, count).
+
+        Ranks are arrival order, 1..n; the final result re-ranks by ipTM.
+        One beat per design, landed or not, so a storage outage that makes
+        each upload burn its full timeout still reports progress between
+        designs instead of going quiet for the whole sweep. No deadline is
+        being met: tools-hub has no stale-heartbeat threshold (its only
+        reaper, cron/sweep_stuck_jobs.py::sweep_stuck_jobs, goes on job age,
+        default 6 h). new_candidate rides only on a
+        landed upload, so the live page is never handed a pdb_key whose bytes
+        are not in Storage yet.
+        """
+        now = time.time()
+        # Deduplicate BEFORE the filters, not after: find_design_files
+        # registers every file twice, under path.stem and path.name
+        # (:1208-1209), so .values() yields each path twice. Filtering first
+        # called _looks_complete twice per file in one sweep, and its
+        # size-stillness check passed on the second call -- "still across two
+        # sweeps" collapsed to "seen twice in one sweep", which is always
+        # true. Each file now gets exactly one _looks_complete per sweep.
+        found = {_norm(path) for path in find_design_files(self._output_dir).values()}
+        paths = sorted(
+            path for path in found
+            if path not in self.shipped
+            and _in_design_dir(path)
+            and _looks_complete(path, now)
+        )
+        if not paths:
+            return _RUNNING_STAGE, len(self.shipped)
+        for path in paths:
+            if self.stop.is_set():
+                logger.info("Design sweep stopping; %d shipped", len(self.shipped))
+                break
+            filename = _assign_upload_name(path, self.assigned)
+            landed = _upload_one(
+                self._upload_endpoint, self._job_token, filename, path,
+            )
+            if landed:
+                self.shipped[_norm(path)] = filename
+                logger.info(
+                    "Streamed design %s (%d so far) to the hub",
+                    filename, len(self.shipped),
+                )
+            send_heartbeat(
+                self._webhook_url, self._job_id, _RUNNING_STAGE,
+                len(self.shipped), max(self._num_designs, len(self.shipped)),
+                new_candidate=_new_candidate(
+                    len(self.shipped), filename, {},
+                ) if landed else None,
+            )
+        return _RUNNING_STAGE, len(self.shipped)
+
+
 def write_metrics_csv(csv_path: str, candidates: list[dict]) -> None:
     """Write a normalized metrics CSV summarizing all passing candidates."""
     with open(csv_path, "w", newline="") as fh:
@@ -1359,7 +1679,7 @@ def ship_raw(work_dir: str, dest: str = RAW_ARCHIVE_PATH) -> None:
     target) — with the tree in hand it would have been a local re-parse. Decide
     LOCALLY, where re-parsing is free.
 
-    Deliberately NOT gated on candidates, on success, or on filenames_to_upload.
+    Deliberately NOT gated on candidates, on success, or on what uploaded.
     A run that parses zero candidates uploads nothing and reports a clean
     "success", and that is precisely the run whose tree is worth having. Both
     tiers call this from their ``finally``, so it also fires on a crash.
@@ -1775,18 +2095,37 @@ def run_webhook_tier(job_payload: dict) -> None:
 
         validate_input(spec_path)
 
-        send_heartbeat(webhook_url, job_id, "Running PXDesign", 0, num_designs)
-        heartbeat_stop = threading.Event()
+        send_heartbeat(webhook_url, job_id, _RUNNING_STAGE, 0, num_designs)
+        streamer = _DesignStreamer(
+            output_dir, upload_endpoint, job_token,
+            webhook_url, job_id, num_designs,
+        )
+        heartbeat_stop = streamer.stop
 
+        # 60 s, not 300, because the sweep rides the beat: a finished design
+        # waits up to one interval before it is uploaded, and a run stopped
+        # inside that window loses it. tools-hub bills a live run from
+        # started_at on a cron tick, not per beat
+        # (tools-hub shared/jobs.py::meter_live_runs), so the cadence bounds
+        # lost work, not the money: the one beat that does gate money is the
+        # first, which stamps started_at and starts the meter
+        # (tools-hub webhooks/modal.py::_handle_heartbeat).
         def _keepalive() -> None:
-            while not heartbeat_stop.wait(300):
+            state = {"done": 0}
+            while not heartbeat_stop.wait(60):
                 try:
                     send_heartbeat(
-                        webhook_url, job_id,
-                        "Running PXDesign", 0, num_designs,
+                        webhook_url, job_id, _RUNNING_STAGE,
+                        state["done"], max(num_designs, state["done"]),
                     )
                 except Exception as exc:  # pragma: no cover
                     logger.warning("keepalive heartbeat failed: %s", exc)
+                if heartbeat_stop.is_set():
+                    break
+                try:
+                    _, state["done"] = streamer.sweep()
+                except Exception as exc:
+                    logger.warning("design sweep failed: %s", exc)
 
         keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
         keepalive_thread.start()
@@ -1794,8 +2133,8 @@ def run_webhook_tier(job_payload: dict) -> None:
         # under output_dir on the container's disk. Catch it here and fall
         # through to the parse/upload code below rather than letting it reach
         # the handler at the bottom of this function, so those designs are
-        # uploaded instead of discarded. run_command raises RuntimeError for
-        # both the timeout (:492) and a nonzero exit (:508); the payload
+        # uploaded instead of discarded. run_command raises RuntimeError on
+        # both of its failure routes, the timeout and a nonzero exit; the payload
         # recorded below is the one that handler posts today.
         early_failure: dict | None = None
         try:
@@ -1808,6 +2147,15 @@ def run_webhook_tier(job_payload: dict) -> None:
             early_failure = {"error": f"Pipeline crashed: {exc}"}
         finally:
             heartbeat_stop.set()
+            # Joined, not just signalled: a sweep may be mid-upload (the 30 s
+            # signing POST plus the 120 s PUT), and the upload loop below
+            # signs the same names.
+            keepalive_thread.join(timeout=180)
+            if keepalive_thread.is_alive():
+                logger.warning(
+                    "Keepalive thread still running after a 180s join; an "
+                    "in-flight design upload may overlap the final upload loop"
+                )
 
         if not early_failure:
             send_heartbeat(webhook_url, job_id, "PXDesign complete", num_designs, num_designs)
@@ -1862,7 +2210,6 @@ def run_webhook_tier(job_payload: dict) -> None:
         )
 
         candidates = []
-        filenames_to_upload = []
         summary_csv_dir = os.path.dirname(summary_csv) if summary_csv else ""
         for rank_idx, result in enumerate(passing):
             rank = rank_idx + 1
@@ -1879,18 +2226,23 @@ def run_webhook_tier(job_payload: dict) -> None:
                 "webhook tier: rank=%d design=%s -> %s (resolved via %s)",
                 rank, design_name, local_path, resolved_via,
             )
-            ext = Path(local_path).suffix if local_path else ".pdb"
-            upload_filename = f"design_{rank:03d}{ext}"
-            filenames_to_upload.append(upload_filename)
+            # The file's own basename, not design_{rank:03d}: a design the
+            # streamer already shipped must keep the name it is in Storage
+            # under, and a rank is unknown until this loop. A design with no
+            # file resolved keeps the rank-based name -- nothing is uploaded
+            # for it either way.
+            upload_filename = (
+                _assign_upload_name(local_path, streamer.assigned)
+                if local_path else f"design_{rank:03d}.pdb"
+            )
             # pdb_key MUST share basename with upload_filename so the
             # web service's resolver can find the Storage object at
-            # {user}/{job}/designs/<basename>. Using the original
-            # design_name here created a permanent 404 because the
-            # web service uploads as design_{rank:03d}.{pdb,cif} while
-            # design_name is the PXDesign internal label ("design_0",
-            # "design_run3-1", etc). The contracts module
-            # (/opt/contracts/rpc.py) defines the upload-URL exchange
-            # shape consumed by the web service.
+            # {user}/{job}/designs/<basename>. Using the PXDesign internal
+            # label ("design_0", "design_run3-1") created a permanent 404
+            # when the two names differed; they are now the same string by
+            # construction, taken from the uploaded file. The contracts
+            # module (/opt/contracts/rpc.py) defines the upload-URL
+            # exchange shape consumed by the web service.
             candidates.append({
                 "rank": rank,
                 "pdb_key": f"designs/{upload_filename}",
@@ -1899,93 +2251,72 @@ def run_webhook_tier(job_payload: dict) -> None:
                 "upload_filename": upload_filename,
             })
 
-            # Emit per-candidate heartbeat for live UI streaming. PXDesign
-            # scores expose ipTM / pLDDT / pAE (pAE is the interaction PAE
-            # in this tool's parser; mapped to the contract field i_pae).
-            # filter_status comes from the row (set by parse_summary_csv
-            # or the pilot fallback above); designs that cleared the pass
-            # gate without an explicit status default to "pass".
-            try:
-                scores_d = result.get("scores", {}) or {}
-                iptm_v = scores_d.get("ipTM", scores_d.get("iptm"))
-                plddt_v = scores_d.get("pLDDT", scores_d.get("plddt"))
-                ipae_v = scores_d.get(
-                    "pAE",
-                    scores_d.get("i_pAE", scores_d.get("ipae")),
-                )
-                fstatus = scores_d.get("filter_status") or "pass"
-                new_cand = {
-                    "rank": rank,
-                    "pdb_key": upload_filename,
-                    "iptm": round(float(iptm_v), 4) if isinstance(iptm_v, (int, float)) else None,
-                    "plddt": round(float(plddt_v), 4) if isinstance(plddt_v, (int, float)) else None,
-                    "i_pae": round(float(ipae_v), 4) if isinstance(ipae_v, (int, float)) else None,
-                    "filter_status": fstatus,
-                }
-            except Exception as exc:
-                logger.debug("Failed to build new_candidate: %s", exc)
-                new_cand = None
-            if webhook_url and job_id:
-                send_heartbeat(
-                    webhook_url, job_id, "Ranking candidates",
-                    rank, len(passing),
-                    new_candidate=new_cand,
-                )
-        if filenames_to_upload:
-            filenames_to_upload.append("metrics.csv")
-
-        upload_urls = {}
-        url_exchange_error = None
-        if upload_endpoint and job_token and filenames_to_upload:
-            try:
-                upload_urls = request_upload_urls(
-                    upload_endpoint, job_token, filenames_to_upload,
-                )
-            except RuntimeError as exc:
-                logger.error("Failed to get upload URLs: %s", exc)
-                url_exchange_error = str(exc)
+        # ----- Upload outputs -----
+        # Designs the streamer shipped mid-run are already in Storage and are
+        # not re-signed (see _upload_one). Every other file is uploaded one
+        # request at a time, and any that does not land goes into
+        # failed_uploads, which tools-hub reads to keep the inline b64
+        # structures instead of dropping them as "already in Storage"
+        # (_slim_result_for_persist). A silent no-upload would otherwise
+        # report a whole GPU run as a clean success with nothing delivered.
+        # The streamer's own beats use max(num_designs, shipped) for this,
+        # and the loop below reports max(shipped, delivered) against it: a
+        # run that streamed more files than summary.csv has rows would
+        # otherwise render "12/10 designs".
+        designs_total = max(num_designs, len(candidates), len(streamer.shipped))
+        send_heartbeat(
+            webhook_url, job_id, "Uploading results",
+            len(streamer.shipped), designs_total,
+        )
 
         failed_uploads: list[str] = []
-        if filenames_to_upload and not upload_urls:
-            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
-            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
-            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
-            # failed_uploads is surfaced to tools-hub via the result payload, where
-            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
-            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
-            # was only the silence.
-            logger.error(
-                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
-                "so the run is not reported as a clean success",
-                url_exchange_error or "empty response", len(filenames_to_upload),
-            )
-            failed_uploads.extend(filenames_to_upload)
-
+        delivered = 0
+        # Live ranks continue the streamer's arrival numbering, so a design it
+        # never reached does not take a rank a streamed design holds. The
+        # final result's ranks are the ipTM ranks above, not these.
+        live_rank = len(streamer.shipped)
         for candidate in candidates:
             upload_filename = candidate["upload_filename"]
             local_file = candidate.get("local_file")
-            if upload_filename in upload_urls and local_file and os.path.exists(local_file):
-                try:
-                    upload_output(upload_urls[upload_filename], local_file)
-                except RuntimeError as exc:
-                    logger.warning("Upload failed: %s", exc)
-                    failed_uploads.append(upload_filename)
+            already_streamed = bool(local_file) and _norm(local_file) in streamer.shipped
+            if already_streamed or _upload_one(
+                upload_endpoint, job_token, upload_filename, local_file or "",
+            ):
+                delivered += 1
+            else:
+                failed_uploads.append(upload_filename)
+
+            # new_candidate only for designs the streamer did not already
+            # offer: tools-hub drops a partial whose pdb_key it has seen
+            # (webhooks/modal.py::_hb_merge_inputs), so re-offering one is
+            # a no-op. PXDesign scores expose ipTM / pLDDT / pAE (pAE is the
+            # interaction PAE in this tool's parser, mapped to i_pae).
+            new_cand = None
+            if not already_streamed:
+                live_rank += 1
+                new_cand = _new_candidate(
+                    live_rank, upload_filename, candidate["scores"] or {},
+                )
+            if webhook_url and job_id:
+                send_heartbeat(
+                    webhook_url, job_id, "Uploading candidates",
+                    max(len(streamer.shipped), delivered), designs_total,
+                    new_candidate=new_cand,
+                )
 
         if candidates:
             metrics_csv_path = os.path.join(work_dir, "metrics.csv")
             write_metrics_csv(metrics_csv_path, candidates)
-            if "metrics.csv" in upload_urls:
-                try:
-                    upload_output(upload_urls["metrics.csv"], metrics_csv_path)
-                except RuntimeError as exc:
-                    logger.warning("Metrics CSV upload failed: %s", exc)
-                    failed_uploads.append("metrics.csv")
+            if not _upload_one(
+                upload_endpoint, job_token, "metrics.csv", metrics_csv_path,
+            ):
+                failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         # Inline base64 of each candidate's PDB so candidate_table.html can
         # render the 3D-viewer + PDB-download buttons (otherwise it falls
         # through to the em-dash branch keyed on pdb_content_b64). Mirrors
-        # the smoke path's _candidate_from_design helper at line 1045.
+        # the smoke path's ``_candidate_from_design`` helper.
         # PXDesign emits .cif or .pdb depending on output config — convert
         # CIF -> PDB via gemmi before encoding so the frontend mol viewer
         # gets a consistent format.
@@ -2025,14 +2356,14 @@ def run_webhook_tier(job_payload: dict) -> None:
         }
         if early_failure:
             # PXDesign died, so the run still reports its failure
-            # (post_webhook keys the status off "error", :543) and the designs
+            # (post_webhook keys the status off "error") and the designs
             # collected above are in Storage.
             #
-            # Uploading them is necessary but not yet sufficient: this repo's
-            # API serves a job's designs only once it completed
-            # (backend/jobs/router.py:706-707 and :543-544), so a failed
-            # run's designs sit in Storage unserved. Serving them is not part
-            # of this change.
+            # The bulk download serves them: its gate is
+            # ``_DELIVERS_DESIGNS``, which covers "failed" and "cancelled" as
+            # well as "complete" (backend/jobs/router.py::download_all_designs),
+            # and it lists the same ``outputs/`` prefix the uploads above wrote
+            # to (backend/storage/client.py::list_job_design_keys).
             #
             # The inline structures are left out because the backend reads a
             # webhook's output only when the run completed (the

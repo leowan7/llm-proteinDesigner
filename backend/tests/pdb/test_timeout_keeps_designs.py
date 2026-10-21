@@ -298,8 +298,11 @@ def test_a_pxdesign_timeout_still_fails_but_uploads_its_designs(monkeypatch):
     assert rec.webhooks, "run_webhook_tier posted no webhook"
     payload = rec.webhooks[-1]
 
+    # Each upload is named after the design's own file stem, not its rank:
+    # the streamer has to name a design mid-run, before any ranking exists
+    # (run_pipeline.py::_assign_upload_name).
     assert rec.upload_names == [
-        "design_001.pdb", "design_002.pdb", "metrics.csv",
+        "design_0.pdb", "design_1.pdb", "metrics.csv",
     ]
     assert _TIMEOUT_TEXT in payload["error"]
     assert payload["partial"] is True

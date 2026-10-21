@@ -111,10 +111,12 @@ def test_every_design_pdb_is_listed_sorted_and_across_pages():
 def test_a_cif_design_is_delivered_too():
     """BoltzGen and PxDesign can save a design as a ``.cif``.
 
-    Both name each upload after the file their pipeline produced --
-    ``design_{rank:03d}{ext}`` at ``docker/boltzgen/run_pipeline.py:2043-2044``
-    and ``docker/pxdesign/run_pipeline.py:1882-1883`` -- so a run of either
-    whose designs are CIFs would deliver nothing under a ``.pdb``-only filter.
+    Both name each upload after the file their pipeline produced -- BoltzGen
+    as ``design_{rank:03d}{ext}`` (``docker/boltzgen/run_pipeline.py:2043-2044``)
+    and PxDesign under that file's own basename
+    (``docker/pxdesign/run_pipeline.py::_assign_upload_name``) -- so a run of
+    either whose designs are CIFs would deliver nothing under a ``.pdb``-only
+    filter.
     """
     client, _ = _s3_yielding(
         {
