@@ -394,7 +394,7 @@ def test_an_rfantibody_timeout_still_fails_but_uploads_its_designs(
     payload = rec.webhooks[-1]
 
     assert rec.upload_names == [
-        "design_001.pdb", "design_002.pdb", "metrics.csv",
+        "design_0.pdb", "design_1.pdb", "metrics.csv",
     ]
     assert payload["error"].startswith("RF2 validation failed:")
     assert _TIMEOUT_TEXT in payload["error"]
@@ -483,7 +483,7 @@ def test_an_rfantibody_qvextract_failure_still_uploads_the_pdbs_on_disk(
     payload = rec.webhooks[-1]
 
     assert rec.upload_names == [
-        "design_001.pdb", "design_002.pdb", "metrics.csv",
+        "design_0.pdb", "design_1.pdb", "metrics.csv",
     ]
     assert payload["error"].startswith("PDB extraction failed:")
     assert _TIMEOUT_TEXT in payload["error"]
