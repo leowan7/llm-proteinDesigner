@@ -1428,6 +1428,18 @@ def _in_design_dir(path: str) -> bool:
     records converted_pdbs as the only observed layout. Leaving it out costs
     at most streaming an orig_designed-only design, which the end-of-run
     upload loop still delivers.
+
+    The three directories that ARE swept carry the same hazard between
+    them: a design present in converted_pdbs and in a passing-* directory
+    under a different basename is two paths _norm cannot reconcile, so it
+    would be streamed twice. A SHARED basename cannot: find_design_files
+    indexes on stem and name with setdefault, so its layer 1 (the passing-*
+    directories) wins that key and layer 2 adds no second path under it.
+    Whether the differing-basename case happens is unverified from this
+    repo -- PXDesign's write path is not readable here. Dropping the
+    passing-* directories would close it and lose every design of a run
+    whose converted_pdbs is empty, the case layer 1 reads them for; the
+    duplicate costs a repeated row on a stopped run's page.
     """
     parents = {part for part in Path(path).parts[:-1]}
     return bool(parents & {
@@ -1452,7 +1464,20 @@ def _looks_complete(path: str, now: float) -> bool:
     if stat.st_size <= 0 or now - stat.st_mtime < _QUIESCE_SECONDS:
         return False
     if not path.endswith(".pdb"):
-        return True
+        # mmCIF has no trailing-record signal, so the check is a parse: a
+        # file still being written raises (verified against a truncated
+        # atom_site loop: ValueError), and one that parses to no residues
+        # is not a design yet. Ceiling: gemmi is tolerant, so a truncation
+        # that still parses to residues can pass, and a file that passes
+        # here is never re-checked -- it goes into ``shipped``, which the
+        # upload loop reads as ``already_streamed``.
+        try:
+            import gemmi  # noqa: PLC0415
+
+            structure = gemmi.read_structure(path)
+        except Exception:
+            return False
+        return sum(len(chain) for model in structure for chain in model) > 0
     try:
         with open(path, "rb") as fh:
             fh.seek(max(0, stat.st_size - 512))
@@ -1477,6 +1502,10 @@ def _norm(path: str) -> str:
         return path
 
 
+# ponytail: one lock for the one streamer a process has, not one per dict.
+_NAME_LOCK = threading.Lock()
+
+
 def _assign_upload_name(path: str, assigned: dict[str, str]) -> str:
     """Stable upload filename for one design file; mutates ``assigned``.
 
@@ -1486,19 +1515,26 @@ def _assign_upload_name(path: str, assigned: dict[str, str]) -> str:
     design files live under one converted_pdbs directory per seed, so two
     seeds can hold the same stem; a repeat gets a __N suffix rather than
     overwriting the first design's object in Storage.
+
+    Under _NAME_LOCK because both the sweep thread and the end-of-run
+    upload loop call this on the same ``assigned`` dict: the loop starts
+    after ``keepalive_thread.join(timeout=180)``, which can return with the
+    thread still alive. Read-then-write without it can hand two designs the
+    same name, and the second upload is then refused as an existing key.
     """
-    key = _norm(path)
-    if key in assigned:
-        return assigned[key]
-    stem, ext = os.path.splitext(os.path.basename(path))
-    taken = set(assigned.values())
-    name = f"{stem}{ext}"
-    n = 2
-    while name in taken:
-        name = f"{stem}__{n}{ext}"
-        n += 1
-    assigned[key] = name
-    return name
+    with _NAME_LOCK:
+        key = _norm(path)
+        if key in assigned:
+            return assigned[key]
+        stem, ext = os.path.splitext(os.path.basename(path))
+        taken = set(assigned.values())
+        name = f"{stem}{ext}"
+        n = 2
+        while name in taken:
+            name = f"{stem}__{n}{ext}"
+            n += 1
+        assigned[key] = name
+        return name
 
 
 class _DesignStreamer:
@@ -2193,7 +2229,11 @@ def run_webhook_tier(job_payload: dict) -> None:
         # structures instead of dropping them as "already in Storage"
         # (_slim_result_for_persist). A silent no-upload would otherwise
         # report a whole GPU run as a clean success with nothing delivered.
-        designs_total = max(num_designs, len(candidates))
+        # The streamer's own beats use max(num_designs, shipped) for this,
+        # and the loop below reports max(shipped, delivered) against it: a
+        # run that streamed more files than summary.csv has rows would
+        # otherwise render "12/10 designs".
+        designs_total = max(num_designs, len(candidates), len(streamer.shipped))
         send_heartbeat(
             webhook_url, job_id, "Uploading results",
             len(streamer.shipped), designs_total,

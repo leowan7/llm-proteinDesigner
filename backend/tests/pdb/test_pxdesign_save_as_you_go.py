@@ -33,6 +33,8 @@ import time
 
 import pytest
 
+gemmi = pytest.importorskip("gemmi")
+
 _REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..")
 )
@@ -219,15 +221,49 @@ def test_an_empty_file_is_not_complete(tmp_path):
     assert pxd._looks_complete(str(path), time.time()) is False
 
 
-def test_a_quiesced_cif_is_complete_without_an_end_record(tmp_path):
-    """CIF has no END record, so quiescence alone carries it."""
-    design_dir = tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
-    design_dir.mkdir(parents=True)
-    path = design_dir / "sample_0.cif"
-    path.write_text("data_sample\n_atom_site.id 1\n")
+def _write_cif(design_dir, stem, truncate_to=1.0):
+    """Write a gemmi-canonical mmCIF design, optionally cut short.
+
+    Written by gemmi rather than by hand so the complete case is a file
+    gemmi itself accepts; ``truncate_to`` is the fraction kept, which is
+    what a design still being written looks like on disk.
+    """
+    design_dir.mkdir(parents=True, exist_ok=True)
+    pdb = design_dir / f"{stem}.src.pdb"
+    pdb.write_text(
+        "ATOM      1  N   ALA A   1      11.104   6.134  -6.504  1.00  0.00           N\n"
+        "ATOM      2  CA  ALA A   1      11.639   6.071  -5.147  1.00  0.00           C\n"
+        "END\n"
+    )
+    structure = gemmi.read_structure(str(pdb))
+    structure.setup_entities()
+    text = structure.make_mmcif_document().as_string()
+    path = design_dir / f"{stem}.cif"
+    path.write_text(text[: int(len(text) * truncate_to)])
     old = time.time() - (pxd._QUIESCE_SECONDS + 5)
     os.utime(path, (old, old))
+    return path
+
+
+def test_a_quiesced_cif_that_parses_is_complete(tmp_path):
+    """CIF has no END record, so the second signal is a gemmi parse."""
+    design_dir = tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
+    path = _write_cif(design_dir, "sample_0")
     assert pxd._looks_complete(str(path), time.time()) is True
+
+
+def test_a_cif_cut_off_mid_write_is_not_complete(tmp_path):
+    """A stall longer than _QUIESCE_SECONDS used to ship this truncated.
+
+    It stays shipped once it does: the path goes into ``shipped``, and the
+    end-of-run upload loop reads that as ``already_streamed`` and uploads
+    nothing for it. So the parse has to reject it here or not at all.
+    """
+    design_dir = tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
+    path = _write_cif(design_dir, "sample_0", truncate_to=0.5)
+    assert path.stat().st_size > 0
+    assert pxd._looks_complete(str(path), time.time()) is False
+
 
 
 def test_only_files_in_a_design_directory_are_swept(tmp_path, monkeypatch):
@@ -342,6 +378,33 @@ def test_two_files_sharing_a_stem_get_distinct_names(tmp_path):
     assert pxd._assign_upload_name(b, assigned) == "spec_sample_0__2.pdb"
     # Stable: the same path asks again and gets the name it already has.
     assert pxd._assign_upload_name(a, assigned) == "spec_sample_0.pdb"
+
+
+def test_a_name_is_handed_out_under_the_lock(tmp_path, monkeypatch):
+    """Both the sweep thread and the upload loop call this on one dict.
+
+    The loop starts after ``keepalive_thread.join(timeout=180)``, which can
+    return with the sweep still running, and read-then-write without the lock
+    can hand two designs one name. Asserted by holding, not by racing: a race
+    test would be flaky in both directions.
+    """
+    held = []
+    real = pxd._NAME_LOCK
+
+    class _Watched:
+        def __enter__(self):
+            held.append("in")
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            held.append("out")
+            return real.__exit__(*exc)
+
+    monkeypatch.setattr(pxd, "_NAME_LOCK", _Watched())
+    path = str(tmp_path / "sample_0.pdb")
+
+    assert pxd._assign_upload_name(path, {}) == "sample_0.pdb"
+    assert held == ["in", "out"]
 
 
 def test_a_stop_lands_between_two_designs(tmp_path, monkeypatch):
