@@ -1464,13 +1464,30 @@ def _looks_complete(path: str, now: float) -> bool:
     if stat.st_size <= 0 or now - stat.st_mtime < _QUIESCE_SECONDS:
         return False
     if not path.endswith(".pdb"):
-        # mmCIF has no trailing-record signal, so the check is a parse: a
-        # file still being written raises (verified against a truncated
-        # atom_site loop: ValueError), and one that parses to no residues
-        # is not a design yet. Ceiling: gemmi is tolerant, so a truncation
-        # that still parses to residues can pass, and a file that passes
-        # here is never re-checked -- it goes into ``shipped``, which the
-        # upload loop reads as ``already_streamed``.
+        # mmCIF has no trailing-record signal, so two checks instead, and
+        # neither alone is enough. The parse rejects a cut that lands
+        # mid-line (ValueError) and a header-only file (no residues), but
+        # not a cut at a line boundary inside the atom_site loop: that
+        # parses cleanly with fewer residues (measured on the 4-residue
+        # file backend/tests/pdb/test_pxdesign_save_as_you_go.py writes:
+        # 72 of its 75 lines -> 3 residues, no error). So the size has to
+        # hold still across two sweeps first, which a file still being
+        # written cannot do.
+        #
+        # ponytail: _QUIESCE_SECONDS gives 10s of mtime stillness, this
+        # gives one sweep interval (~60s) of size stillness. Ceiling: a
+        # writer stalled for a whole interval at a line boundary still
+        # passes both, and a file that passes is never re-checked -- it
+        # goes into ``shipped``, which the upload loop reads as
+        # ``already_streamed``. Closing that needs PXDesign's write
+        # protocol (a .done marker, or a temp name renamed on close),
+        # which this repo cannot see.
+        key = _norm(path)
+        with _NAME_LOCK:
+            seen = _LAST_SIZE.get(key)
+            _LAST_SIZE[key] = stat.st_size
+        if seen != stat.st_size:
+            return False
         try:
             import gemmi  # noqa: PLC0415
 
@@ -1504,6 +1521,11 @@ def _norm(path: str) -> str:
 
 # ponytail: one lock for the one streamer a process has, not one per dict.
 _NAME_LOCK = threading.Lock()
+
+# Under _NAME_LOCK too: resolved design path -> the size the previous sweep
+# saw. Grows by one entry per design the run produces and is never pruned;
+# the process exits with the run.
+_LAST_SIZE: dict[str, int] = {}
 
 
 def _assign_upload_name(path: str, assigned: dict[str, str]) -> str:
