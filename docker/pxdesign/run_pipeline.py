@@ -1383,9 +1383,10 @@ def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
 
     A streamed design is passed an empty ``scores``: this repo reads
     summary.csv only after PXDesign exits (``locate_summary_csv`` is called
-    from the webhook tier after ``run_pxdesign`` returns), and when PXDesign
-    itself writes the file is not readable from this repo -- so the streamer
-    has no score to pass. tools-hub keeps the measurements it is given and drops
+    from the webhook tier after ``run_pxdesign`` returns), and PXDesign
+    writes it only after every design of the task (upstream
+    pxdesign/runner/helpers.py:403, :494) -- so the streamer has no score to
+    pass. tools-hub keeps the measurements it is given and drops
     ``filter_status`` from a partial when it rebuilds a stopped run
     (tools-hub shared/job_recovery.py::_candidate_from_partial), so nulls
     here do not become a verdict.
@@ -1423,9 +1424,9 @@ def _in_design_dir(path: str) -> bool:
     cannot reconcile -- it resolves spellings of ONE path -- so both would land
     in Storage under different names and a stopped run would show the design
     twice (tools-hub shared/job_recovery.py::reconstruct returns one candidate
-    per matched partial). Whether that ever happens is unverified: this repo
-    cannot read PXDesign's write path, and find_design_files' own docstring
-    records converted_pdbs as the only observed layout. Leaving it out costs
+    per matched partial). It does happen: upstream writes every rank to
+    orig_designed and a passing rank again to passing-AF2-IG-easy
+    (pxdesign/runner/helpers.py:375, :387). Leaving it out costs
     at most streaming an orig_designed-only design, which the end-of-run
     upload loop still delivers.
 
@@ -1435,8 +1436,10 @@ def _in_design_dir(path: str) -> bool:
     would be streamed twice. A SHARED basename cannot: find_design_files
     indexes on stem and name with setdefault, so its layer 1 (the passing-*
     directories) wins that key and layer 2 adds no second path under it.
-    Whether the differing-basename case happens is unverified from this
-    repo -- PXDesign's write path is not readable here. Dropping the
+    Whether the differing-basename case happens is unverified: upstream
+    names passing CIFs rank_<k>.cif (pxdesign/utils/pipeline.py:179) and
+    PXDesignBench names converted_pdbs files from its own prefix
+    (pxdbench/utils.py:244), and no run has shown both. Dropping the
     passing-* directories would close it and lose every design of a run
     whose converted_pdbs is empty, the case layer 1 reads them for; the
     duplicate costs a repeated row on a stopped run's page.
