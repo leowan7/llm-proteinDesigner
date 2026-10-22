@@ -17,9 +17,10 @@ Three invariants:
    (tools-hub ``webhooks/modal.py::_hb_merge_inputs``), so two spellings of
    one design would list it twice.
 3. A design is only offered to the live page once its bytes landed, and only
-   once it looks fully written. PXDesign's own write path is not readable
-   from this repo, so completeness is the heuristic in ``_looks_complete``;
-   these tests pin that heuristic's behaviour, not upstream's write order.
+   once it looks fully written, by ``_looks_complete``. A .cif is gated on
+   its task's summary.csv, which upstream PXDesign writes after every
+   rank_<k>.cif (see that function's docstring); these tests pin the gate,
+   not upstream's write order.
 
 Its own file, like the sibling tool tests in this directory, so in-flight
 branches do not collide at one file's end on merge.
@@ -209,26 +210,47 @@ def test_a_pdb_still_being_written_is_not_complete(tmp_path):
     assert pxd._looks_complete(path, time.time()) is False
 
 
-def test_an_empty_file_is_not_complete(tmp_path):
-    """A .cif, so only the size check can reject it: an empty .pdb is rejected
-    by the END check instead, which leaves the size check unproven."""
-    design_dir = tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
-    design_dir.mkdir(parents=True)
-    path = design_dir / "sample_0.cif"
-    path.write_bytes(b"")
-    old = time.time() - (pxd._QUIESCE_SECONDS + 5)
-    os.utime(path, (old, old))
-    assert pxd._looks_complete(str(path), time.time()) is False
-
-
 def _cif_dir(tmp_path):
-    return tmp_path / "global_run_0" / "spec" / "seed_000" / "converted_pdbs"
+    """Where upstream writes the .cif designs the sweep can reach."""
+    return tmp_path / "design_outputs" / "spec" / "passing-AF2-IG-easy"
+
+
+def _write_summary(design_dir):
+    """summary.csv beside the passing-* directory, as upstream writes it."""
+    (design_dir.parent / "summary.csv").write_text(
+        "rank,name" + chr(10) + "1,spec_sample_0" + chr(10)
+    )
 
 
 def _quiesce(path):
     """Age a file past _QUIESCE_SECONDS so only the other checks decide."""
     old = time.time() - (pxd._QUIESCE_SECONDS + 5)
     os.utime(path, (old, old))
+
+
+def _cut_at_a_line_boundary(path):
+    """Keep all but the last three lines: still valid mmCIF, fewer residues."""
+    full = path.read_text()
+    rows = full.split(chr(10))
+    path.write_text(chr(10).join(rows[: len(rows) - 3]) + chr(10))
+    _quiesce(path)
+    structure = gemmi.read_structure(str(path))
+    residues = sum(len(chain) for model in structure for chain in model)
+    assert 0 < residues < 4  # the premise: a parse waves this file through
+    return full
+
+
+def test_an_empty_file_is_not_complete(tmp_path):
+    """A .cif with its summary.csv present, so only the size check can
+    reject it: an empty .pdb is rejected by the END check instead, which
+    leaves the size check unproven."""
+    design_dir = _cif_dir(tmp_path)
+    design_dir.mkdir(parents=True)
+    _write_summary(design_dir)
+    path = design_dir / "sample_0.cif"
+    path.write_bytes(b"")
+    _quiesce(path)
+    assert pxd._looks_complete(str(path), time.time()) is False
 
 
 def _write_cif(design_dir, stem, truncate_to=1.0):
@@ -267,55 +289,32 @@ def _write_cif(design_dir, stem, truncate_to=1.0):
     _quiesce(path)
     return path
 
-def test_a_quiesced_cif_is_complete_once_its_size_holds_still(tmp_path):
-    """CIF has no END record, so completeness is two signals: the size is
-    the same as the previous sweep saw, and gemmi parses residues out of it.
-    The first sweep to see a path has no previous size, so it always defers.
-    """
+def test_a_finished_cif_waits_for_its_summary_csv(tmp_path):
+    """Nothing in the file says it is closed; summary.csv, written after
+    every rank_<k>.cif, does."""
     path = _write_cif(_cif_dir(tmp_path), "sample_0")
     assert pxd._looks_complete(str(path), time.time()) is False
+    _write_summary(_cif_dir(tmp_path))
     assert pxd._looks_complete(str(path), time.time()) is True
 
 
 def test_a_cif_cut_off_mid_line_is_not_complete(tmp_path):
-    """A stall longer than _QUIESCE_SECONDS used to ship this truncated.
-
-    It stays shipped once it does: the path goes into ``shipped``, and the
-    end-of-run upload loop reads that as ``already_streamed`` and uploads
-    nothing for it. So it has to be rejected here or not at all. Rejected
-    by the parse -- a cut inside a line is not valid mmCIF.
-    """
     path = _write_cif(_cif_dir(tmp_path), "sample_0", truncate_to=0.5)
     assert path.stat().st_size > 0
     assert pxd._looks_complete(str(path), time.time()) is False
     assert pxd._looks_complete(str(path), time.time()) is False
 
 
-def test_a_cif_still_growing_at_a_line_boundary_is_not_complete(tmp_path):
-    """The case the parse cannot see, which is why the size check exists.
-
-    Cut at a line boundary inside the atom_site loop, the file is valid
-    mmCIF with fewer residues: this helper's 4-residue design keeps 3 of
-    them, and gemmi raises nothing. Only the size moving between two
-    sweeps marks it as still being written.
+def test_a_stalled_cif_cut_at_a_line_boundary_is_never_complete(tmp_path):
+    """The hole the size-stillness heuristic left: a writer stalled at a line
+    boundary leaves a file that parses and holds its size across sweeps.
+    That heuristic deferred the first call and passed the second; without
+    summary.csv no number of calls passes it now.
     """
     path = _write_cif(_cif_dir(tmp_path), "sample_0")
-    full = path.read_text()
-    rows = full.split(chr(10))
-    partial = chr(10).join(rows[: len(rows) - 3]) + chr(10)
-    path.write_text(partial)
-    _quiesce(path)
-
-    # The premise: this truncation is what the parse alone waves through.
-    structure = gemmi.read_structure(str(path))
-    residues = sum(len(chain) for model in structure for chain in model)
-    assert 0 < residues < 4
-
-    assert pxd._looks_complete(str(path), time.time()) is False  # unseen size
-    path.write_text(full)  # the writer finishes between the two sweeps
-    _quiesce(path)
-    assert pxd._looks_complete(str(path), time.time()) is False  # size moved
-    assert pxd._looks_complete(str(path), time.time()) is True
+    _cut_at_a_line_boundary(path)
+    for _ in range(3):
+        assert pxd._looks_complete(str(path), time.time()) is False
 
 
 def test_only_files_in_a_design_directory_are_swept(tmp_path, monkeypatch):
@@ -364,37 +363,28 @@ def test_sweep_ships_each_finished_design_once(tmp_path, monkeypatch):
     assert rec.streamed[0]["plddt"] is None
 
 
-def test_sweep_waits_a_whole_beat_before_shipping_a_cif(tmp_path, monkeypatch):
-    """The size-stillness check has to survive its own caller.
-
-    find_design_files registers every file twice, under stem and name, so
-    sweep sees each path twice per pass. Filtering before deduplicating
-    called _looks_complete twice in one sweep, the second call matched the
-    size the first had just recorded, and a line-boundary-truncated cif
-    shipped on sweep 1 -- then sat in shipped, which the end-of-run loop
-    reads as already_streamed. Direct _looks_complete tests cannot see
-    this; only one through sweep() can.
+def test_sweep_ships_a_cif_only_after_its_summary_csv(tmp_path, monkeypatch):
+    """Through sweep(), because a shipped path is never re-checked: it goes
+    into ``shipped``, which the end-of-run loop reads as already_streamed.
+    A truncated cif shipped once is delivered for good.
     """
     rec = _Recorder()
     rec.install(monkeypatch)
     design_dir = _cif_dir(tmp_path)
     path = _write_cif(design_dir, "spec_sample_0")
-    full = path.read_text()
-    rows = full.split(chr(10))
-    path.write_text(chr(10).join(rows[: len(rows) - 3]) + chr(10))
-    _quiesce(path)
+    full = _cut_at_a_line_boundary(path)
     streamer = _streamer(str(tmp_path))
 
     assert streamer.sweep() == (pxd._RUNNING_STAGE, 0)
+    assert streamer.sweep() == (pxd._RUNNING_STAGE, 0)  # stalled, size held
     assert rec.upload_names == []
 
-    path.write_text(full)  # the writer finishes between two sweeps
+    path.write_text(full)  # the writer finishes, then upstream writes summary
     _quiesce(path)
-    assert streamer.sweep() == (pxd._RUNNING_STAGE, 0)  # size moved
-    assert rec.upload_names == []
-
+    _write_summary(design_dir)
     assert streamer.sweep() == (pxd._RUNNING_STAGE, 1)
     assert rec.upload_names == ["spec_sample_0.cif"]
+
 
 def test_a_second_sweep_with_nothing_new_ships_nothing(tmp_path, monkeypatch):
     rec = _Recorder()

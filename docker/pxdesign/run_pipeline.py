@@ -1450,12 +1450,27 @@ def _in_design_dir(path: str) -> bool:
 def _looks_complete(path: str, now: float) -> bool:
     """True when a design file on disk looks fully written.
 
-    PXDesign's write path is not readable from this repo (upstream is cloned
-    into the image at build time), so unlike bindcraft there is no verified
-    two-step signal that a design is finished. Two heuristics instead: the
-    file has not changed for _QUIESCE_SECONDS, and a .pdb carries a trailing
-    END record. Both fail safe -- a file that misses either waits for the
-    next sweep, or for the upload loop that runs after PXDesign has exited.
+    Both branches fail safe: a file that misses its check waits for the next
+    sweep, or for the upload loop that runs after PXDesign has exited.
+
+    A .pdb is checked for a trailing END record after _QUIESCE_SECONDS of
+    mtime stillness. The swept .pdb files are written by PXDesignBench
+    (v0.1.2, pxdbench/utils.py:convert_cifs_to_pdbs) through Biopython's
+    PDBIO, one file per sample, straight to its final name.
+
+    A .cif is complete only once the summary.csv of its task exists. At the
+    upstream pin (Dockerfile.modal PXDESIGN_SHA f788441) the only .cif files
+    in a swept directory are ``design_outputs/<task>/passing-AF2-IG-easy/
+    rank_<k>.cif`` (pxdbench writes only .pdb into converted_pdbs, and no
+    upstream path is named passing-AF2-IG). save_af2_docked writes each one
+    twice at its final name, with no temp file and no marker: pdb_to_cif,
+    then add_terms_to_cif re-opens the same path with "w"
+    (pxdesign/utils/pipeline.py:205-206, :107). A cut at a line boundary is
+    valid mmCIF with fewer residues, so no parse can tell it from a finished
+    file. save_top_designs (pxdesign/runner/helpers.py:563) runs once, on
+    rank 0, at the end of the run; process_preview_results /
+    process_extended_results write every rank_<k>.cif of the task first and
+    ``<task>/summary.csv`` after (helpers.py:403, :494).
     """
     try:
         stat = os.stat(path)
@@ -1464,37 +1479,10 @@ def _looks_complete(path: str, now: float) -> bool:
     if stat.st_size <= 0 or now - stat.st_mtime < _QUIESCE_SECONDS:
         return False
     if not path.endswith(".pdb"):
-        # mmCIF has no trailing-record signal, so two checks instead, and
-        # neither alone is enough. The parse rejects a cut that lands
-        # mid-line (ValueError) and a header-only file (no residues), but
-        # not a cut at a line boundary inside the atom_site loop: that
-        # parses cleanly with fewer residues (measured on the 4-residue
-        # file backend/tests/pdb/test_pxdesign_save_as_you_go.py writes:
-        # 72 of its 74 lines -> 3 residues, no error). So the size has to
-        # hold still across two sweeps first, which a file still being
-        # written cannot do.
-        #
-        # ponytail: _QUIESCE_SECONDS gives 10s of mtime stillness, this
-        # gives one sweep interval (~60s) of size stillness. Ceiling: a
-        # writer stalled for a whole interval at a line boundary still
-        # passes both, and a file that passes is never re-checked -- it
-        # goes into ``shipped``, which the upload loop reads as
-        # ``already_streamed``. Closing that needs PXDesign's write
-        # protocol (a .done marker, or a temp name renamed on close),
-        # which this repo cannot see.
-        key = _norm(path)
-        with _NAME_LOCK:
-            seen = _LAST_SIZE.get(key)
-            _LAST_SIZE[key] = stat.st_size
-        if seen != stat.st_size:
-            return False
-        try:
-            import gemmi  # noqa: PLC0415
-
-            structure = gemmi.read_structure(path)
-        except Exception:
-            return False
-        return sum(len(chain) for model in structure for chain in model) > 0
+        # ponytail: summary.csv comes after every rank_<k>.cif, at the end of
+        # the run, so a .cif streams only between then and PXDesign exiting.
+        # Upgrade path is a per-file marker upstream, which the pin lacks.
+        return Path(path).parent.parent.joinpath("summary.csv").is_file()
     try:
         with open(path, "rb") as fh:
             fh.seek(max(0, stat.st_size - 512))
@@ -1521,11 +1509,6 @@ def _norm(path: str) -> str:
 
 # ponytail: one lock for the one streamer a process has, not one per dict.
 _NAME_LOCK = threading.Lock()
-
-# Under _NAME_LOCK too: resolved design path -> the size the previous sweep
-# saw. Grows by one entry per design the run produces and is never pruned;
-# the process exits with the run.
-_LAST_SIZE: dict[str, int] = {}
 
 
 def _assign_upload_name(path: str, assigned: dict[str, str]) -> str:
@@ -1606,13 +1589,9 @@ class _DesignStreamer:
         are not in Storage yet.
         """
         now = time.time()
-        # Deduplicate BEFORE the filters, not after: find_design_files
-        # registers every file twice, under path.stem and path.name
-        # (:1208-1209), so .values() yields each path twice. Filtering first
-        # called _looks_complete twice per file in one sweep, and its
-        # size-stillness check passed on the second call -- "still across two
-        # sweeps" collapsed to "seen twice in one sweep", which is always
-        # true. Each file now gets exactly one _looks_complete per sweep.
+        # find_design_files registers every file twice, under path.stem and
+        # path.name (find_design_files layer 1), so .values() yields each
+        # path twice; the set leaves one per file.
         found = {_norm(path) for path in find_design_files(self._output_dir).values()}
         paths = sorted(
             path for path in found
