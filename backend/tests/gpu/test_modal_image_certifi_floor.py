@@ -7,7 +7,9 @@ import pytest
 _MODAL_DIR = Path(__file__).resolve().parents[3] / "infrastructure" / "modal"
 _CERTIFI = '"certifi==2026.10.23"'
 
-# Installer per tool, matching the env the pipeline runs in (each app's _PYTHON).
+# Installer per tool, targeting the env of each app's _PYTHON. rfantibody's _PYTHON is
+# "python3", which resolves to /opt/rfantibody/.venv/bin/python because
+# docker/rfantibody/Dockerfile.modal:55 puts the venv first on PATH.
 _INSTALLER = {
     "rfdiffusion": "python3 -m pip install",
     "pxdesign": "python3 -m pip install",
