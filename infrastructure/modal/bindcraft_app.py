@@ -95,6 +95,8 @@ def _merged_environment(payload: dict) -> dict[str, str]:
 
 image = (
     modal.Image.from_dockerfile(_DOCKERFILE, add_python=None)
+    # certifi floor: 2026.10.23 removes the emSign Root CA - C1 and ECC C3 roots.
+    .run_commands('/miniforge3/envs/BindCraft/bin/pip install --no-cache-dir "certifi==2026.10.23"')
     .add_local_file(_RUN_PIPELINE_LOCAL, _RUN_PIPELINE_REMOTE, copy=True)
     # Vendored sync from tools-hub/contracts/ — see contracts/__init__.py header.
     .add_local_dir("./contracts", "/opt/contracts", copy=True)
