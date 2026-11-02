@@ -109,6 +109,12 @@ async def list_users(
     # GROUP BY produced a second group with a NULL customer -- listing any user
     # who belongs to a team org twice, once as payment_status "none", and
     # spending LIMIT rows on the duplicate.
+    #
+    # total_spend counts a failed or cancelled job only when jobs.metered is
+    # set (billing/stripe_client.py::mark_metered): gpu_cost_usd alone is
+    # written on unbilled terminal jobs too. The same predicate is in
+    # get_revenue and user/router.py::get_usage
+    # (tests/integration/test_metered_spend_reads.py).
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -120,7 +126,10 @@ async def list_users(
                     public.user_stripe_customer(u.id) AS stripe_customer_id,
                     a.last_sign_in_at AS last_login,
                     COUNT(DISTINCT j.id) AS job_count,
-                    COALESCE(SUM(j.gpu_cost_usd) FILTER (WHERE j.status = 'complete'), 0) AS total_spend
+                    COALESCE(SUM(j.gpu_cost_usd) FILTER (
+                        WHERE j.status = 'complete'
+                           OR (j.status IN ('failed', 'cancelled') AND j.metered)
+                    ), 0) AS total_spend
                FROM public.users u
                LEFT JOIN auth.users a ON a.id = u.id
                LEFT JOIN public.jobs j ON j.user_id = u.id
@@ -141,7 +150,10 @@ async def list_users(
                     public.user_stripe_customer(u.id) AS stripe_customer_id,
                     a.last_sign_in_at AS last_login,
                     COUNT(DISTINCT j.id) AS job_count,
-                    COALESCE(SUM(j.gpu_cost_usd) FILTER (WHERE j.status = 'complete'), 0) AS total_spend
+                    COALESCE(SUM(j.gpu_cost_usd) FILTER (
+                        WHERE j.status = 'complete'
+                           OR (j.status IN ('failed', 'cancelled') AND j.metered)
+                    ), 0) AS total_spend
                FROM public.users u
                LEFT JOIN auth.users a ON a.id = u.id
                LEFT JOIN public.jobs j ON j.user_id = u.id
@@ -442,16 +454,25 @@ async def get_revenue(
     else:
         period_start = None  # all_time — no date filter
 
+    # Revenue, its by-tool split and the per-job average all count the same
+    # rows as list_users' total_spend above: complete jobs, plus failed or
+    # cancelled jobs with jobs.metered set.
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         summary = await conn.fetchrow(
             """SELECT
-                   COALESCE(SUM(gpu_cost_usd) FILTER (WHERE status = 'complete'), 0) AS total_revenue,
+                   COALESCE(SUM(gpu_cost_usd) FILTER (WHERE billed), 0) AS total_revenue,
+                   COUNT(*) FILTER (WHERE billed) AS billed_jobs,
                    COUNT(*) FILTER (WHERE status = 'complete') AS completed_jobs,
                    COUNT(*) FILTER (WHERE status = 'running') AS running_jobs,
                    COUNT(*) FILTER (WHERE status = 'failed') AS failed_jobs
-               FROM public.jobs
-               WHERE ($1::timestamptz IS NULL OR created_at >= $1)""",
+               FROM (
+                   SELECT status, gpu_cost_usd,
+                          status = 'complete'
+                              OR (status IN ('failed', 'cancelled') AND metered) AS billed
+                   FROM public.jobs
+                   WHERE ($1::timestamptz IS NULL OR created_at >= $1)
+               ) j""",
             period_start,
         )
 
@@ -460,7 +481,8 @@ async def get_revenue(
                       COALESCE(SUM(gpu_cost_usd), 0) AS revenue,
                       COUNT(*) AS job_count
                FROM public.jobs
-               WHERE status = 'complete'
+               WHERE (status = 'complete'
+                      OR (status IN ('failed', 'cancelled') AND metered))
                  AND ($1::timestamptz IS NULL OR created_at >= $1)
                GROUP BY tool
                ORDER BY revenue DESC""",
@@ -469,7 +491,8 @@ async def get_revenue(
 
     total_revenue = float(summary["total_revenue"])
     completed_jobs = int(summary["completed_jobs"])
-    avg_revenue_per_job = round(total_revenue / completed_jobs, 4) if completed_jobs > 0 else 0.0
+    billed_jobs = int(summary["billed_jobs"])
+    avg_revenue_per_job = round(total_revenue / billed_jobs, 4) if billed_jobs > 0 else 0.0
 
     # Cost-of-goods: reverse-calculate from markup percent (D-18, SC-3).
     # If markup_percent is 0, we cannot derive a meaningful cost figure.

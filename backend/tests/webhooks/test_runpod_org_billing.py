@@ -85,6 +85,15 @@ def _build_pool_capturing_billing(stripe_customer_id: str | None):
     ctx.__aenter__ = AsyncMock(return_value=conn)
     ctx.__aexit__ = AsyncMock(return_value=False)
 
+    # The handler claims the job inside conn.transaction() and writes the
+    # candidate and results rows there (webhooks/router.py:276-305). asyncpg
+    # returns an async context manager from a sync call, so this cannot be a
+    # plain AsyncMock attribute.
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=tx)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+
     pool = AsyncMock()
     pool.acquire = MagicMock(return_value=ctx)
     return pool, captured
@@ -101,7 +110,7 @@ async def test_webhook_completion_resolves_customer_via_org_resolver():
     with patch("webhooks.router.get_db_pool", return_value=pool), \
          patch("webhooks.router.record_gpu_usage") as mock_meter, \
          patch("webhooks.router.update_job_status", new=AsyncMock()), \
-         patch("webhooks.router.publish_status", new=AsyncMock()), \
+         patch("webhooks.router.publish_status_best_effort", new=AsyncMock()), \
          patch("webhooks.router.send_completion_email", new=AsyncMock()), \
          patch("webhooks.router.send_failure_email", new=AsyncMock()), \
          patch("webhooks.router.get_provider") as mock_provider, \
@@ -134,6 +143,8 @@ async def test_webhook_completion_resolves_customer_via_org_resolver():
         f"Expected public.org_stripe_customer query; got: {captured['queries']}"
     )
     assert "j.organization_id" in resolver_queries[0]
+    # ...through mark_metered, so the spend reads count a failed run it bills.
+    assert "SET metered = TRUE" in resolver_queries[0]
 
     # record_gpu_usage called with the org-resolved customer
     assert mock_meter.called
@@ -151,7 +162,7 @@ async def test_webhook_completion_skips_billing_if_org_has_no_customer():
     with patch("webhooks.router.get_db_pool", return_value=pool), \
          patch("webhooks.router.record_gpu_usage") as mock_meter, \
          patch("webhooks.router.update_job_status", new=AsyncMock()), \
-         patch("webhooks.router.publish_status", new=AsyncMock()), \
+         patch("webhooks.router.publish_status_best_effort", new=AsyncMock()), \
          patch("webhooks.router.send_completion_email", new=AsyncMock()), \
          patch("webhooks.router.send_failure_email", new=AsyncMock()), \
          patch("webhooks.router.get_provider") as mock_provider, \

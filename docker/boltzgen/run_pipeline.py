@@ -1938,18 +1938,24 @@ def main():
 
         keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
         keepalive_thread.start()
+        # A timeout or a nonzero exit leaves whatever BoltzGen already wrote
+        # under output_dir on the container's disk. Record the failure and
+        # fall through to the parse/upload code below rather than returning,
+        # so those designs are uploaded instead of discarded. run_command
+        # raises
+        # TimeoutExpired for the timeout (it hands timeout= to
+        # subprocess.run, :758) and RuntimeError for a nonzero exit (:771).
+        early_failure: dict | None = None
         try:
             run_command(cmd, timeout=boltzgen_timeout, cwd=work_dir)
-        except RuntimeError as exc:
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
             logger.error("BoltzGen failed: %s", exc)
-            post_webhook(webhook_url, job_id, pod_id, {
-                "error": f"BoltzGen failed: {exc}",
-            })
-            return
+            early_failure = {"error": f"BoltzGen failed: {exc}"}
         finally:
             heartbeat_stop.set()
 
-        send_heartbeat(webhook_url, job_id, "BoltzGen complete", budget, budget)
+        if not early_failure:
+            send_heartbeat(webhook_url, job_id, "BoltzGen complete", budget, budget)
 
         # ----- Log output tree for debugging -----
         for root, dirs, files in os.walk(output_dir):
@@ -1962,7 +1968,7 @@ def main():
         metrics_csv_path = find_metrics_csv(output_dir)
         if not metrics_csv_path:
             logger.error("No metrics CSV found in BoltzGen output")
-            post_webhook(webhook_url, job_id, pod_id, {
+            post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": "BoltzGen produced no metrics CSV",
             })
             return
@@ -1972,7 +1978,7 @@ def main():
 
         if not all_designs:
             logger.error("Metrics CSV contained no designs")
-            post_webhook(webhook_url, job_id, pod_id, {
+            post_webhook(webhook_url, job_id, pod_id, early_failure or {
                 "error": "BoltzGen metrics CSV was empty",
             })
             return
@@ -2205,6 +2211,29 @@ def main():
             "runtime_minutes": round(elapsed_minutes, 1),
             "next_steps": next_steps,
         }
+        if early_failure:
+            # BoltzGen died, so the run still reports its failure
+            # (post_webhook keys the status off "error", :807) and the
+            # designs collected above are in Storage.
+            #
+            # Uploading them is necessary but not yet sufficient: this repo's
+            # API serves a job's designs only once it completed
+            # (backend/jobs/router.py:706-707 and :543-544), so a failed
+            # run's designs sit in Storage unserved. Serving them is not part
+            # of this change.
+            #
+            # The inline structures are left out because the backend reads a
+            # webhook's output only when the run completed (the
+            # internal_status gate in
+            # backend/webhooks/router.py::runpod_webhook), so on this path
+            # they would make a multi-megabyte POST only to be discarded.
+            # Pinned by
+            # test_a_boltzgen_timeout_still_fails_but_uploads_its_designs.
+            result_payload = dict(early_failure)
+            if candidates:
+                result_payload["partial"] = True
+                result_payload["candidate_count"] = len(candidates)
+
         if failed_uploads:
             result_payload["failed_uploads"] = failed_uploads
 

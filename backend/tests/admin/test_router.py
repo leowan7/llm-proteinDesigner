@@ -270,6 +270,7 @@ async def test_get_revenue(admin_client):
     """GET /admin/revenue?period=this_month returns 200 with required keys."""
     summary_row = {
         "total_revenue": 100.0,
+        "billed_jobs": 16,
         "completed_jobs": 10,
         "running_jobs": 2,
         "failed_jobs": 1,
@@ -300,6 +301,9 @@ async def test_get_revenue(admin_client):
     assert "by_tool" in data
     assert "cost_of_goods_usd" in data
     assert "margin_usd" in data
+    # Revenue includes metered failed and cancelled jobs, so the average is
+    # over every billed job, not just the completed ones.
+    assert data["avg_revenue_per_job"] == 6.25
 
 
 # ---------------------------------------------------------------------------

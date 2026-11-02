@@ -110,9 +110,11 @@ async def get_usage(
     case for read-only members to see spend (they don't launch jobs and don't
     pay).
 
-    Aggregates completed jobs created on or after the first day of the current
-    month (UTC). Returns total spend in USD, job count, and a list of the
-    10 most recent completed jobs this month for itemised display.
+    Aggregates the jobs created on or after the first day of the current month
+    (UTC) that the org is charged for: complete jobs, plus failed or cancelled
+    jobs with ``jobs.metered`` set (billing/stripe_client.py::mark_metered).
+    Returns total spend in USD, job count, and a list of the 10 most recently
+    finished of those jobs for itemised display.
 
     Args:
         user_id: Injected by the auth dependency.
@@ -140,7 +142,8 @@ async def get_usage(
                    FROM public.jobs
                    WHERE organization_id = $1
                      AND created_at >= date_trunc('month', now())
-                     AND status = 'complete'""",
+                     AND (status = 'complete'
+                          OR (status IN ('failed', 'cancelled') AND metered))""",
                 org_id,
             )
             charge_rows = await conn.fetch(
@@ -148,7 +151,8 @@ async def get_usage(
                    FROM public.jobs
                    WHERE organization_id = $1
                      AND created_at >= date_trunc('month', now())
-                     AND status = 'complete'
+                     AND (status = 'complete'
+                          OR (status IN ('failed', 'cancelled') AND metered))
                    ORDER BY completed_at DESC
                    LIMIT 10""",
                 org_id,
@@ -163,7 +167,8 @@ async def get_usage(
                    WHERE organization_id = $1
                      AND created_by_user_id = $2
                      AND created_at >= date_trunc('month', now())
-                     AND status = 'complete'""",
+                     AND (status = 'complete'
+                          OR (status IN ('failed', 'cancelled') AND metered))""",
                 org_id,
                 user_id,
             )
@@ -173,7 +178,8 @@ async def get_usage(
                    WHERE organization_id = $1
                      AND created_by_user_id = $2
                      AND created_at >= date_trunc('month', now())
-                     AND status = 'complete'
+                     AND (status = 'complete'
+                          OR (status IN ('failed', 'cancelled') AND metered))
                    ORDER BY completed_at DESC
                    LIMIT 10""",
                 org_id,

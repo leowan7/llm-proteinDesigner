@@ -19,6 +19,7 @@ Payload structure (POSTed by run_pipeline.py in the container):
     error    dict  Error info if status is "FAILED"
 """
 
+import asyncio
 import datetime
 import hashlib
 import hmac
@@ -26,13 +27,18 @@ import json
 import logging
 
 import sentry_sdk
-from billing.stripe_client import record_gpu_usage
+from billing.stripe_client import mark_metered, record_gpu_usage, unmark_metered
 from config import settings
 from db.connection import get_db_pool
 from fastapi import APIRouter, HTTPException, Request
 from gpu import get_provider
 from jobs.notifications import send_completion_email, send_failure_email
-from worker.tasks import publish_status, update_job_status
+from storage.client import list_job_design_keys
+from worker.tasks import (
+    publish_status,
+    publish_status_best_effort,
+    update_job_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +226,7 @@ async def runpod_webhook(request: Request):
     # Build results payload for completed jobs.
     results_json: str | None = None
     output: dict = {}
+    payload_candidates: list[dict] = []
     if internal_status == "complete":
         output = payload.get("output", {})
         candidate_count: int = output.get("candidate_count", 0)
@@ -229,12 +236,56 @@ async def runpod_webhook(request: Request):
             "next_steps": output.get("next_steps", ""),
             "zero_output": zero_output,
         })
+        # `or []`, not a default: a payload with an explicit null here used
+        # to reach the candidate loop below and raise TypeError inside the
+        # transaction, which rolls the claim back and returns 500, and the
+        # redelivery that follows fails the same way, so a finished run
+        # would never go terminal. a479ac38 guarded the loop instead
+        # (`if candidates:`); the transaction moved the loop under the
+        # claim and dropped it
+        # (tests/webhooks/test_router.py::test_a_null_candidates_payload_is_not_iterated).
+        # No container sends null today -- all five send a list -- but this
+        # is an HTTP boundary, not a container contract.
+        payload_candidates = output.get("candidates") or []
 
-        # Persist individual candidate rows.
-        candidates = output.get("candidates", [])
-        if candidates:
-            async with pool.acquire() as conn:
-                for c in candidates:
+    error_category: str | None = None
+    if internal_status == "failed":
+        error_info = payload.get("error", {})
+        error_category = error_info.get("category", "Pipeline error")
+
+    # Update DB status. This write is also the claim on the job. The guard at
+    # :211 is only a pre-read, and the reaper can take the row in the window
+    # between that read and this write (worker/cleanup.py:276-285 claims it
+    # the same way, from the other side), so everything below that must
+    # happen once per job is gated on having won the transition.
+    #
+    # The claim and the two writes that record what the run produced -- the
+    # job_candidates rows and the results/cost column -- run in one
+    # transaction, for two reasons. A handler that loses the claim writes
+    # neither, so it cannot leave rows on a row another route has already
+    # made terminal: get_job reads job_candidates only on a `complete` row
+    # (jobs/router.py:838) and its partial branch lists Storage instead
+    # (jobs/router.py:853), so those rows would reach no one
+    # (tests/webhooks/test_router.py::test_a_lost_claim_on_a_complete_payload_writes_no_candidate_rows).
+    # And a failure part-way through the candidate loop now rolls the claim
+    # back with it, leaving the row non-terminal for a redelivery or the
+    # reaper to settle; without the transaction the row would stay terminal
+    # with some of its candidates, a NULL `results`, no mail and no charge,
+    # and the redelivery would be dropped by the pre-read guard at :211
+    # (tests/webhooks/test_router.py::test_a_failed_candidate_insert_rolls_the_claim_back).
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            claimed = await update_job_status(
+                job_id,
+                internal_status,
+                stage=internal_status.capitalize(),
+                gpu_seconds=gpu_seconds,
+                error_category=error_category,
+                require_non_terminal=True,
+                conn=conn,
+            )
+            if claimed:
+                for c in payload_candidates:
                     await conn.execute(
                         """INSERT INTO public.job_candidates (job_id, rank, pdb_key, scores)
                            VALUES ($1, $2, $3, $4::jsonb)""",
@@ -243,42 +294,30 @@ async def runpod_webhook(request: Request):
                         c["pdb_key"],
                         json.dumps(c.get("scores", {})),
                     )
-
-    error_category: str | None = None
-    if internal_status == "failed":
-        error_info = payload.get("error", {})
-        error_category = error_info.get("category", "Pipeline error")
-
-    # Update DB status.
-    await update_job_status(
-        job_id,
-        internal_status,
-        stage=internal_status.capitalize(),
-        gpu_seconds=gpu_seconds,
-        error_category=error_category,
-    )
-
-    # Persist cost and results.
-    if results_json:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE public.jobs SET results = $1::jsonb, gpu_cost_usd = $2 WHERE id = $3",
-                results_json,
-                gpu_cost_usd,
-                row["id"],
-            )
-    else:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2",
-                gpu_cost_usd,
-                row["id"],
-            )
-
-    # Publish SSE status update.
-    await publish_status(job_id, internal_status, internal_status.capitalize())
+                if results_json:
+                    await conn.execute(
+                        "UPDATE public.jobs SET results = $1::jsonb, gpu_cost_usd = $2 WHERE id = $3",
+                        results_json,
+                        gpu_cost_usd,
+                        row["id"],
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE public.jobs SET gpu_cost_usd = $1 WHERE id = $2",
+                        gpu_cost_usd,
+                        row["id"],
+                    )
 
     # ---------- Terminate the GPU job to stop billing ----------
+    # Ahead of the claim check, so it runs whether or not this handler won.
+    # The pod burns money either way, and at a479ac38 every webhook that got
+    # past the pre-read guard terminated it, because there was no claim to
+    # lose. The winner is not a safe place to leave this: a cancel skips the
+    # provider call when the tool resolves to no endpoint
+    # (jobs/service.py:84). The reaper does cancel every stale pod it sweeps,
+    # claimed or not (worker/cleanup.py:309), but it only sweeps after
+    # STALE_HEARTBEAT_SECONDS
+    # (tests/webhooks/test_router.py::test_a_lost_claim_still_terminates_the_pod).
     # On RunPod this terminates the pod. On Modal the function has already
     # self-terminated before this webhook fires, so terminate_pod is a no-op.
     if stored_pod_id:
@@ -295,7 +334,79 @@ async def runpod_webhook(request: Request):
             logger.exception("Failed to terminate GPU job %s", stored_pod_id)
             sentry_sdk.capture_exception(exc)
 
-    # Record billing for completed or cancelled jobs (org pays for consumed GPU time).
+    if not claimed:
+        # Another route made the row terminal first, so it owns the status, the
+        # mail and the charge. The pod is already terminated above.
+        logger.info(
+            "Webhook skipped: job %s went terminal between this handler's "
+            "guard and its status update",
+            job_id,
+        )
+        return {"received": True}
+
+    # Publish SSE status update. Best-effort: the claim above has committed,
+    # so a Redis fault must not take the charge and the mail below with it.
+    await publish_status_best_effort(
+        job_id, internal_status, internal_status.capitalize()
+    )
+
+    # How many designs this run banked before it died. Counted once, here,
+    # because two separate things turn on it: the failure mail points the
+    # customer at them, and a failed run is billed exactly when there is at
+    # least one. The same count feeds the `partial` flag get_job serves
+    # (jobs/router.py:918) and the reaper's own gate (worker/cleanup.py:370);
+    # all three call one function, storage/client.py::list_job_design_keys.
+    # The bulk download reads the same prefix with its own paginator
+    # (jobs/router.py:612) because it archives every object it finds, CSVs
+    # included. It tests the same suffixes to decide its 404
+    # (jobs/router.py:631-633) but never counts them, and decides no money.
+    saved_designs = 0
+    if internal_status == "failed":
+        try:
+            # Sync boto3 off the event loop, the house pattern at
+            # jobs/notifications.py:57.
+            saved_designs = len(
+                await asyncio.to_thread(list_job_design_keys, str(user_id), job_id)
+            )
+        except Exception as exc:
+            # An unreadable bucket must not become a charge, and must not cost
+            # the customer their mail either. The count stays 0, which leaves
+            # the run unbilled -- what every failure did before this change --
+            # and sends the plain failure notice. A successful listing that
+            # finds nothing lands on the same 0 and the same outcome, so the
+            # two cases are deliberately not distinguished.
+            logger.exception(
+                "Could not read saved designs for failed job %s; leaving it "
+                "unbilled and sending the plain failure mail",
+                job_id,
+            )
+            sentry_sdk.capture_exception(exc)
+
+    # Record billing for a run the org owes GPU time for.
+    #
+    # Finished and cancelled runs qualify. So does a failed run that banked at
+    # least one design, for every tool -- Leo's call 2026-10-13: this PR makes
+    # those designs reachable (jobs/router.py:853), and they are not handed
+    # over for free. Such a run is settled on GPU time used, the same as a
+    # finished run, and is not prorated. A run that saved nothing stays fully
+    # unbilled. The condition is `saved_designs > 0`, the same value the mail
+    # below reports and the same function get_job's `partial` flag calls
+    # (storage/client.py::list_job_design_keys), so no tool is billed on a
+    # different count than the one deciding what is served. The shared
+    # function is all that holds them equal; nothing checks it. `cancelled`
+    # is billed with no design condition at all, as it was before.
+    #
+    # Exactly one of this route and the reaper bills any given job, because
+    # exactly one of them wins the status transition. This handler reaches the
+    # charge only when its own UPDATE claimed a non-terminal row
+    # (:278), and worker/cleanup.py reaches it only when its
+    # UPDATE claimed a row still 'running' (worker/cleanup.py:284)
+    # -- two guards that cannot both succeed, since whichever writes first
+    # makes the row terminal. The loser takes the early return above.
+    # record_gpu_usage keys its meter event on the job id as a second line of
+    # defence (billing/stripe_client.py:268), but it is a backstop: Stripe
+    # deduplicates that key for 24 hours per its own docstring there, so the
+    # guarantee is the transition, not the key.
     #
     # Phase 12: webhook handler runs WITHOUT a user JWT, so we cannot call
     # is_member_of(...) or rely on RLS. The service-role pool bypasses RLS and
@@ -306,16 +417,27 @@ async def runpod_webhook(request: Request):
     # customer was created by an old replica mid-deploy. Without that fallback
     # the GPU time of an existing payer would silently go unmetered, because
     # a NULL resolution skips billing rather than raising.
-    if internal_status in ("complete", "cancelled") and gpu_seconds > 0:
+    should_bill = internal_status in ("complete", "cancelled") or (
+        internal_status == "failed" and saved_designs > 0
+    )
+
+    if should_bill and gpu_seconds > 0:
         async with pool.acquire() as conn:
-            stripe_customer_id = await conn.fetchval(
-                """SELECT public.org_stripe_customer(j.organization_id)
-                   FROM public.jobs j
-                   WHERE j.id = $1""",
-                job_id,
-            )
-        if stripe_customer_id:
-            record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+            stripe_customer_id = await mark_metered(conn, job_id)
+            if stripe_customer_id:
+                try:
+                    record_gpu_usage(stripe_customer_id, job_id, gpu_seconds)
+                except Exception as exc:
+                    # Metering must not cost the customer their failure email:
+                    # the row is already terminal, so a retry returns at the
+                    # double-processing guard above and the mail would never go
+                    # out. Pinned by
+                    # test_a_metering_failure_still_emails_the_customer.
+                    logger.exception(
+                        "Could not meter job %s; it stays unbilled", job_id
+                    )
+                    sentry_sdk.capture_exception(exc)
+                    await unmark_metered(conn, job_id, exc)
 
     # Send email notification.
     async with pool.acquire() as conn:
@@ -334,10 +456,13 @@ async def runpod_webhook(request: Request):
                 runtime_seconds=gpu_seconds,
             )
         elif internal_status == "failed":
+            # saved_designs was counted before the billing block above, which
+            # gates the charge on the same value this mail reports.
             await send_failure_email(
                 to_email=user_row["email"],
                 job_id=job_id,
                 error_category=error_category or "Unknown error",
+                saved_designs=saved_designs,
             )
 
     return {"received": True}

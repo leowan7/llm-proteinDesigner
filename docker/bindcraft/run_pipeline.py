@@ -47,7 +47,9 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
+from collections.abc import Callable
 from glob import glob
 from pathlib import Path
 
@@ -191,6 +193,10 @@ class _HeartbeatThread:
     compile + AF2 first-forward-pass before it streams any output. Without
     a background heartbeat, the Kendrew stale-detection cron kills a
     perfectly healthy job. See cleanup.py:STALE_HEARTBEAT_SECONDS.
+
+    ``on_tick`` runs once per interval and may return ``(stage, completed)``
+    to replace what later beats report; it is how ``_DesignStreamer`` ships
+    designs out of a still-running subprocess.
     """
 
     def __init__(
@@ -201,6 +207,8 @@ class _HeartbeatThread:
         designs_completed: int = 0,
         designs_total: int = 0,
         interval_seconds: int = 60,
+        on_tick: Callable[[], tuple[str, int] | None] | None = None,
+        stop_event: "threading.Event | None" = None,
     ) -> None:
         import threading
         self._webhook_url = webhook_url
@@ -209,7 +217,10 @@ class _HeartbeatThread:
         self._done = designs_completed
         self._total = designs_total
         self._interval = interval_seconds
-        self._stop = threading.Event()
+        self._on_tick = on_tick
+        # Shared with the on_tick callback when the caller passes one, so a
+        # stop reaches the callback mid-sweep instead of only between ticks.
+        self._stop = stop_event if stop_event is not None else threading.Event()
         self._thread: threading.Thread | None = None
 
     def _run(self) -> None:
@@ -219,10 +230,31 @@ class _HeartbeatThread:
             try:
                 send_heartbeat(
                     self._webhook_url, self._job_id, self._stage,
-                    self._done, self._total,
+                    self._done,
+                    # on_tick replaces _stage and _done but not _total, so
+                    # a sweep that banks more designs than were requested
+                    # would leave this beat rendering "11/10 designs"
+                    # against the sweep's own "11/11"
+                    # (backend/webhooks/router.py:379 formats both). Same
+                    # clamp rule as the sweep and main()'s upload phase.
+                    max(self._total, self._done),
                 )
             except Exception as exc:
                 logger.warning("Background heartbeat emit failed: %s", exc)
+            if self._on_tick is not None and not self._stop.is_set():
+                # After this tick's beat, never before: the callback does I/O
+                # (uploads, one beat per design) and must not be able to
+                # postpone the keepalive the stale cron is watching for.
+                # Re-checked here because the beat above can block for its own
+                # request timeout, and a sweep started after stop() would run
+                # its uploads alongside main()'s final upload loop.
+                try:
+                    update = self._on_tick()
+                except Exception as exc:
+                    logger.warning("Heartbeat tick callback failed: %s", exc)
+                else:
+                    if update is not None:
+                        self._stage, self._done = update
             # Sleep on the event so stop() returns promptly.
             self._stop.wait(self._interval)
 
@@ -236,7 +268,25 @@ class _HeartbeatThread:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=5)
+            # Sized for one in-flight upload from an on_tick sweep:
+            # request_upload_urls' 30s signing POST plus upload_output's 120s
+            # PUT. Returning sooner leaves that upload running while main()'s
+            # final loop signs the same object name concurrently -- which fails
+            # one of the two requests and reports a design as un-uploaded
+            # although its bytes did land.
+            #
+            # This is NOT a wall-clock bound. requests applies those timeouts
+            # per connect and per socket read, not to a whole request, so a
+            # storage endpoint that trickles bytes can hold one PUT past 180s
+            # and this join then returns with the sweep still inside it. The
+            # warning is the only signal that the overlap went live; capping it
+            # for real needs a watchdog around upload_output.
+            self._thread.join(timeout=180)
+            if self._thread.is_alive():
+                logger.warning(
+                    "Heartbeat thread still running after a 180s join; an "
+                    "in-flight design upload may overlap the final upload loop"
+                )
 
     def __enter__(self) -> "_HeartbeatThread":
         self.start()
@@ -336,6 +386,84 @@ def upload_output(url: str, file_path: str) -> None:
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Upload failed for {file_path}: HTTP {resp.status_code}")
     logger.info("Uploaded %s (%d bytes)", file_path, len(data))
+
+
+def _upload_one(
+    upload_endpoint: str, job_token: str, filename: str, file_path: str
+) -> bool:
+    """Request one upload URL and PUT one file. True when the object landed.
+
+    One request per file rather than one batch for all of them: tools-hub mints
+    the URLs in a loop and returns 502 for the WHOLE request as soon as one
+    name fails to sign (``webhooks/uploads.py::_handle`` ->
+    ``shared/storage.py::presigned_output_put_url``), which signs without upsert,
+    so Supabase is being asked to mint a URL for a name already in the bucket.
+    Uploading as the run goes means most names ARE already there by the end, so a
+    batch holding them would take the remaining files down with it. UNVERIFIED
+    against a live bucket: the no-upsert call is read from the code, not observed
+    refusing.
+
+    Never raises. A design whose upload fails is retried on the next tick of
+    ``_DesignStreamer.sweep`` and, failing again, by main()'s final sweep.
+    False does not distinguish a refusal from a PUT that timed out client-side
+    after the object landed: either way the design stays out of ``shipped`` and
+    is re-attempted every tick, which -- if the no-upsert read above is right
+    -- is wasted work for the rest of the run and still ends in
+    ``failed_uploads``. Not lossy: main() puts the PDB inline on every
+    candidate it reports regardless of upload outcome (``pdb_content_b64``,
+    see main()).
+    """
+    if not (upload_endpoint and job_token and filename):
+        return False
+    if not (file_path and os.path.exists(file_path)):
+        logger.warning("No file on disk to upload for %s (%s)", filename, file_path)
+        return False
+    try:
+        urls = request_upload_urls(upload_endpoint, job_token, [filename])
+        url = urls.get(filename)
+        if not url:
+            logger.warning("No upload URL returned for %s", filename)
+            return False
+        upload_output(url, file_path)
+        return True
+    except Exception as exc:
+        logger.warning("Upload of %s failed: %s", filename, exc)
+        return False
+
+
+def _new_candidate(rank: int, pdb_key: str, scores: dict) -> dict:
+    """Build the per-design heartbeat partial for one accepted design.
+
+    Both the mid-run streamer and main()'s final sweep build their partial
+    here, so the two carry the same ``pdb_key`` string for a given design:
+    tools-hub dedupes ``_partial_candidates`` on that exact string
+    (``webhooks/modal.py::_hb_merge_inputs``), which is what keeps a design
+    beaten twice from showing up twice. The hub then projects the dict to a
+    fixed schema and drops one whose rank is not int-convertible -- it calls
+    ``int(cand.get("rank"))`` and drops only if that raises, so a numeric
+    string or float survives (``webhooks/modal.py::_sanitize_candidate``).
+
+    ``parse_bindcraft_results`` is the only producer of ``scores`` and emits the
+    canonical ``_METRIC_MAP`` spellings. The lowercase fallbacks are carried over
+    verbatim from the inline dict this replaces (master
+    8632f328a7f534cbbf3edb73cd1e16f7045aa1f7, lines 1525-1527); nothing in this file
+    writes them, so they are defensive only.
+    """
+    def _round(value: object) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return round(float(value), 4)
+
+    return {
+        "rank": rank,
+        "pdb_key": pdb_key,
+        "iptm": _round(scores.get("ipTM", scores.get("iptm"))),
+        "plddt": _round(scores.get("pLDDT", scores.get("plddt"))),
+        "i_pae": _round(scores.get("i_pAE", scores.get("ipae"))),
+        # BindCraft only writes designs it has already accepted;
+        # parse_bindcraft_results stamps "pass" on every row it returns.
+        "filter_status": scores.get("filter_status") or "pass",
+    }
 
 
 def run_command(cmd: list[str], timeout: int = 14400, cwd: str | None = None) -> str:
@@ -606,10 +734,169 @@ def parse_bindcraft_results(output_dir: str) -> list[dict]:
             "pdb_path": pdb_path,
             "pdb_name": pdb_name,
             "scores": scores,
+            # Whether final_design_stats.csv already holds this design's row.
+            # FreeBindCraft appends that row immediately AFTER copying the PDB
+            # into Accepted/, so False means either a design still being
+            # written or one whose metrics never arrived. _DesignStreamer uses
+            # it to avoid shipping a half-copied file mid-run; the end-of-run
+            # callers ignore it, because by then nothing is still being
+            # written and a scoreless design is still a design.
+            "has_stats_row": bool(row),
         })
 
     logger.info("Parsed %d BindCraft candidates", len(candidates))
     return candidates
+
+
+_RUNNING_STAGE = "Running BindCraft"
+
+
+class _DesignStreamer:
+    """Ship each accepted design while BindCraft's subprocess is still running.
+
+    Without this, every design of a 4-hour run reaches Storage only in main()'s
+    final upload loop, so a run that is cancelled, killed or times out
+    beforehand delivers nothing it had already paid for. The hub can rebuild a
+    result from mid-run uploads, but only for bytes that are actually in
+    Storage: ``shared/job_recovery.py::reconstruct`` keeps a streamed partial
+    only when its basename is in the job's Storage listing.
+
+    Safe to poll because FreeBindCraft finishes a design in two steps: it
+    copies the PDB into ``Accepted/`` and then appends that design's row to
+    ``final_design_stats.csv`` (``bindcraft.py``'s per-MPNN-sequence loop calls
+    ``shutil.copy`` and then ``functions/generic_utils.py::insert_data``, which
+    appends with ``to_csv(mode='a')``; checked against FreeBindCraft master
+    8b8d4c4627da06f084f46b7007450048fe3ca22f). A PDB whose row is present is
+    therefore fully written.
+
+    Per-design writes are appends, but the file is not append-only for the
+    whole run: once the accepted count reaches the target,
+    ``generic_utils.py::check_accepted_designs`` (:181, called at
+    ``bindcraft.py:483``) rewrites it wholesale with fresh ``Rank`` values,
+    immediately before the design loop breaks. It carries the metric values
+    over from the MPNN stats CSV unchanged, so a design's scores do not
+    change, and this parser derives rank from the sorted filename rather than
+    the ``Rank`` column. A poll landing inside that non-atomic rewrite can
+    still read a short or missing row -- which fails safe: ``has_stats_row``
+    goes false and the design waits for the next tick or for main()'s final
+    loop, and a parse that raises is caught by ``_HeartbeatThread._run``'s
+    tick guard. It cannot ship a torn PDB, because the PDB gate is the
+    ``Accepted/`` copy and not the CSV.
+
+    That order is the whole basis for polling, and the Dockerfile clones the
+    branch unpinned (``docker/bindcraft/Dockerfile.modal:46``), so a rebuild
+    takes whatever master holds then. If upstream ever wrote the row before
+    the copy, ``has_stats_row`` would go true while the PDB was still being
+    written and the sweep would ship a torn file. Pin the clone to a commit
+    before relying on this more heavily than it already is.
+
+    ``shipped`` maps design name -> upload filename already in Storage. main()
+    consults it and re-signs only the designs this never landed; ``_upload_one``
+    says why re-signing a name that IS in Storage is not free.
+
+    ``stop`` is handed to the ``_HeartbeatThread`` that drives ``sweep``, so a
+    stop lands between two designs rather than only between two ticks. Without
+    it main()'s final upload loop and an in-flight sweep can sign the same
+    object name at the same time.
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        upload_endpoint: str,
+        job_token: str,
+        webhook_url: str,
+        job_id: str,
+        num_designs: int,
+    ) -> None:
+        import threading
+        self.shipped: dict[str, str] = {}
+        self.stop = threading.Event()
+        self._output_dir = output_dir
+        self._upload_endpoint = upload_endpoint
+        self._job_token = job_token
+        self._webhook_url = webhook_url
+        self._job_id = job_id
+        self._num_designs = num_designs
+
+    def sweep(self) -> tuple[str, int]:
+        """Upload and beat every newly accepted design. Returns (stage, count).
+
+        Ranks are arrival order, 1..n with no gaps, which is the rank a
+        recovered run shows: ``shared/job_recovery.py::_candidate_from_partial``
+        passes the partial's own rank through. main()'s final result re-ranks by
+        BindCraft's own ordering; for BindCraft both are positions, not scores
+        (``parse_bindcraft_results`` ranks by sorted filename).
+
+        One beat per design, so the gap between beats stays bounded by a single
+        file's upload (the 30 s signing POST plus the 120 s PUT in
+        ``request_upload_urls`` / ``upload_output``) rather than by the whole
+        tick's worth of them.
+
+        The stage string carries no counts: the designs travel as
+        ``designs_completed``/``designs_total`` and each hub renders them its own
+        way, one appending its own " - n/m designs" suffix to whatever stage it
+        was given (``backend/webhooks/router.py:377-380``).
+        """
+        accepted = sorted(glob(os.path.join(self._output_dir, "Accepted", "*.pdb")))
+        if all(Path(p).stem in self.shipped for p in accepted):
+            # Nothing new. Skip the full parse: parse_bindcraft_results
+            # re-reads the stats CSV and logs the output dirs, the CSV
+            # basenames and the Accepted/ listing, and this runs every 60 s
+            # for hours.
+            return _RUNNING_STAGE, len(self.shipped)
+
+        for cand in parse_bindcraft_results(self._output_dir):
+            if self.stop.is_set():
+                # main() has moved on to its own upload loop; anything left here
+                # is picked up there. Checked per design so the join in
+                # _HeartbeatThread.stop() only ever waits for one upload.
+                logger.info("Design sweep stopping; %d shipped", len(self.shipped))
+                break
+            name = cand["pdb_name"]
+            if name in self.shipped or not cand["has_stats_row"]:
+                continue
+            filename = os.path.basename(cand["pdb_path"])
+            landed = _upload_one(
+                self._upload_endpoint, self._job_token, filename, cand["pdb_path"],
+            )
+            if landed:
+                self.shipped[name] = filename
+                logger.info(
+                    "Streamed design %s (%d/%d) to the hub",
+                    filename, len(self.shipped), self._num_designs,
+                )
+            # One beat per design whether or not it landed. A hung PUT burns
+            # upload_output's full 120 s timeout, and nothing here backs off or
+            # caps the retries, so a storage outage with a healthy API would
+            # otherwise let one tick retry every un-shipped design in silence
+            # and outlast STALE_HEARTBEAT_SECONDS (= 1800,
+            # backend/worker/cleanup.py:50) -- killing a run that was working
+            # and had designs banked. send_heartbeat swallows its own
+            # exceptions, so this cannot abort the sweep.
+            #
+            # new_candidate rides only on a landed upload: the live page
+            # turns a streamed pdb_key straight into a 3D-view button
+            # (tools-hub templates/job_detail.html:641-647) that fetches
+            # /api/jobs/<id>/pdb/<key>. That route resolves from the same
+            # Storage prefix the signed upload writes to
+            # (blueprints/jobs.py::job_candidate_pdb path 1, via
+            # output_exists; webhooks/uploads.py:25), and its only other
+            # path needs an inline pdb_content_b64 that _new_candidate does
+            # not carry -- so offering a key before the bytes land hands the
+            # user a button that 404s.
+            send_heartbeat(
+                self._webhook_url, self._job_id, _RUNNING_STAGE,
+                len(self.shipped),
+                # Same denominator rule as main()'s upload phase, so the two
+                # phases cannot disagree and neither can render "11/10
+                # designs" if BindCraft banks more than were requested.
+                max(self._num_designs, len(self.shipped)),
+                new_candidate=_new_candidate(
+                    len(self.shipped), filename, cand["scores"],
+                ) if landed else None,
+            )
+        return _RUNNING_STAGE, len(self.shipped)
 
 
 # ===========================================================================
@@ -1415,15 +1702,26 @@ def main():
         # Background heartbeat every 60s so Kendrew's stale-detection cron
         # doesn't kill a healthy job while BindCraft is inside its multi-minute
         # JAX compile + AF2 init phase (during which no stdout is emitted).
+        # Each tick also ships whatever BindCraft has accepted since the last
+        # one, so the designs are in Storage before this subprocess ends.
+        streamer = _DesignStreamer(
+            output_dir, upload_endpoint, job_token,
+            webhook_url, job_id, num_designs,
+        )
         with _HeartbeatThread(
             webhook_url, job_id,
-            stage="Running BindCraft - 0/{} designs".format(num_designs),
+            stage=_RUNNING_STAGE,
             designs_completed=0, designs_total=num_designs,
             interval_seconds=60,
+            on_tick=streamer.sweep,
+            stop_event=streamer.stop,
         ):
             run_command(cmd, timeout=14400, cwd=BINDCRAFT_DIR)
 
-        send_heartbeat(webhook_url, job_id, "BindCraft complete, parsing results", 0, num_designs)
+        send_heartbeat(
+            webhook_url, job_id, "BindCraft complete, parsing results",
+            len(streamer.shipped), num_designs,
+        )
 
         # ----- Parse results -----
         candidates = parse_bindcraft_results(output_dir)
@@ -1434,53 +1732,60 @@ def main():
         )
 
         # ----- Upload outputs (on-demand URLs) -----
-        filenames_to_upload = []
-        for candidate in candidates:
-            filenames_to_upload.append(f"design_{candidate['rank']:03d}.pdb")
-        if candidates:
-            filenames_to_upload.append("metrics.csv")
-
-        # Also upload the BindCraft results CSV if it exists
+        # Most designs are already in Storage: every heartbeat tick above ships
+        # the ones BindCraft had accepted by then and records the filename in
+        # streamer.shipped. This loop only uploads the ones that never landed,
+        # and never re-signs a name that did -- see _upload_one.
         bindcraft_csv = os.path.join(output_dir, "final_design_stats.csv")
-        if os.path.exists(bindcraft_csv) and candidates:
-            filenames_to_upload.append("bindcraft_results.csv")
-
-        upload_urls = {}
-        url_exchange_error = None
-        if upload_endpoint and job_token and filenames_to_upload:
-            try:
-                upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
-            except RuntimeError as exc:
-                logger.error("Failed to get upload URLs: %s", exc)
-                url_exchange_error = str(exc)
-
         failed_uploads: list[str] = []
-        if filenames_to_upload and not upload_urls:
-            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
-            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
-            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
-            # failed_uploads is surfaced to tools-hub via result_payload, where
-            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
-            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
-            # was only the silence.
-            logger.error(
-                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
-                "so the run is not reported as a clean success",
-                url_exchange_error or "empty response", len(filenames_to_upload),
-            )
-            failed_uploads.extend(filenames_to_upload)
+
+        # This phase continues the meter the streamer was already reporting
+        # against instead of restarting on len(candidates). The counts are
+        # user-visible -- backend/webhooks/router.py:377-380 renders them into
+        # jobs.stage and pushes that over SSE -- so a count that restarts at 1
+        # here would read as going backwards against whatever the sweep last
+        # reported. max() keeps a denominator for the case where BindCraft
+        # accepts more designs than were requested.
+        designs_total = max(num_designs, len(candidates))
+        delivered = 0
+
+        # Live ranks continue the streamer's arrival numbering instead of
+        # restarting on BindCraft's sorted order, because the live table keys
+        # its rows on this number and overwrites the row it finds
+        # (tools-hub templates/job_detail.html:632,681 -- renderedRanks[rank],
+        # then innerHTML). Arrival order is not filename order, so a design
+        # the sweep never reached -- one accepted inside the last tick, or one
+        # whose mid-run upload kept failing -- would otherwise be offered
+        # under a sorted rank another design already holds and erase it from
+        # the live table while the partial count still included both.
+        # Only un-streamed designs consume a number here; the authoritative
+        # ranks ride on the final result webhook, which positions by row
+        # instead (templates/components/candidate_table.html:824).
+        live_rank = len(streamer.shipped)
 
         # Upload PDB files
         webhook_candidates = []
         for candidate in candidates:
             rank = candidate["rank"]
             pdb_path = candidate["pdb_path"]
-            upload_filename = f"design_{rank:03d}.pdb"
+            # The design's own filename, not design_{rank}.pdb, so a design's
+            # storage name does not depend on WHEN it was uploaded: the
+            # streamer numbers by arrival and this loop by BindCraft's own
+            # order, and the same design reaching Storage under two names is
+            # one the hub lists twice: it dedupes on the exact pdb_key string
+            # (tools-hub webhooks/modal.py::_hb_merge_inputs).
+            # Accepted/ is one flat directory, so the basenames are unique.
+            upload_filename = os.path.basename(pdb_path)
 
-            # pdb_key MUST share basename with upload_filename so the
-            # web service's resolver finds the Storage object at
-            # {user}/{job}/designs/<basename>. design_name / pdb_name
-            # diverges from upload_filename and would 404 the resolver.
+            # pdb_key MUST share basename with upload_filename: the hub that
+            # reconstructs a partial result matches on the basename alone
+            # (tools-hub shared/job_recovery.py:179-180).
+            #
+            # The "designs/" prefix is NOT a path this backend writes -- its
+            # upload endpoint puts every file under
+            # users/{uid}/jobs/{jid}/outputs/ (backend/jobs/router.py:658-661)
+            # and then signs pdb_key verbatim (:718), so the two never meet.
+            # Pre-existing and untouched here; only the basename changed.
             # The contracts module (/opt/contracts/rpc.py) defines the
             # upload-URL exchange shape consumed by the web service.
             pdb_key = f"designs/{upload_filename}"
@@ -1506,41 +1811,44 @@ def main():
                     )
             webhook_candidates.append(webhook_candidate)
 
-            if upload_filename in upload_urls and os.path.exists(pdb_path):
-                try:
-                    upload_output(upload_urls[upload_filename], pdb_path)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
-                    failed_uploads.append(upload_filename)
+            already_streamed = candidate["pdb_name"] in streamer.shipped
+            if already_streamed or _upload_one(
+                upload_endpoint, job_token, upload_filename, pdb_path,
+            ):
+                delivered += 1
+            else:
+                # Treated as nothing in Storage for this design -- _upload_one
+                # also returns False for a PUT that timed out client-side after
+                # the object landed, so this list can name a design whose bytes
+                # are in fact there. failed_uploads is
+                # surfaced to tools-hub via result_payload, where
+                # _slim_result_for_persist KEEPS the inline b64 structure for
+                # any listed design rather than dropping it as "already in
+                # Storage". Without it a whole multi-hour GPU run can vanish
+                # while the UI says COMPLETED.
+                logger.warning("No stored PDB for rank %d (%s)", rank, upload_filename)
+                failed_uploads.append(upload_filename)
 
-            # Emit per-candidate heartbeat for live UI streaming. BindCraft
-            # only writes designs that it has already accepted, so default
-            # filter_status to "pass" unless a score row tagged otherwise.
-            # Score keys are canonical (ipTM, pLDDT, i_pAE) per _METRIC_MAP.
-            # pdb_key is included because the candidate's PDB upload has
-            # been attempted just above and the basename matches the
-            # tools-hub resolver path.
-            try:
-                scores_d = candidate.get("scores", {}) or {}
-                iptm_v = scores_d.get("ipTM", scores_d.get("iptm"))
-                plddt_v = scores_d.get("pLDDT", scores_d.get("plddt"))
-                ipae_v = scores_d.get("i_pAE", scores_d.get("ipae"))
-                fstatus = scores_d.get("filter_status") or "pass"
-                new_cand = {
-                    "rank": rank,
-                    "pdb_key": upload_filename,
-                    "iptm": round(float(iptm_v), 4) if isinstance(iptm_v, (int, float)) else None,
-                    "plddt": round(float(plddt_v), 4) if isinstance(plddt_v, (int, float)) else None,
-                    "i_pae": round(float(ipae_v), 4) if isinstance(ipae_v, (int, float)) else None,
-                    "filter_status": fstatus,
-                }
-            except Exception as exc:
-                logger.debug("Failed to build new_candidate: %s", exc)
-                new_cand = None
+            # Per-candidate heartbeat: this loop runs with the keepalive thread
+            # already stopped, so these are the only beats during it.
+            #
+            # new_candidate goes only to designs the streamer did NOT already
+            # stream, so one pdb_key is never offered under two ranks. It
+            # cannot be dropped for the others instead: a recovered run that
+            # has any partial at all is rebuilt from partials ALONE
+            # (tools-hub shared/job_recovery.py:183-184), so a design that
+            # never produced one would be sitting in Storage and still be
+            # missing from the result.
+            new_cand = None
+            if not already_streamed:
+                live_rank += 1
+                new_cand = _new_candidate(
+                    live_rank, upload_filename, candidate.get("scores") or {},
+                )
             if webhook_url and job_id:
                 send_heartbeat(
                     webhook_url, job_id, "Uploading candidates",
-                    rank, len(candidates),
+                    max(len(streamer.shipped), delivered), designs_total,
                     new_candidate=new_cand,
                 )
 
@@ -1548,19 +1856,14 @@ def main():
         if webhook_candidates:
             csv_path = os.path.join(work_dir, "metrics.csv")
             _write_metrics_csv(csv_path, webhook_candidates)
-            if "metrics.csv" in upload_urls:
-                try:
-                    upload_output(upload_urls["metrics.csv"], csv_path)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload metrics CSV: %s", exc)
-                    failed_uploads.append("metrics.csv")
+            if not _upload_one(upload_endpoint, job_token, "metrics.csv", csv_path):
+                failed_uploads.append("metrics.csv")
 
         # Upload raw BindCraft results CSV
-        if "bindcraft_results.csv" in upload_urls and os.path.exists(bindcraft_csv):
-            try:
-                upload_output(upload_urls["bindcraft_results.csv"], bindcraft_csv)
-            except RuntimeError as exc:
-                logger.warning("Failed to upload BindCraft results CSV: %s", exc)
+        if webhook_candidates and os.path.exists(bindcraft_csv):
+            if not _upload_one(
+                upload_endpoint, job_token, "bindcraft_results.csv", bindcraft_csv,
+            ):
                 failed_uploads.append("bindcraft_results.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
@@ -1602,8 +1905,9 @@ def main():
     finally:
         # Archive BEFORE the rmtree destroys the tree. This finally is the only
         # point every exit path after the mkdtemp converges on: the clean return,
-        # the zero-candidate "success" that uploads nothing, the failed upload-URL
-        # exchange, and the catch-all except arm that posts the FAILED webhook.
+        # the zero-candidate "success" that uploads nothing, the early-ended run
+        # that banked some designs, and the catch-all except arm that posts the
+        # FAILED webhook.
         archive_work_dir(work_dir)
         shutil.rmtree(work_dir, ignore_errors=True)
 

@@ -67,17 +67,19 @@ jobs:
           CSRF_SECRET: "ci-csrf-secret"
 
       # tests/integration is excluded from the run above because it needs a
-      # real database. This one file does, and is the SQL half of the flag-off
-      # landing: the BEFORE INSERT trigger that keeps an old replica's
-      # org-column-less job INSERT legal during the rolling deploy, and the two
-      # Stripe resolvers' fallback to the deprecated users.stripe_customer_id.
+      # real database. These two files do. test_flag_off_rolling_window.py is
+      # the SQL half of the flag-off landing: the BEFORE INSERT trigger that
+      # keeps an old replica's org-column-less job INSERT legal during the
+      # rolling deploy, and the two Stripe resolvers' fallback to the
+      # deprecated users.stripe_customer_id. test_metered_spend_reads.py runs
+      # the admin and customer spend/revenue queries against jobs.metered.
       # `supabase start` above has already applied every migration, so the
-      # schema here is the schema merging this PR pushes to production.
+      # schema here is the schema merging the branch pushes to production.
       # Deliberately not the whole directory: the other org files in it have
       # never executed (they insert public.users rows with no auth.users row,
-      # violating the FK) and are out of scope for this PR.
-      - name: Run the flag-off rolling-window DB tests
-        run: python -m pytest tests/integration/test_flag_off_rolling_window.py -v
+      # violating the FK).
+      - name: Run the DB-backed integration tests
+        run: python -m pytest tests/integration/test_flag_off_rolling_window.py tests/integration/test_metered_spend_reads.py -v
         env:
           TESTING: "true"
           SUPABASE_URL: http://127.0.0.1:54321

@@ -793,6 +793,66 @@ def upload_output(url: str, file_path: str) -> None:
     logger.info("Uploaded %s (%d bytes)", file_path, len(data))
 
 
+def _pick_design_pdb(af2_dir: str, rfdiff_output: str, design_name: str) -> str:
+    """Return the PDB to ship for one design.
+
+    Prefers the AF2-predicted COMPLEX, because that is the object
+    ipTM/pLDDT/i_pAE were measured on (``parse_af2_scores`` reads the
+    rank_001 model in ``af2_dir``). Falls back to the bare RFdiffusion
+    backbone when AF2 wrote no rank_001 model, logging the mismatch.
+
+    Called by both the mid-run upload in ``stage_af2_validation`` and
+    main()'s final loop, so the two cannot pick different files for the
+    same design.
+    """
+    if af2_dir and os.path.isdir(af2_dir):
+        for pat in ("*_relaxed_rank_001_*.pdb", "*_unrelaxed_rank_001_*.pdb",
+                    "*rank_001*.pdb"):
+            hits = sorted(glob(os.path.join(af2_dir, pat)))
+            if hits:
+                return hits[0]
+    logger.warning(
+        "No AF2 complex for %s; falling back to the RFdiffusion backbone. The uploaded "
+        "structure will NOT correspond to its ipTM/pLDDT/i_pAE.", design_name,
+    )
+    backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
+    if not os.path.exists(backbone_pdb):
+        backbone_pdb = os.path.join(
+            rfdiff_output, f"design_{design_name.split('_')[-1]}.pdb"
+        )
+    return backbone_pdb
+
+
+def _upload_one(
+    upload_endpoint: str, job_token: str, filename: str, file_path: str
+) -> bool:
+    """Request one upload URL and PUT one file. True when the object landed.
+
+    One request per file, not a batch: a signing call for a name that
+    already exists in Storage fails the WHOLE batch request, so a retry
+    must never be able to take other files down with it.
+
+    Never raises. A design whose upload fails mid-run is retried by
+    main()'s final loop and, failing again, listed in ``failed_uploads``.
+    """
+    if not (upload_endpoint and job_token and filename):
+        return False
+    if not (file_path and os.path.exists(file_path)):
+        logger.warning("No file on disk to upload for %s (%s)", filename, file_path)
+        return False
+    try:
+        urls = request_upload_urls(upload_endpoint, job_token, [filename])
+        url = urls.get(filename)
+        if not url:
+            logger.warning("No upload URL returned for %s", filename)
+            return False
+        upload_output(url, file_path)
+        return True
+    except Exception as exc:
+        logger.warning("Upload of %s failed: %s", filename, exc)
+        return False
+
+
 def run_command(
     cmd: list[str],
     timeout: int = 3600,
@@ -1892,6 +1952,9 @@ def stage_af2_validation(
     webhook_url: str = "",
     job_id: str = "",
     tier: str = "",
+    upload_endpoint: str = "",
+    job_token: str = "",
+    rfdiff_output: str = "",
 ) -> list[dict]:
     """Stage 3: AF2 multimer validation of designed binder-target complexes.
 
@@ -1899,6 +1962,21 @@ def stage_af2_validation(
     target chain goes on the target side of the AF2 complex FASTA, in the
     caller-supplied order, with the binder last:
     ``targetA:targetB:binder``.
+
+    With ``upload_endpoint`` and ``job_token`` set, each design's PDB is
+    uploaded as soon as its scores parse, and the per-design heartbeat
+    carries the resulting ``pdb_key``. The join that turns those two into
+    a result lives in the hub, not here: tools-hub's
+    ``shared/job_recovery.py::reconstruct`` keeps a streamed partial only
+    when its basename is in the job's Storage listing. On tools-hub trunk
+    the only caller that reaches that join for a part-way run is
+    ``scripts/finalize_stuck_job.py`` -- ``recover_stuck_job_result``
+    refuses a partial by design. The stop-at-zero-balance caller is
+    PR leowan7/tools-hub#416, unmerged as of 2026-10-06.
+    ``rfdiff_output`` is only the fallback source when AF2 wrote no
+    rank_001 model (see ``_pick_design_pdb``). Each returned result
+    carries ``pdb_path`` and a ``pdb_key`` that is None when the upload
+    did not land, which is main()'s signal to retry exactly those.
     """
     logger.info("=== Stage 3: AF2 multimer validation ===")
     os.makedirs(output_dir, exist_ok=True)
@@ -2019,7 +2097,16 @@ def stage_af2_validation(
                 n_target_chains=len(target_chains),
                 target_residues=target_residues,
             )
+            design_pdb_key = None
             if scores:
+                # Save as you go: ship this design's structure now, so a run
+                # that dies before the final upload loop still has it in
+                # Storage for the hub-side join this function's docstring
+                # names. Bytes absent from Storage are unrecoverable there.
+                pdb_path = _pick_design_pdb(per_design_out, rfdiff_output, design_name)
+                upload_filename = f"{design_name}.pdb"
+                if _upload_one(upload_endpoint, job_token, upload_filename, pdb_path):
+                    design_pdb_key = f"designs/{upload_filename}"
                 results.append({
                     "design_name": design_name,
                     "scores": scores,
@@ -2029,6 +2116,11 @@ def stage_af2_validation(
                     # the structure those scores actually describe; without it, the only path on hand
                     # at upload time is the bare RFdiffusion backbone, which they do NOT describe.
                     "af2_dir": per_design_out,
+                    "pdb_path": pdb_path,
+                    # None when the mid-run upload did not land; main()
+                    # retries exactly those and nothing else, because
+                    # re-signing an existing key fails the request.
+                    "pdb_key": design_pdb_key,
                 })
                 logger.info(
                     "AF2 scores for %s: ipTM=%.3f pLDDT=%.1f i_pAE=%.1f",
@@ -2058,7 +2150,7 @@ def stage_af2_validation(
                         filter_status = "below threshold"
                     candidate = {
                         "rank": idx + 1,
-                        "pdb_key": None,
+                        "pdb_key": design_pdb_key,
                         "iptm": round(float(iptm_v), 4) if iptm_v is not None else None,
                         "plddt": round(float(plddt_v), 4) if plddt_v is not None else None,
                         "i_pae": round(float(ipae_v), 4) if ipae_v is not None else None,
@@ -2254,6 +2346,8 @@ def main():
             af2_results = stage_af2_validation(
                 designed_fastas, target_pdb, target_chain, af2_output,
                 webhook_url=webhook_url, job_id=job_id,
+                upload_endpoint=upload_endpoint, job_token=job_token,
+                rfdiff_output=rfdiff_output,
             )
         except RuntimeError as exc:
             logger.error("AF2 validation failed: %s", exc)
@@ -2324,102 +2418,50 @@ def main():
         )
 
         # ----- Upload outputs (on-demand URLs) -----
+        # Most designs are already in Storage: stage_af2_validation uploads
+        # each one as its scores parse and records the key. This loop only
+        # retries the ones whose mid-run upload did not land, and never
+        # re-signs a name that did -- Supabase refuses a signed upload for an
+        # existing key, and that refusal would fail the request it rides in.
         candidates = []
-        filenames_to_upload = []
-        for rank_idx, r in enumerate(passing):
-            filenames_to_upload.append(f"design_{rank_idx + 1:03d}.pdb")
-        if filenames_to_upload:
-            filenames_to_upload.append("metrics.csv")
-
-        # Request fresh presigned upload URLs from the backend
-        upload_urls = {}
-        url_exchange_error = None
-        if upload_endpoint and job_token and filenames_to_upload:
-            try:
-                upload_urls = request_upload_urls(upload_endpoint, job_token, filenames_to_upload)
-            except RuntimeError as exc:
-                logger.error("Failed to get upload URLs: %s", exc)
-                url_exchange_error = str(exc)
-
         failed_uploads: list[str] = []
-        if filenames_to_upload and not upload_urls:
-            # The URL exchange yielded nothing, so every `if upload_filename in upload_urls` below is
-            # False: nothing uploads, work_dir is rmtree'd in the finally, and the job STILL posts a
-            # success webhook. An entire multi-hour GPU run disappears while the UI says COMPLETED.
-            # failed_uploads is surfaced to tools-hub via result_payload, where
-            # _slim_result_for_persist KEEPS the inline b64 structures for any listed design rather
-            # than dropping them as "already in Storage". Telling it the truth is enough - the bug
-            # was only the silence.
-            logger.error(
-                "Upload URL exchange yielded no URLs (%s); marking all %d artifact(s) as failed "
-                "so the run is not reported as a clean success",
-                url_exchange_error or "empty response", len(filenames_to_upload),
-            )
-            failed_uploads.extend(filenames_to_upload)
-
         for rank_idx, r in enumerate(passing):
             rank = rank_idx + 1
             design_name = r["design_name"]
-
-            # Ship the structure the scores describe: the AF2-predicted COMPLEX, not the bare
-            # RFdiffusion backbone. r["scores"] is parsed from rank_001 in r["af2_dir"], so the
-            # rank_001 model there is the object ipTM/pLDDT/i_pAE were actually measured on.
-            # Uploading the backbone hands the user a structure that contradicts its own scores.
-            backbone_pdb = None
-            af2_dir = r.get("af2_dir")
-            if af2_dir and os.path.isdir(af2_dir):
-                for pat in ("*_relaxed_rank_001_*.pdb", "*_unrelaxed_rank_001_*.pdb",
-                            "*rank_001*.pdb"):
-                    hits = sorted(glob(os.path.join(af2_dir, pat)))
-                    if hits:
-                        backbone_pdb = hits[0]
-                        break
-            if not backbone_pdb:
-                # AF2 wrote no rank_001 for this design. Fall back to the backbone so the run still
-                # produces something, but make the mismatch visible rather than silent.
-                logger.warning(
-                    "No AF2 complex for %s; falling back to the RFdiffusion backbone. The uploaded "
-                    "structure will NOT correspond to its ipTM/pLDDT/i_pAE.", design_name,
-                )
-                backbone_pdb = os.path.join(rfdiff_output, f"{design_name}.pdb")
-                if not os.path.exists(backbone_pdb):
-                    backbone_pdb = os.path.join(
-                        rfdiff_output, f"design_{design_name.split('_')[-1]}.pdb"
-                    )
-
-            upload_filename = f"design_{rank_idx + 1:03d}.pdb"
             # pdb_key MUST share basename with upload_filename so the
             # web service's resolver finds the Storage object at
-            # {user}/{job}/designs/<basename>. design_name diverges
-            # from upload_filename and would 404 the resolver. The
-            # contracts module (/opt/contracts/rpc.py) defines the
-            # upload-URL exchange shape consumed by the web service.
-            pdb_key = f"designs/{upload_filename}"
-            candidate = {
+            # {user}/{job}/designs/<basename>. The contracts module
+            # (/opt/contracts/rpc.py) defines the upload-URL exchange
+            # shape consumed by the web service.
+            upload_filename = f"{design_name}.pdb"
+            pdb_path = r.get("pdb_path") or _pick_design_pdb(
+                r.get("af2_dir"), rfdiff_output, design_name,
+            )
+            if not r.get("pdb_key") and not _upload_one(
+                upload_endpoint, job_token, upload_filename, pdb_path
+            ):
+                # Nothing is in Storage for this design. failed_uploads is
+                # surfaced to tools-hub via result_payload, where
+                # _slim_result_for_persist KEEPS the inline b64 structure
+                # for any listed design rather than dropping it as
+                # "already in Storage". Without it a whole multi-hour GPU
+                # run can vanish while the UI says COMPLETED.
+                logger.warning("No stored PDB for rank %d (%s)", rank, design_name)
+                failed_uploads.append(upload_filename)
+            candidates.append({
                 "rank": rank,
-                "pdb_key": pdb_key,
+                "pdb_key": f"designs/{upload_filename}",
                 "scores": r["scores"],
                 "sequence": r["sequence"],
-                "local_file": backbone_pdb,
-            }
-            candidates.append(candidate)
-            if upload_filename in upload_urls and os.path.exists(backbone_pdb):
-                try:
-                    upload_output(upload_urls[upload_filename], backbone_pdb)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload PDB for rank %d: %s", rank, exc)
-                    failed_uploads.append(upload_filename)
+                "local_file": pdb_path,
+            })
 
         # ----- Upload metrics CSV -----
         if candidates:
             csv_path = os.path.join(work_dir, "metrics.csv")
             write_metrics_csv(csv_path, candidates)
-            if "metrics.csv" in upload_urls:
-                try:
-                    upload_output(upload_urls["metrics.csv"], csv_path)
-                except RuntimeError as exc:
-                    logger.warning("Failed to upload metrics CSV: %s", exc)
-                    failed_uploads.append("metrics.csv")
+            if not _upload_one(upload_endpoint, job_token, "metrics.csv", csv_path):
+                failed_uploads.append("metrics.csv")
 
         elapsed_minutes = (time.time() - pipeline_start) / 60.0
         logger.info(
